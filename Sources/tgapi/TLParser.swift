@@ -3466,38 +3466,9 @@ extension TLParser {
         return Api.parse(reader, signature: signature) != nil
     }
 
-    /// The album case: every item in the vector is offered to voiceMedia, and
-    /// the whole vector is re-emitted only if at least one of them was ours.
-    private static func rewriteMultiMedia(_ payload: Data, reader: BufferReader) -> NSData? {
-        let vectorStart = Int(reader.offset)
-        guard reader.readInt32() == 481674261 else { return nil }   // Vector
-        guard let items = Api.parseVector(reader, elementSignature: 0,
-                                          elementType: Api.InputSingleMedia.self) else { return nil }
-        let vectorEnd = Int(reader.offset)
-
-        var changed = false
-        let rewritten: [Api.InputSingleMedia] = items.map { item in
-            guard case let .inputSingleMedia(data) = item,
-                  let media = voiceMedia(from: data.media) else { return item }
-            changed = true
-            return Api.InputSingleMedia.inputSingleMedia(
-                Api.InputSingleMedia.Cons_inputSingleMedia(
-                    flags: data.flags, media: media, randomId: data.randomId,
-                    message: data.message, entities: data.entities))
-        }
-        guard changed else { return nil }
-
-        let vectorBuffer = Buffer()
-        vectorBuffer.appendInt32(481674261)
-        vectorBuffer.appendInt32(Int32(rewritten.count))
-        for item in rewritten { item.serialize(vectorBuffer, true) }
-
-        var out = Data()
-        out.append(payload.subdata(in: 0 ..< vectorStart))
-        out.append(vectorBuffer.makeData())
-        out.append(payload.subdata(in: vectorEnd ..< payload.count))
-        return out as NSData
-    }
+    // Album/multi-media rewrite is intentionally skipped on Lead's API layer.
+    // This source tree does not expose Api.InputSingleMedia. Individual sends
+    // (voice files, video to voice and video notes) use messages.sendMedia.
 
     /// Rewrites the media inside an outgoing send request.
     ///
@@ -3506,7 +3477,6 @@ extension TLParser {
     /// understands — a constructor that changed shape after the media field
     /// cannot be corrupted by it.
     @objc static func rewriteVoiceUpload(_ data: NSData) -> NSData? {
-        let defaults = UserDefaults.standard
         // A media transfer can remain queued after the preview selection
         // resets. Registered uploads must still be detected on retry.
         let hasPendingVoice = voiceQueue.sync { !_voiceUploads.isEmpty }
@@ -3533,13 +3503,6 @@ extension TLParser {
                 guard parseString(reader) != nil else { return nil }     // business_connection_id
             }
             guard skipBoxed(reader) else { return nil }                  // peer
-        case 469278068:  // messages.sendMultiMedia — several clips picked at once
-            guard let flags = reader.readInt32() else { return nil }
-            guard skipBoxed(reader) else { return nil }                  // peer
-            if (Int(flags) & (1 << 0)) != 0 {
-                guard skipBoxed(reader) else { return nil }              // reply_to
-            }
-            return rewriteMultiMedia(payload, reader: reader)
         default:
             return nil
         }
