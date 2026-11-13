@@ -13,24 +13,14 @@ typedef NS_ENUM(NSInteger, LeadHomeSection) {
   LeadHomeSectionGhost = 0,
   LeadHomeSectionFeatures,
   LeadHomeSectionGeneral,
-  LeadHomeSectionAbout,
   LeadHomeSectionCount
 };
 
 typedef NS_ENUM(NSInteger, LeadGeneralRow) {
-  LeadGeneralRowCompat = 0,
-  LeadGeneralRowLanguage,
+  LeadGeneralRowLanguage = 0,
   LeadGeneralRowExport,
   LeadGeneralRowImport,
   LeadGeneralRowCount
-};
-
-typedef NS_ENUM(NSInteger, LeadAboutRow) {
-  LeadAboutRowDeveloper = 0,
-  LeadAboutRowSupport,
-  LeadAboutRowDisclaimer,
-  LeadAboutRowDebugLog,
-  LeadAboutRowCount
 };
 
 static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
@@ -253,14 +243,8 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 }
 
 - (void)setupFooter {
-  UILabel *footer = [UILabel new];
-  footer.numberOfLines = 0;
-  footer.textAlignment = NSTextAlignmentCenter;
-  footer.font = LeadFont(12, UIFontWeightRegular);
-  footer.textColor = UIColor.tertiaryLabelColor;
-  footer.text = [NSString stringWithFormat:@"Lead %@ (%@)\n© 2026 Lead Team", kLeadTweakVersion, kLeadTweakBuild];
-  footer.frame = CGRectMake(0, 0, 320, 72);
-  self.tableView.tableFooterView = footer;
+  // Intentionally no version or credits footer in the Kira fork UI.
+  self.tableView.tableFooterView = [UIView new];
 }
 
 #pragma mark - State
@@ -357,7 +341,6 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   case LeadHomeSectionGhost: return 1;
   case LeadHomeSectionFeatures: return self.pages.count;
   case LeadHomeSectionGeneral: return LeadGeneralRowCount;
-  case LeadHomeSectionAbout: return LeadAboutRowCount;
   }
   return 0;
 }
@@ -390,10 +373,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
     [cell showValue:[self valueForPage:page] chevron:YES];
     [cell.tile setActive:page.enabledCount > 0 animated:NO];
   } else if (indexPath.section == LeadHomeSectionGeneral) {
-    if (indexPath.row == LeadGeneralRowCompat) {
-      [cell configureTitle:LeadL(@"UI_COMPAT_TITLE") subtitle:LeadL(@"UI_COMPAT_SUBTITLE") symbol:@"checkmark.shield"];
-      [cell showValue:nil chevron:YES];
-    } else if (indexPath.row == LeadGeneralRowLanguage) {
+    if (indexPath.row == LeadGeneralRowLanguage) {
       NSString *code = [[NSUserDefaults standardUserDefaults] stringForKey:@"LeadLanguage"] ?: @"en";
       [cell configureTitle:LeadL(@"LANGUAGE_SECTION_HEADER") subtitle:nil symbol:@"globe"];
       [cell showValue:LeadLanguageNames()[code] ?: code chevron:YES];
@@ -403,26 +383,6 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
     } else {
       [cell configureTitle:LeadL(@"UI_IMPORT") subtitle:LeadL(@"UI_IMPORT_SUBTITLE") symbol:@"square.and.arrow.down"];
       [cell showValue:nil chevron:NO];
-    }
-  } else {
-    switch (indexPath.row) {
-    case LeadAboutRowDeveloper:
-      [cell configureTitle:@"w3ltyyy · Lead Team" subtitle:@"@Leadgramm" symbol:nil];
-      [cell.tile setImage:LeadLogoImage(60)];
-      [cell showValue:nil chevron:YES];
-      break;
-    case LeadAboutRowSupport:
-      [cell configureTitle:LeadL(@"UI_SUPPORT") subtitle:LeadL(@"UI_SUPPORT_SUBTITLE") symbol:@"heart"];
-      [cell showValue:nil chevron:YES];
-      break;
-    case LeadAboutRowDisclaimer:
-      [cell configureTitle:LeadL(@"DISCLAIMER") subtitle:LeadL(@"UI_DISCLAIMER_SUBTITLE") symbol:@"text.quote"];
-      [cell showValue:nil chevron:YES];
-      break;
-    case LeadAboutRowDebugLog:
-      [cell configureTitle:LeadL(@"UI_DEBUG_LOG") subtitle:nil symbol:@"ladybug"];
-      [cell showValue:nil chevron:YES];
-      break;
     }
   }
   return cell;
@@ -471,7 +431,6 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   if (!self.isSearching) {
     if (section == LeadHomeSectionFeatures) key = @"UI_SECTION_FEATURES";
     if (section == LeadHomeSectionGeneral) key = @"UI_SECTION_GENERAL";
-    if (section == LeadHomeSectionAbout) key = @"UI_SECTION_ABOUT";
   }
   if (!key) return nil;
   LeadSectionHeader *header = [tableView dequeueReusableHeaderFooterViewWithIdentifier:kHeaderId];
@@ -509,9 +468,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
     [self openPage:self.pages[indexPath.row]];
     break;
   case LeadHomeSectionGeneral:
-    if (indexPath.row == LeadGeneralRowCompat) {
-      [self.navigationController pushViewController:[LeadCompatViewController new] animated:YES];
-    } else if (indexPath.row == LeadGeneralRowLanguage) {
+    if (indexPath.row == LeadGeneralRowLanguage) {
       [self.navigationController pushViewController:[LanguageSelector new] animated:YES];
     } else if (indexPath.row == LeadGeneralRowExport) {
       LeadExportSettings(self);
@@ -519,35 +476,11 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
       LeadImportSettings(self);
     }
     break;
-  case LeadHomeSectionAbout:
-    [self openAboutRow:indexPath.row];
-    break;
   }
 }
 
 - (void)openPage:(LeadPage *)page {
   [self.navigationController pushViewController:[[LeadPageViewController alloc] initWithPage:page] animated:YES];
-}
-
-- (void)openAboutRow:(NSInteger)row {
-  switch (row) {
-  case LeadAboutRowDeveloper:
-    LeadOpenTelegramURL(@"https://t.me/Leadgramm");
-    break;
-  case LeadAboutRowSupport:
-    [self.navigationController pushViewController:[DonateViewController new] animated:YES];
-    break;
-  case LeadAboutRowDisclaimer:
-    [self.navigationController pushViewController:[[LeadTextViewController alloc] initWithTitle:LeadL(@"DISCLAIMER") text:LeadL(@"AUTHOR_MESSAGE") monospaced:NO]
-                                         animated:YES];
-    break;
-  case LeadAboutRowDebugLog: {
-    LeadTextViewController *log = [[LeadTextViewController alloc] initWithTitle:LeadL(@"UI_DEBUG_LOG") text:nil monospaced:YES];
-    log.filePath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/lead_debug.txt"];
-    [self.navigationController pushViewController:log animated:YES];
-    break;
-  }
-  }
 }
 
 #pragma mark - Scroll

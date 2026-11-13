@@ -712,47 +712,7 @@ void showUI() {
 // 
 
 
-static void showWelcomeAlertIfNeeded() {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if ([defaults boolForKey:@"LeadWelcomeShown"]) return;
-
-    UIWindow *window = LeadMainWindow();
-    UIViewController *rootVC = window.rootViewController;
-    if (!rootVC) return;
-
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Lead"
-        message:@"Lead has been successfully injected into Telegram.\n\nTo open the tweak menu: long-press the \"Ask a Question\" row in Settings."
-        preferredStyle:UIAlertControllerStyleAlert];
-
-    void (^markShown)(void) = ^{
-        [defaults setBool:YES forKey:@"LeadWelcomeShown"];
-        [defaults synchronize];
-    };
-
-    UIAlertAction *channelAction = [UIAlertAction
-        actionWithTitle:@"Join Channel →"
-                  style:UIAlertActionStyleDefault
-                handler:^(UIAlertAction *action) {
-        markShown();
-        NSURL *url = [NSURL URLWithString:@"https://t.me/Leadgramm"];
-        if ([[UIApplication sharedApplication] canOpenURL:url]) {
-            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        }
-    }];
-
-    UIAlertAction *okAction = [UIAlertAction
-        actionWithTitle:@"OK"
-                  style:UIAlertActionStyleCancel
-                handler:^(UIAlertAction *action) {
-        markShown();
-    }];
-
-    [alert addAction:channelAction];
-    [alert addAction:okAction];
-
-    [rootVC presentViewController:alert animated:YES completion:nil];
-}
+// Welcome / join-channel modal intentionally disabled in this fork.
 
 #import "../Headers.h"
 
@@ -1810,9 +1770,6 @@ static void hook() {
             NSLog(@"[Lead] CallConfirmHooks init failed: %@", e);
         }
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            showWelcomeAlertIfNeeded();
-        });
 
     });
  }
