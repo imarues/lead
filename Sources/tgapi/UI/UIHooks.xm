@@ -1776,6 +1776,25 @@ static void hook() {
         kGhostPeerKeys: @[]
     }];
 
+    // Apply the requested switches once on existing installs as well as fresh ones.
+    // This does not keep forcing the switches back on after the user edits them.
+    NSUserDefaults *leadDefaults = [NSUserDefaults standardUserDefaults];
+    static NSString *const kLeadMediaDefaultsMigration = @"LeadKiraMediaDefaultsV1";
+    if (![leadDefaults boolForKey:kLeadMediaDefaultsMigration]) {
+        for (NSString *key in @[
+            kDisableForwardRestriction,
+            kDisableAllAds,
+            kHideProxyPromo,
+            kHideTTLLabel,
+            kDisableScreenshotNotification,
+            FILE_PICKER_FIX_KEY,
+            kSendAsVoice
+        ]) {
+            [leadDefaults setBool:YES forKey:key];
+        }
+        [leadDefaults setBool:YES forKey:kLeadMediaDefaultsMigration];
+    }
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         %init(
             _TtC10TelegramUI18ChatControllerImpl = objc_getClass("_TtC10TelegramUI18ChatControllerImpl")
