@@ -3511,8 +3511,10 @@ extension TLParser {
         // resets. Registered uploads must still be detected on retry.
         let hasPendingVoice = voiceQueue.sync { !_voiceUploads.isEmpty }
         let hasPendingRound = roundQueue.sync { !_roundUploads.isEmpty }
-        guard hasPendingVoice || hasPendingRound ||
-              defaults.bool(forKey: "LeadSendAsVoice") else { return nil }
+        // The Files picker registers only when the user chooses "Send as voice".
+        // The plain-file choice must never be rewritten just because the
+        // feature's popup is enabled in Lead settings.
+        guard hasPendingVoice || hasPendingRound else { return nil }
 
         let payload = data as Data
         let reader = BufferReader(Buffer(data: payload))
