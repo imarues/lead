@@ -6,12 +6,19 @@ permissions:
     contents: read
 
 on:
-    pull_request:
+    push:
+        branches:
+            - main
     workflow_dispatch:
+
+# Avoid accumulating duplicate builds of the same public main branch.
+concurrency:
+    group: lead-main-build
+    cancel-in-progress: true
 
 jobs:
     build:
-        runs-on: macos-latest
+        runs-on: macos-15
         steps:
             - uses: actions/checkout@v4
 
