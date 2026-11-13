@@ -275,7 +275,7 @@ static NSError *LeadRecorderError(NSString *detail) {
 }
 @end
 
-@interface LeadCallRecordingsViewController ()
+@interface LeadCallRecordingsViewController () <UISearchResultsUpdating>
 @property(nonatomic,strong) NSArray<NSURL *> *allFiles;
 @property(nonatomic,strong) NSArray<NSURL *> *visibleFiles;
 @property(nonatomic,strong) UISearchController *search;
@@ -293,15 +293,14 @@ static NSError *LeadRecorderError(NSString *detail) {
     self.search=[[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.obscuresBackgroundDuringPresentation=NO;
     self.search.searchBar.placeholder=@"بحث في التسجيلات";
-    [self.search.searchBar addTarget:self action:@selector(searchChanged)
-                   forControlEvents:UIControlEventEditingChanged];
+    self.search.searchResultsUpdater=self;
     self.navigationItem.searchController=self.search;
     self.definesPresentationContext=YES;
     [self reloadFiles];
 }
 - (void)viewWillAppear:(BOOL)animated {[super viewWillAppear:animated];[self reloadFiles];}
 - (void)toggleSort {self.ascending=!self.ascending;[self reloadFiles];}
-- (void)searchChanged {[self filterFiles];}
+- (void)updateSearchResultsForSearchController:(__unused UISearchController *)controller {[self filterFiles];}
 - (void)reloadFiles {
     self.allFiles=[LeadCallRecording recordings];
     if(self.ascending)self.allFiles=self.allFiles.reverseObjectEnumerator.allObjects;
