@@ -18,7 +18,9 @@ concurrency:
 
 jobs:
     build:
-        runs-on: macos-15
+        # Intel runner pool has separate capacity from Apple Silicon.
+        # Theos still cross-compiles arm64 and arm64e iOS dylibs.
+        runs-on: macos-15-intel
         steps:
             - uses: actions/checkout@v4
 
