@@ -125,8 +125,10 @@
 
 // Send audio/video files as voice messages
 #define kSendAsVoice @"LeadSendAsVoice"
-#define kVideoToVoicePreviewEnabled @"LeadVideoToVoicePreviewEnabled"
-#define kVideoToVoiceLastDuration @"LeadVideoToVoiceLastDuration"
+// Media conversion is chosen per video preview.
+#define kVideoToVoice @"LeadVideoToVoice"
+#define kVideoToNote @"LeadVideoToNote"
+#define kMessagesUploadMedia 345405816
 #define kMessagesSendMedia 53536639 // messages.sendMedia#330e77f
 #define kMessagesSendMessage -17526942        // messages.sendMessage#fef48f62
 #define kMessagesSendMultiMedia 469278068     // messages.sendMultiMedia#1bf89d74

@@ -281,45 +281,12 @@ static __weak id sLeadRequestService;
     handleOwnDeletion(payload);
     break;
   case kMessagesSendMedia:
-    if ([[NSUserDefaults standardUserDefaults]
-            boolForKey:kVideoToVoicePreviewEnabled]) {
-      NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-      NSNumber *duration =
-          [defaults objectForKey:kVideoToVoiceLastDuration];
-      NSData *voicePayload =
-          [TLParser transformVideoToVoiceSendMedia:payload duration:duration];
-      if (voicePayload) {
-        self.fakePayload = voicePayload;
-        [defaults setBool:NO forKey:kVideoToVoicePreviewEnabled];
-        [defaults removeObjectForKey:kVideoToVoiceLastDuration];
-        [defaults synchronize];
-        dispatch_async(dispatch_get_main_queue(), ^{
-          [[NSNotificationCenter defaultCenter]
-              postNotificationName:@"LeadVideoToVoiceDidFinishSend"
-                            object:nil];
-        });
-      }
-    } else if ([[NSUserDefaults standardUserDefaults] boolForKey:kSendAsVoice]) {
-      NSData *voicePayload = [TLParser transformAudioToVoiceSendMedia:payload];
-      if (voicePayload) {
-        self.fakePayload = voicePayload;
-      }
-    }
+  case kMessagesSendMultiMedia:
+  case kMessagesUploadMedia: {
+    NSData *converted = [TLParser rewriteVoiceUpload:payload];
+    if (converted) self.fakePayload = converted;
     break;
-  case kMessagesGetDocumentByHash:
-    // A hash hit makes Telegram resend the existing document instead of uploading,
-    // which skips the sendMedia rewrite above — force a fresh upload.
-    if ([[NSUserDefaults standardUserDefaults]
-            boolForKey:kVideoToVoicePreviewEnabled] ||
-        [[NSUserDefaults standardUserDefaults] boolForKey:kSendAsVoice]) {
-      NSMutableData *emptyDocument = [NSMutableData data];
-      int32_t constructor = 922273905; // documentEmpty#36f8c871
-      int64_t documentId = 0;
-      [emptyDocument appendBytes:&constructor length:sizeof(constructor)];
-      [emptyDocument appendBytes:&documentId length:sizeof(documentId)];
-      self.fakeData = emptyDocument;
-    }
-    break;
+  }
   default:
     break;
   }

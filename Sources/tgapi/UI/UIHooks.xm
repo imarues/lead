@@ -31,16 +31,6 @@
 @property (nonatomic, strong) id peer;
 @end
 
-@interface TGMediaVideoConverter : NSObject
-+ (id)hashForAVAsset:(AVAsset *)avAsset adjustments:(id)adjustments;
-@end
-
-@interface TGVideoEditAdjustments : NSObject
-+ (instancetype)editAdjustmentsWithDictionary:(NSDictionary *)dictionary;
-- (NSTimeInterval)trimStartValue;
-- (NSTimeInterval)trimEndValue;
-@end
-
 @interface LegacyComponentsGlobals : NSObject
 + (id)provider;
 @end
@@ -71,7 +61,6 @@ static BOOL LeadIsUsableGhostTitle(NSString *title);
 static BOOL LeadIsCurrentUserPeer(long long peerId);
 static long long LeadPeerIdFromObject(id object);
 static char LeadEditHistoryTapGestureKey;
-static char LeadVideoToVoiceButtonKey;
 
 static UIViewController *LeadTopViewController(void) {
     UIViewController *root = LeadTopPresenter();
@@ -518,170 +507,11 @@ static NSString *LeadVisualStarsReplacementForText(NSString *text, UIView *view)
 %end
 
 
-@interface LeadVideoToVoiceTarget : NSObject
-+ (instancetype)shared;
-- (void)toggle:(UIButton *)button;
-- (void)sendDidFinish:(NSNotification *)notification;
-@end
-
-@implementation LeadVideoToVoiceTarget
-+ (instancetype)shared {
-    static LeadVideoToVoiceTarget *target = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        target = [LeadVideoToVoiceTarget new];
-        [[NSNotificationCenter defaultCenter] addObserver:target
-                                                 selector:@selector(sendDidFinish:)
-                                                     name:@"LeadVideoToVoiceDidFinishSend"
-                                                   object:nil];
-    });
-    return target;
-}
-
-- (void)sendDidFinish:(__unused NSNotification *)notification {
-    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kVideoToVoicePreviewEnabled];
-}
-
-- (void)toggle:(UIButton *)button {
-    BOOL enabled = !button.selected;
-    button.selected = enabled;
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setBool:enabled forKey:kVideoToVoicePreviewEnabled];
-    if (!enabled) {
-        [defaults removeObjectForKey:kVideoToVoiceLastDuration];
-    }
-    [defaults synchronize];
-
-    if (@available(iOS 10.0, *)) {
-        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [feedback impactOccurred];
-    }
-    button.backgroundColor = enabled ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.92] : [[UIColor blackColor] colorWithAlphaComponent:0.28];
-    button.layer.borderWidth = enabled ? 1.5 : 0.0;
-    button.layer.borderColor = enabled ? UIColor.whiteColor.CGColor : UIColor.clearColor.CGColor;
-
-    LeadVideoToVoiceToast(enabled ? @"Video will be sent as voice" : @"Video will be sent normally",
-                          [[UIColor blackColor] colorWithAlphaComponent:0.78]);
-}
-@end
-
-static UIImage *LeadVideoToVoiceIcon(BOOL selected) {
-    UIImage *image = nil;
-    if (@available(iOS 13.0, *)) {
-        image = [UIImage systemImageNamed:selected ? @"waveform.circle.fill" : @"waveform.circle"];
-    }
-    return image ?: [UIImage systemImageNamed:@"mic.circle"];
-}
-
-static void LeadUpdateVideoToVoiceButtonStyle(UIButton *button, BOOL enabled) {
-    button.selected = enabled;
-    button.backgroundColor = enabled ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.92] : [[UIColor blackColor] colorWithAlphaComponent:0.28];
-    button.layer.borderWidth = enabled ? 1.5 : 0.0;
-    button.layer.borderColor = enabled ? UIColor.whiteColor.CGColor : UIColor.clearColor.CGColor;
-}
-
-static UIButton *LeadEnsureVideoToVoiceButton(id interfaceView) {
-    UIButton *button = objc_getAssociatedObject(interfaceView, &LeadVideoToVoiceButtonKey);
-    if (button) return button;
-
-    UIView *wrapper = nil;
-    Ivar wrapperIvar = class_getInstanceVariable([interfaceView class], "_wrapperView");
-    if (wrapperIvar) {
-        wrapper = object_getIvar(interfaceView, wrapperIvar);
-    }
-    if (!wrapper) return nil;
-
-    button = [UIButton buttonWithType:UIButtonTypeCustom];
-    button.frame = CGRectMake(0, 0, 40.0, 40.0);
-    button.adjustsImageWhenHighlighted = YES;
-    button.tintColor = UIColor.whiteColor;
-    button.layer.cornerRadius = 20.0;
-    button.layer.masksToBounds = YES;
-    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kVideoToVoicePreviewEnabled];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kVideoToVoiceLastDuration];
-    [button setImage:LeadVideoToVoiceIcon(NO) forState:UIControlStateNormal];
-    [button setImage:LeadVideoToVoiceIcon(YES) forState:UIControlStateSelected];
-    LeadUpdateVideoToVoiceButtonStyle(button, NO);
-    [button addTarget:[LeadVideoToVoiceTarget shared] action:@selector(toggle:) forControlEvents:UIControlEventTouchUpInside];
-    [wrapper addSubview:button];
-    objc_setAssociatedObject(interfaceView, &LeadVideoToVoiceButtonKey, button, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return button;
-}
-
-static void LeadLayoutVideoToVoiceButton(id interfaceView) {
-    UIButton *button = LeadEnsureVideoToVoiceButton(interfaceView);
-    if (!button) return;
-
-    UIView *anchor = nil;
-    // Telegram: _roundVideoButton sits to the right of _muteButton.
-    Ivar roundIvar = class_getInstanceVariable([interfaceView class], "_roundVideoButton");
-    if (roundIvar) {
-        UIView *v = object_getIvar(interfaceView, roundIvar);
-        if (v && !v.hidden) anchor = v;
-    }
-    // Swiftgram: replaces _roundVideoButton with _telescopeButton (same position).
-    if (!anchor) {
-        Ivar telescopeIvar = class_getInstanceVariable([interfaceView class], "_telescopeButton");
-        if (telescopeIvar) {
-            UIView *v = object_getIvar(interfaceView, telescopeIvar);
-            if (v && !v.hidden) anchor = v;
-        }
-    }
-    // Last resort: mute button (visible when video can be sent as GIF).
-    if (!anchor) {
-        Ivar muteIvar = class_getInstanceVariable([interfaceView class], "_muteButton");
-        if (muteIvar) anchor = object_getIvar(interfaceView, muteIvar);
-    }
-    if (!anchor) {
-        button.hidden = YES;
-        return;
-    }
-    button.hidden = anchor.hidden;
-    button.alpha = anchor.alpha;
-    button.userInteractionEnabled = !button.hidden;
-    LeadUpdateVideoToVoiceButtonStyle(button, [[NSUserDefaults standardUserDefaults] boolForKey:kVideoToVoicePreviewEnabled]);
-    button.frame = CGRectMake(CGRectGetMaxX(anchor.frame) + 8.0, anchor.frame.origin.y, 40.0, 40.0);
-}
-
 // Copy protection, ads and voice flags are handled at the MTProto layer
 // (TLParser / FunctionHandler): Postbox.Message, TelegramMediaFile,
 // ChatPresentationInterfaceState and LocalFileVideoMediaResource are pure
 // Swift classes whose properties never go through objc_msgSend, so hooks on
 // them never fired.
-
-%hook TGMediaVideoConverter
-
-+ (id)hashForAVAsset:(AVAsset *)avAsset adjustments:(id)adjustments {
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:kVideoToVoicePreviewEnabled]) {
-        Class signalClass = NSClassFromString(@"SSignal");
-        if (signalClass && [signalClass respondsToSelector:@selector(single:)]) {
-            return ((id (*)(Class, SEL, id))objc_msgSend)(signalClass, @selector(single:), nil);
-        }
-    }
-    return %orig;
-}
-
-%end
-
-%hook TGMediaPickerGalleryInterfaceView
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIButton *button = objc_getAssociatedObject(self, &LeadVideoToVoiceButtonKey);
-    if (button && !button.hidden && button.alpha > 0.01 && button.userInteractionEnabled) {
-        CGPoint buttonPoint = [button convertPoint:point fromView:(UIView *)self];
-        if ([button pointInside:buttonPoint withEvent:event]) {
-            return [button hitTest:buttonPoint withEvent:event] ?: button;
-        }
-    }
-    return %orig;
-}
-
-- (void)layoutSubviews {
-    %orig;
-    LeadLayoutVideoToVoiceButton(self);
-}
-
-%end
 
 %hook TGLocalization
 - (id)get:(id)key {
@@ -1902,7 +1732,17 @@ static void hook() {
     [LeadDeletionBanner install];
     
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
-        kDisableAllAds: @NO,
+        kDisableAllAds: @YES,
+        kDisableForwardRestriction: @YES,
+        kDisableScreenshotNotification: @YES,
+        kHideProxyPromo: @YES,
+        FILE_PICKER_FIX_KEY: @YES,
+        kSendAsVoice: @YES,
+        kVideoToVoice: @NO,
+        kVideoToNote: @NO,
+        // Do not automatically unlock age-restricted media or 18+ server content.
+        kShowIosRestricted: @NO,
+        kSensitiveContent: @NO,
         kGhostModeEnabled: @NO,
         kAntiRevoke: @NO,
         kAntiEdit: @NO,
@@ -1929,7 +1769,7 @@ static void hook() {
         kDisableEmojiInteractionStatus: @NO,
         kDisableEmojiAcknowledgementStatus: @NO,
         kConfirmCalls: @YES,
-        kHideTTLLabel: @NO,
+        kHideTTLLabel: @YES,
         kVisualStarsEnabled: @NO,
         kVisualStarsAmount: @0,
         kGhostPeerRecords: @[],

@@ -4,6 +4,9 @@
 #import "Constants.h"
 
 @interface TLParser : NSObject
++ (void)registerVoiceUploadWithFileName:(NSString *)fileName duration:(NSInteger)duration waveform:(NSData *)waveform;
++ (void)registerRoundVideoUploadWithFileName:(NSString *)fileName duration:(NSInteger)duration;
++ (NSData *)rewriteVoiceUpload:(NSData *)data;
 + (NSData *)handleResponse:(NSData *)data functionID:(NSNumber *)ios;
 + (void)addDeletedId:(int32_t)msgId;
 + (void)addDeletedId:(int32_t)msgId channelId:(int64_t)channelId;
