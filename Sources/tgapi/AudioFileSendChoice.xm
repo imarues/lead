@@ -399,7 +399,13 @@ static void kiraInstallPickerDelegateHooks(Class cls) {
     NSString *name = NSStringFromClass(cls);
     // Only Telegram's Files attachment delegate. Other document pickers,
     // including certificate/file utilities, are intentionally unaffected.
-    if ([name rangeOfString:@"LegacyICloudFileController"].location == NSNotFound)
+    // MX uses "LegacyICloudFileController"; Lead's current picker is
+    // "LegacyMediaPickerUIICloudFileController". Accept both, but do not
+    // touch unrelated system/document pickers.
+    BOOL mxLegacy = [name containsString:@"LegacyICloudFileController"];
+    BOOL leadLegacy = [name containsString:@"LegacyMediaPickerUI"] &&
+                      [name containsString:@"ICloudFileController"];
+    if (!mxLegacy && !leadLegacy)
         return;
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
