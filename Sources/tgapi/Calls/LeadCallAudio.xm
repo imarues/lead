@@ -330,7 +330,8 @@ extern "C" void LeadCallAudioStop(void (^completion)(NSURL *,NSError *)) {
             if(![track insertTimeRange:CMTimeRangeMake(kCMTimeZero,source.timeRange.duration)
                             ofTrack:source atTime:kCMTimeZero error:&composeError])break;
             AVMutableAudioMixInputParameters *params=[AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track];
-            [params setVolume:0.8 atTime:kCMTimeZero];[mixParameters addObject:params];
+            // Preserve full captured voice levels; do not attenuate each side to 80%.
+            [params setVolume:1.0 atTime:kCMTimeZero];[mixParameters addObject:params];
         }
         if(composeError) {
             dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(nil,composeError);});

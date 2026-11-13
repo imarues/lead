@@ -26,6 +26,7 @@ static BOOL leadGroupHooksInstalled=NO;
 @property(nonatomic,strong) LeadRecordingHUDWindow *hudWindow;
 @property(nonatomic,strong) UIButton *hudButton;
 @property(nonatomic,strong) NSTimer *elapsedTimer;
+@property(nonatomic,assign) BOOL hudMovedByUser;
 + (instancetype)shared;
 - (void)pressed:(UIButton *)button;
 - (void)dragged:(UIPanGestureRecognizer *)pan;
@@ -104,6 +105,10 @@ static BOOL leadGroupHooksInstalled=NO;
     badge.accessibilityLabel=@"إيقاف تسجيل المكالمة";
     [badge addTarget:self action:@selector(pressed:)
         forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *move=[[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                    action:@selector(dragged:)];
+    move.maximumNumberOfTouches=1;
+    [badge addGestureRecognizer:move];
     [controller.view addSubview:badge];
     self.hudWindow=window;
     self.hudButton=badge;
@@ -121,7 +126,16 @@ static BOOL leadGroupHooksInstalled=NO;
             CGRect bounds=window.bounds;
             UIEdgeInsets insets=window.safeAreaInsets;
             CGFloat top=MAX(insets.top+10,60.0);
-            badge.frame=CGRectMake(MAX(8,bounds.size.width-128),top,115,44);
+            if(!self.hudMovedByUser)
+                badge.frame=CGRectMake(MAX(8,bounds.size.width-128),top,115,44);
+            else {
+                // Keep a dragged badge at its selected position on every tick,
+                // clamping it back on screen after a device rotation.
+                CGPoint center=badge.center;
+                center.x=MAX(badge.bounds.size.width/2+5,MIN(bounds.size.width-badge.bounds.size.width/2-5,center.x));
+                center.y=MAX(top+badge.bounds.size.height/2,MIN(bounds.size.height-MAX(insets.bottom,10)-badge.bounds.size.height/2,center.y));
+                badge.center=center;
+            }
             [badge setTitle:[NSString stringWithFormat:@"■ %@",[self timeLabel]]
                    forState:UIControlStateNormal];
         }
@@ -136,6 +150,7 @@ static BOOL leadGroupHooksInstalled=NO;
         self.hudWindow.hidden=YES;
         self.hudButton=nil;
         self.hudWindow=nil;
+        self.hudMovedByUser=NO;
     }
     [self update:self.currentCallButton];
 }
@@ -148,8 +163,17 @@ static BOOL leadGroupHooksInstalled=NO;
     UIView *v=pan.view,*parent=v.superview;
     if(!parent)return;
     CGPoint delta=[pan translationInView:parent];
-    v.center=CGPointMake(MIN(MAX(v.center.x+delta.x,35),parent.bounds.size.width-35),
-                         MIN(MAX(v.center.y+delta.y,70),parent.bounds.size.height-70));
+    UIEdgeInsets insets=UIEdgeInsetsZero;
+    if(v==self.hudButton) {
+        self.hudMovedByUser=YES;
+        insets=self.hudWindow.safeAreaInsets;
+    }
+    CGFloat halfWidth=v.bounds.size.width/2.0;
+    CGFloat halfHeight=v.bounds.size.height/2.0;
+    CGFloat minY=MAX(halfHeight+10,insets.top+halfHeight+5);
+    CGFloat maxY=MAX(minY,parent.bounds.size.height-MAX(insets.bottom,10)-halfHeight);
+    v.center=CGPointMake(MAX(halfWidth+5,MIN(parent.bounds.size.width-halfWidth-5,v.center.x+delta.x)),
+                         MAX(minY,MIN(maxY,v.center.y+delta.y)));
     [pan setTranslation:CGPointZero inView:parent];
 }
 - (void)begin:(UIButton *)button video:(BOOL)video {
@@ -180,10 +204,12 @@ static BOOL leadGroupHooksInstalled=NO;
         [recorder stop:^(NSURL *file,NSError *error){
             button.enabled=YES;
             [self update:button];
-            NSString *message=error?error.localizedDescription:
-                [NSString stringWithFormat:@"تم حفظ التسجيل: %@",file.lastPathComponent];
+            NSString *message=(file && error)?
+                [NSString stringWithFormat:@"تم حفظ الصوت فقط في: %@\n%@",file.lastPathComponent,error.localizedDescription]:
+                (error?error.localizedDescription:
+                [NSString stringWithFormat:@"تم حفظ التسجيل: %@",file.lastPathComponent]);
             UIAlertController *result=[UIAlertController alertControllerWithTitle:
-               (error?@"التسجيل غير مكتمل":@"تم حفظ التسجيل") message:message
+               (file && error?@"تم حفظ الصوت فقط":error?@"التسجيل غير مكتمل":@"تم حفظ التسجيل") message:message
                preferredStyle:UIAlertControllerStyleAlert];
             [result addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
             UIViewController *top=LeadTopPresenter();

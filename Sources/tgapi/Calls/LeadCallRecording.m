@@ -22,6 +22,8 @@ static NSError *LeadRecorderError(NSString *detail) {
 @property(nonatomic,assign) CFTimeInterval startTime;
 @property(nonatomic,assign) CGSize size;
 @property(nonatomic,assign) NSUInteger frameCount;
+@property(nonatomic,copy) NSString *lastCaptureIssue;
+@property(nonatomic,assign) NSUInteger droppedFrameCount;
 - (BOOL)startForView:(UIView *)view path:(NSString *)path error:(NSError **)error;
 - (void)stop:(void (^)(NSURL *url, NSError *error))completion;
 @end
@@ -60,7 +62,7 @@ static NSError *LeadRecorderError(NSString *detail) {
     self.input=[AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:settings];
     self.input.expectsMediaDataInRealTime=YES;
     NSDictionary *attrs=@{
-       (NSString *)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32ARGB),
+       (NSString *)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA),
        (NSString *)kCVPixelBufferWidthKey:@(width),
        (NSString *)kCVPixelBufferHeightKey:@(height),
        (NSString *)kCVPixelBufferCGImageCompatibilityKey:@YES,
@@ -77,65 +79,127 @@ static NSError *LeadRecorderError(NSString *detail) {
     self.displayLink=[CADisplayLink displayLinkWithTarget:self selector:@selector(captureFrame:)];
     self.displayLink.preferredFramesPerSecond=30;
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    // Capture the first frame immediately, even for short recordings.
+    [self captureFrame:nil];
     return YES;
 }
 - (UIView *)captureViewForCurrentTelegramScreen {
-    // Prefer the foreground key window belonging to the same Telegram scene.
-    // Overlay windows (the green REC badge) are deliberately not selected.
+    // Keep following Telegram's normal key window while the user browses chats.
+    // IMPORTANT: UIWindow.window can be nil on a UIWindow itself; never use it
+    // as the capture gate. Prefer the actual attached root content UIView.
+    UIWindow *window=nil;
     UIWindowScene *scene=self.originalWindow.windowScene;
     if(scene) {
         for(UIWindow *candidate in scene.windows) {
             if(candidate.isKeyWindow && !candidate.hidden &&
-               candidate.windowLevel==UIWindowLevelNormal && candidate.rootViewController)
-                return candidate;
+               candidate.windowLevel==UIWindowLevelNormal && candidate.rootViewController) {
+                window=candidate;
+                break;
+            }
         }
     }
-    for(UIScene *candidateScene in UIApplication.sharedApplication.connectedScenes) {
-        if(![candidateScene isKindOfClass:[UIWindowScene class]] ||
-           candidateScene.activationState!=UISceneActivationStateForegroundActive)continue;
-        for(UIWindow *candidate in ((UIWindowScene *)candidateScene).windows) {
-            if(candidate.isKeyWindow && !candidate.hidden &&
-               candidate.windowLevel==UIWindowLevelNormal && candidate.rootViewController)
-                return candidate;
+    if(!window) {
+        for(UIScene *candidateScene in UIApplication.sharedApplication.connectedScenes) {
+            if(![candidateScene isKindOfClass:[UIWindowScene class]] ||
+               candidateScene.activationState!=UISceneActivationStateForegroundActive)continue;
+            for(UIWindow *candidate in ((UIWindowScene *)candidateScene).windows) {
+                if(candidate.isKeyWindow && !candidate.hidden &&
+                   candidate.windowLevel==UIWindowLevelNormal && candidate.rootViewController) {
+                    window=candidate;
+                    break;
+                }
+            }
+            if(window)break;
         }
     }
-    UIWindow *previous=self.originalWindow;
-    return (previous && !previous.hidden && previous.rootViewController)?previous:nil;
+    if(!window && self.originalWindow && !self.originalWindow.hidden)
+        window=self.originalWindow;
+    if(!window)return nil;
+    UIView *content=window.rootViewController.view;
+    // If UIKit is between presentations use the window itself as a fallback.
+    return (content && content.window==window && !CGRectIsEmpty(content.bounds))?content:window;
 }
 - (void)captureFrame:(__unused CADisplayLink *)link {
     UIView *view=[self captureViewForCurrentTelegramScreen];
-    if(!view || !view.window || !self.input.readyForMoreMediaData ||
-       self.writer.status!=AVAssetWriterStatusWriting ||
-       !self.adaptor.pixelBufferPool)return;
+    if(!view || CGRectIsEmpty(view.bounds)) {
+        self.lastCaptureIssue=@"Telegram capture view is not visible.";
+        return;
+    }
+    if(self.writer.status!=AVAssetWriterStatusWriting) {
+        self.lastCaptureIssue=self.writer.error.localizedDescription?:@"Video writer is no longer writing.";
+        return;
+    }
+    if(!self.input.readyForMoreMediaData) {
+        self.droppedFrameCount++;
+        return;
+    }
+
     CVPixelBufferRef pixel=NULL;
-    if(CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault,self.adaptor.pixelBufferPool,&pixel)!=kCVReturnSuccess)return;
-    CVPixelBufferLockBaseAddress(pixel,0);
+    CVReturn result=kCVReturnError;
+    CVPixelBufferPoolRef pool=self.adaptor.pixelBufferPool;
+    if(pool)
+        result=CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault,pool,&pixel);
+    if(!pixel) {
+        // On some versions the adaptor's pool is not available immediately.
+        // A manually created compatible BGRA buffer is valid for appendPixelBuffer.
+        NSDictionary *attrs=@{(NSString *)kCVPixelBufferCGImageCompatibilityKey:@YES,
+                              (NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey:@YES,
+                              (NSString *)kCVPixelBufferIOSurfacePropertiesKey:@{}};
+        result=CVPixelBufferCreate(kCFAllocatorDefault,(size_t)self.size.width,
+                                   (size_t)self.size.height,kCVPixelFormatType_32BGRA,
+                                   (__bridge CFDictionaryRef)attrs,&pixel);
+    }
+    if(result!=kCVReturnSuccess || !pixel) {
+        self.lastCaptureIssue=[NSString stringWithFormat:@"Video pixel buffer error: %d",(int)result];
+        return;
+    }
+
+    CVReturn lockResult=CVPixelBufferLockBaseAddress(pixel,0);
+    if(lockResult!=kCVReturnSuccess) {
+        self.lastCaptureIssue=@"Cannot lock video pixel buffer.";
+        CVPixelBufferRelease(pixel);
+        return;
+    }
     void *buffer=CVPixelBufferGetBaseAddress(pixel);
     size_t stride=CVPixelBufferGetBytesPerRow(pixel);
+    if(!buffer || !stride) {
+        self.lastCaptureIssue=@"Video pixel buffer has no writable memory.";
+        CVPixelBufferUnlockBaseAddress(pixel,0);
+        CVPixelBufferRelease(pixel);
+        return;
+    }
     CGColorSpaceRef colorSpace=CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx=CGBitmapContextCreate(buffer,(size_t)self.size.width,(size_t)self.size.height,8,stride,
-                     colorSpace,kCGImageAlphaNoneSkipFirst);
+    CGContextRef ctx=CGBitmapContextCreate(buffer,(size_t)self.size.width,(size_t)self.size.height,
+                   8,stride,colorSpace,kCGBitmapByteOrder32Little|kCGImageAlphaPremultipliedFirst);
     CGColorSpaceRelease(colorSpace);
-    // drawViewHierarchyInRect captures the current Telegram call layout. Some
-    // hardware-backed video surfaces can still be black on particular clients.
-    if(ctx) {
-        CGContextClearRect(ctx,CGRectMake(0,0,self.size.width,self.size.height));
-        // UIKit draws into a top-left-origin context. CGBitmapContext's default
-        // bottom-left origin otherwise exports the entire call screen inverted
-        // vertically (including Arabic text and the visible REC indicator).
-        // Flip only the raster coordinates; the recorded audio is untouched.
-        CGContextTranslateCTM(ctx,0,self.size.height);
-        CGContextScaleCTM(ctx,1.0,-1.0);
-        UIGraphicsPushContext(ctx);
-        CGContextScaleCTM(ctx,self.size.width/MAX(view.bounds.size.width,1),
-                              self.size.height/MAX(view.bounds.size.height,1));
-        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
-        UIGraphicsPopContext();
-        CGContextRelease(ctx);
-        NSTimeInterval elapsed=MAX(0,CACurrentMediaTime()-self.startTime);
-        CMTime time=CMTimeMakeWithSeconds(elapsed,600);
-        if([self.adaptor appendPixelBuffer:pixel withPresentationTime:time])
-            self.frameCount++;
+    if(!ctx) {
+        self.lastCaptureIssue=@"Cannot create BGRA bitmap render context.";
+        CVPixelBufferUnlockBaseAddress(pixel,0);
+        CVPixelBufferRelease(pixel);
+        return;
+    }
+    CGContextClearRect(ctx,CGRectMake(0,0,self.size.width,self.size.height));
+    // UIKit top-left origin: keep text and call controls upright.
+    CGContextTranslateCTM(ctx,0,self.size.height);
+    CGContextScaleCTM(ctx,1.0,-1.0);
+    CGContextScaleCTM(ctx,self.size.width/MAX(view.bounds.size.width,1),
+                          self.size.height/MAX(view.bounds.size.height,1));
+    UIGraphicsPushContext(ctx);
+    BOOL drawn=[view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
+    UIGraphicsPopContext();
+    if(!drawn) {
+        // CALayer fallback avoids a zero-frame recording if UIKit declines
+        // a snapshot during a Telegram transition or on a specific iOS build.
+        [view.layer renderInContext:ctx];
+    }
+    CGContextRelease(ctx);
+    NSTimeInterval elapsed=MAX(0,CACurrentMediaTime()-self.startTime);
+    CMTime presentationTime=CMTimeMakeWithSeconds(elapsed,600);
+    if([self.adaptor appendPixelBuffer:pixel withPresentationTime:presentationTime]) {
+        self.frameCount++;
+        self.lastCaptureIssue=nil;
+    } else {
+        self.lastCaptureIssue=self.writer.error.localizedDescription?:@"Video writer rejected the captured frame.";
     }
     CVPixelBufferUnlockBaseAddress(pixel,0);
     CVPixelBufferRelease(pixel);
@@ -144,7 +208,10 @@ static NSError *LeadRecorderError(NSString *detail) {
     [self.displayLink invalidate];
     self.displayLink=nil;
     if(self.frameCount==0) {
-        if(completion)completion(nil,LeadRecorderError(@"No video frames were captured."));
+        [self.writer cancelWriting];
+        NSString *detail=self.lastCaptureIssue?:@"No frames reached the video writer.";
+        if(completion)completion(nil,LeadRecorderError(
+            [NSString stringWithFormat:@"No video frames were captured. %@",detail]));
         return;
     }
     [self.input markAsFinished];
@@ -301,7 +368,17 @@ static NSError *LeadRecorderError(NSString *detail) {
                 return;
             }
             if(videoError) {
-                if(completion)completion(nil,videoError);
+                // Never lose a valid two-sided audio track just because
+                // iOS rejects the video frames on this device.
+                [strongSelf finishOutputAudio:audioFile video:nil completion:^(NSURL *savedAudio,NSError *savingError) {
+                    if(!savingError && savedAudio) {
+                        NSError *warning=[NSError errorWithDomain:@"Lead.CallRecorder" code:2
+                         userInfo:@{NSLocalizedDescriptionKey:
+                           [NSString stringWithFormat:@"Video capture failed (%@). The audio was saved.",
+                            videoError.localizedDescription?:@"unknown reason"]}];
+                        if(completion)completion(savedAudio,warning);
+                    } else if(completion)completion(nil,savingError?:videoError);
+                }];
                 return;
             }
             [strongSelf finishOutputAudio:audioFile video:videoFile completion:^(NSURL *url,NSError *error) {
