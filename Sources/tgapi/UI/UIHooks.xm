@@ -363,35 +363,6 @@ static void LeadPlaceBadge(LeadMessageBadge *badge, UIView *view, ASDisplayNode 
     });
 }
 
-static void LeadVideoToVoiceToast(NSString *text, UIColor *color) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = LeadMainWindow();
-        if (!window) return;
-        UILabel *toast = [[UILabel alloc] initWithFrame:CGRectZero];
-        toast.text = text;
-        toast.textColor = UIColor.whiteColor;
-        toast.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
-        toast.textAlignment = NSTextAlignmentCenter;
-        toast.backgroundColor = color ?: [[UIColor blackColor] colorWithAlphaComponent:0.78];
-        toast.layer.cornerRadius = 16.0;
-        toast.layer.masksToBounds = YES;
-        CGSize size = [toast sizeThatFits:CGSizeMake(window.bounds.size.width - 48.0, 44.0)];
-        CGFloat width = MIN(window.bounds.size.width - 48.0, size.width + 28.0);
-        toast.frame = CGRectMake((window.bounds.size.width - width) * 0.5, window.safeAreaInsets.top + 18.0, width, 34.0);
-        toast.alpha = 0.0;
-        [window addSubview:toast];
-        [UIView animateWithDuration:0.16 animations:^{
-            toast.alpha = 1.0;
-        } completion:^(__unused BOOL finished) {
-            [UIView animateWithDuration:0.18 delay:1.15 options:0 animations:^{
-                toast.alpha = 0.0;
-            } completion:^(__unused BOOL done) {
-                [toast removeFromSuperview];
-            }];
-        }];
-    });
-}
-
 static NSString *LeadVisualStarsFormattedAmount(void) {
     long long amount = [[[NSUserDefaults standardUserDefaults] objectForKey:kVisualStarsAmount] longLongValue];
     if (amount <= 0) amount = 0;
