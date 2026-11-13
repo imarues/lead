@@ -1700,6 +1700,7 @@ static void hook() {
         kDisableEmojiInteractionStatus: @NO,
         kDisableEmojiAcknowledgementStatus: @NO,
         kConfirmCalls: @YES,
+        @"LeadCallRecordingEnabled": @NO,
         kHideTTLLabel: @YES,
         kVisualStarsEnabled: @NO,
         kVisualStarsAmount: @0,

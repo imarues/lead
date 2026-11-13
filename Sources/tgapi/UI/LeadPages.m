@@ -1,6 +1,7 @@
 #import "LeadMenu.h"
 #import "Headers.h"
 #import "Icons.h"
+#import "../Calls/LeadCallRecording.h"
 #import "../Headers.h"
 
 #pragma mark - Model
@@ -611,12 +612,20 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     ]],
   ];
 
+  LeadRow *recordings = [LeadRow link:@"LEAD_CALL_RECORDINGS_TITLE" symbol:@"waveform.path" tap:^(UIViewController *host) {
+    [host.navigationController pushViewController:[LeadCallRecordingsViewController new] animated:YES];
+  }];
+  recordings.subtitleKey = @"LEAD_CALL_RECORDINGS_SUBTITLE";
+  recordings.valueBlock = ^NSString * { return [NSString stringWithFormat:@"%lu", (unsigned long)[LeadCallRecording recordings].count]; };
+
   LeadPage *calls = [LeadPage new];
   calls.titleKey = @"UI_PAGE_CALLS";
   calls.symbol = @"phone";
   calls.sections = @[
     [LeadSection title:nil rows:@[
       [LeadRow toggle:kConfirmCalls title:@"UI_CONFIRM_CALLS_TITLE" subtitle:@"UI_CONFIRM_CALLS_SUBTITLE" symbol:@"phone.arrow.up.right"],
+      [LeadRow toggle:LeadCallRecordingEnabledKey title:@"LEAD_CALL_RECORD_ENABLE" subtitle:@"LEAD_CALL_RECORD_ENABLE_SUBTITLE" symbol:@"record.circle"],
+      recordings,
     ]],
   ];
 
