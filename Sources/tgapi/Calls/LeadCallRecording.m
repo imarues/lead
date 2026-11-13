@@ -13,7 +13,7 @@ static NSError *LeadRecorderError(NSString *detail) {
 }
 
 @interface LeadCallVideoRecorder : NSObject
-@property(nonatomic,weak) UIView *view;
+@property(nonatomic,weak) UIWindow *originalWindow;
 @property(nonatomic,strong) AVAssetWriter *writer;
 @property(nonatomic,strong) AVAssetWriterInput *input;
 @property(nonatomic,strong) AVAssetWriterInputPixelBufferAdaptor *adaptor;
@@ -32,10 +32,16 @@ static NSError *LeadRecorderError(NSString *detail) {
         if(error)*error=LeadRecorderError(@"Call screen is not available.");
         return NO;
     }
-    self.view=view;
-    CGFloat factor=MIN(1.8,720.0/MAX(1.0,view.bounds.size.width));
-    NSInteger width=MAX(2,((NSInteger)(view.bounds.size.width*factor)/2)*2);
-    NSInteger height=MAX(2,((NSInteger)(view.bounds.size.height*factor)/2)*2);
+    // Capture the active Telegram window, not the temporary call view.
+    // The window remains usable when the call UI is minimized to browse chats.
+    self.originalWindow=view.window;
+    CGSize screenSize=view.window ? view.window.bounds.size : view.bounds.size;
+    CGFloat shorter=MIN(screenSize.width,screenSize.height);
+    CGFloat longer=MAX(screenSize.width,screenSize.height);
+    // Full-HD class: 1080 short edge and up to 2400 long edge, no stretching.
+    CGFloat factor=MIN(1080.0/MAX(1.0,shorter),2400.0/MAX(1.0,longer));
+    NSInteger width=MAX(2,((NSInteger)round(screenSize.width*factor)/2)*2);
+    NSInteger height=MAX(2,((NSInteger)round(screenSize.height*factor)/2)*2);
     self.size=CGSizeMake(width,height);
     self.url=[NSURL fileURLWithPath:path];
     [[NSFileManager defaultManager] removeItemAtURL:self.url error:nil];
@@ -46,9 +52,9 @@ static NSError *LeadRecorderError(NSString *detail) {
        AVVideoWidthKey:@(width),
        AVVideoHeightKey:@(height),
        AVVideoCompressionPropertiesKey:@{
-          AVVideoAverageBitRateKey:@(1200000),
-          AVVideoExpectedSourceFrameRateKey:@(10),
-          AVVideoMaxKeyFrameIntervalKey:@(20)
+          AVVideoAverageBitRateKey:@(8000000),
+          AVVideoExpectedSourceFrameRateKey:@(30),
+          AVVideoMaxKeyFrameIntervalKey:@(60)
        }
     };
     self.input=[AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:settings];
@@ -69,13 +75,36 @@ static NSError *LeadRecorderError(NSString *detail) {
     [self.writer startSessionAtSourceTime:kCMTimeZero];
     self.startTime=CACurrentMediaTime();
     self.displayLink=[CADisplayLink displayLinkWithTarget:self selector:@selector(captureFrame:)];
-    self.displayLink.preferredFramesPerSecond=10;
+    self.displayLink.preferredFramesPerSecond=30;
     [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     return YES;
 }
+- (UIView *)captureViewForCurrentTelegramScreen {
+    // Prefer the foreground key window belonging to the same Telegram scene.
+    // Overlay windows (the green REC badge) are deliberately not selected.
+    UIWindowScene *scene=self.originalWindow.windowScene;
+    if(scene) {
+        for(UIWindow *candidate in scene.windows) {
+            if(candidate.isKeyWindow && !candidate.hidden &&
+               candidate.windowLevel==UIWindowLevelNormal && candidate.rootViewController)
+                return candidate;
+        }
+    }
+    for(UIScene *candidateScene in UIApplication.sharedApplication.connectedScenes) {
+        if(![candidateScene isKindOfClass:[UIWindowScene class]] ||
+           candidateScene.activationState!=UISceneActivationStateForegroundActive)continue;
+        for(UIWindow *candidate in ((UIWindowScene *)candidateScene).windows) {
+            if(candidate.isKeyWindow && !candidate.hidden &&
+               candidate.windowLevel==UIWindowLevelNormal && candidate.rootViewController)
+                return candidate;
+        }
+    }
+    UIWindow *previous=self.originalWindow;
+    return (previous && !previous.hidden && previous.rootViewController)?previous:nil;
+}
 - (void)captureFrame:(__unused CADisplayLink *)link {
-    UIView *view=self.view;
-    if(!view.window || !self.input.readyForMoreMediaData ||
+    UIView *view=[self captureViewForCurrentTelegramScreen];
+    if(!view || !view.window || !self.input.readyForMoreMediaData ||
        self.writer.status!=AVAssetWriterStatusWriting ||
        !self.adaptor.pixelBufferPool)return;
     CVPixelBufferRef pixel=NULL;
@@ -165,6 +194,9 @@ static NSError *LeadRecorderError(NSString *detail) {
         return [b.lastPathComponent compare:a.lastPathComponent options:NSNumericSearch];
     }];
     return items;
+}
+- (NSTimeInterval)elapsedSeconds {
+    return (self.recording && self.startDate)?MAX(0,[[NSDate date] timeIntervalSinceDate:self.startDate]):0;
 }
 - (void)notifyChanged {
     [[NSNotificationCenter defaultCenter] postNotificationName:LeadCallRecordingChangedNotification object:self];

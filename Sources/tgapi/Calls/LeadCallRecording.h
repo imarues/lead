@@ -8,6 +8,7 @@ FOUNDATION_EXPORT NSString *const LeadCallRecordingChangedNotification;
 @interface LeadCallRecording : NSObject
 + (instancetype)shared;
 @property(nonatomic,readonly,getter=isRecording) BOOL recording;
+@property(nonatomic,readonly) NSTimeInterval elapsedSeconds;
 + (NSString *)recordingsDirectory;
 + (NSArray<NSURL *> *)recordings;
 - (void)startForView:(UIView *)view

@@ -10,11 +10,28 @@ static char kLeadCallRecordButtonKey;
 static BOOL leadPrivateHooksInstalled=NO;
 static BOOL leadGroupHooksInstalled=NO;
 
+@interface LeadRecordingHUDWindow : UIWindow
+@end
+@implementation LeadRecordingHUDWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *result=[super hitTest:point withEvent:event];
+    // Let Telegram's chats and controls receive all touches outside REC.
+    if(result==self || result==self.rootViewController.view)return nil;
+    return result;
+}
+@end
+
 @interface LeadCallRecordButtonTarget : NSObject
+@property(nonatomic,weak) UIButton *currentCallButton;
+@property(nonatomic,strong) LeadRecordingHUDWindow *hudWindow;
+@property(nonatomic,strong) UIButton *hudButton;
+@property(nonatomic,strong) NSTimer *elapsedTimer;
 + (instancetype)shared;
 - (void)pressed:(UIButton *)button;
 - (void)dragged:(UIPanGestureRecognizer *)pan;
 - (void)update:(UIButton *)button;
+- (void)refreshRecordingUI;
+- (void)recordingChanged:(NSNotification *)note;
 @end
 
 @implementation LeadCallRecordButtonTarget
@@ -24,14 +41,108 @@ static BOOL leadGroupHooksInstalled=NO;
     dispatch_once(&once,^{instance=[LeadCallRecordButtonTarget new];});
     return instance;
 }
+- (NSString *)timeLabel {
+    NSUInteger seconds=(NSUInteger)floor([LeadCallRecording shared].elapsedSeconds);
+    if(seconds>=3600)
+        return [NSString stringWithFormat:@"%02lu:%02lu:%02lu",
+                (unsigned long)(seconds/3600),
+                (unsigned long)((seconds/60)%60),
+                (unsigned long)(seconds%60)];
+    return [NSString stringWithFormat:@"%02lu:%02lu",
+            (unsigned long)(seconds/60),(unsigned long)(seconds%60)];
+}
 - (void)update:(UIButton *)button {
     if(!button)return;
     BOOL active=[LeadCallRecording shared].isRecording;
-    [button setTitle:active?@"● REC":@"REC" forState:UIControlStateNormal];
-    button.backgroundColor=active?UIColor.systemRedColor:
-       [UIColor colorWithWhite:0.04 alpha:0.78];
-    button.layer.borderColor=(active?UIColor.whiteColor:UIColor.systemRedColor).CGColor;
-    button.accessibilityLabel=active?@"إيقاف تسجيل المكالمة":@"بدء تسجيل المكالمة";
+    [button setTitle:active?[NSString stringWithFormat:@"■ %@",[self timeLabel]]:@"REC"
+           forState:UIControlStateNormal];
+    button.backgroundColor=active?UIColor.systemGreenColor:UIColor.systemRedColor;
+    button.layer.borderColor=UIColor.whiteColor.CGColor;
+    button.layer.cornerRadius=12;
+    button.accessibilityLabel=active?@"تسجيل المكالمة مستمر، اضغط للإيقاف":@"بدء تسجيل المكالمة";
+    CGRect frame=button.frame;
+    frame.size.width=active?115:68;
+    frame.size.height=44;
+    if(button.superview)frame.origin.x=MAX(5,MIN(frame.origin.x,
+                          button.superview.bounds.size.width-frame.size.width-5));
+    button.frame=frame;
+    // The floating badge is the primary stop control while recording.
+    button.hidden=active && self.hudWindow && !self.hudWindow.hidden;
+}
+- (UIWindowScene *)activeScene {
+    UIWindowScene *fallback=nil;
+    for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if(![scene isKindOfClass:[UIWindowScene class]])continue;
+        if(scene.activationState==UISceneActivationStateForegroundActive)
+            return (UIWindowScene *)scene;
+        if(!fallback)fallback=(UIWindowScene *)scene;
+    }
+    return fallback;
+}
+- (void)installHUDIfNeeded {
+    if(self.hudWindow)return;
+    UIWindowScene *scene=[self activeScene];
+    if(!scene)return;
+    LeadRecordingHUDWindow *window=[[LeadRecordingHUDWindow alloc] initWithWindowScene:scene];
+    window.frame=scene.coordinateSpace.bounds;
+    window.windowLevel=UIWindowLevelStatusBar+2;
+    window.backgroundColor=UIColor.clearColor;
+    window.opaque=NO;
+    window.accessibilityIdentifier=@"LeadVisibleCallRecordingHUDWindow";
+    UIViewController *controller=[UIViewController new];
+    controller.view.backgroundColor=UIColor.clearColor;
+    window.rootViewController=controller;
+    UIButton *badge=[UIButton buttonWithType:UIButtonTypeCustom];
+    badge.frame=CGRectMake(0,0,115,44);
+    badge.backgroundColor=UIColor.systemGreenColor;
+    badge.layer.cornerRadius=12;
+    badge.layer.borderWidth=1;
+    badge.layer.borderColor=UIColor.whiteColor.CGColor;
+    badge.titleLabel.font=[UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightBold];
+    [badge setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    badge.accessibilityIdentifier=@"LeadRecordingTimerAndStop";
+    badge.accessibilityLabel=@"إيقاف تسجيل المكالمة";
+    [badge addTarget:self action:@selector(pressed:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [controller.view addSubview:badge];
+    self.hudWindow=window;
+    self.hudButton=badge;
+    // Never makeKeyAndVisible: Telegram keeps its key window and keyboard.
+    window.hidden=NO;
+}
+- (void)refreshRecordingUI {
+    BOOL active=[LeadCallRecording shared].isRecording;
+    if(active) {
+        [self installHUDIfNeeded];
+        UIWindow *window=self.hudWindow;
+        UIButton *badge=self.hudButton;
+        if(window && badge) {
+            window.hidden=NO;
+            CGRect bounds=window.bounds;
+            UIEdgeInsets insets=window.safeAreaInsets;
+            CGFloat top=MAX(insets.top+10,60.0);
+            badge.frame=CGRectMake(MAX(8,bounds.size.width-128),top,115,44);
+            [badge setTitle:[NSString stringWithFormat:@"■ %@",[self timeLabel]]
+                   forState:UIControlStateNormal];
+        }
+        if(!self.elapsedTimer) {
+            self.elapsedTimer=[NSTimer timerWithTimeInterval:1.0 target:self
+                                  selector:@selector(timerFired:) userInfo:nil repeats:YES];
+            [[NSRunLoop mainRunLoop] addTimer:self.elapsedTimer forMode:NSRunLoopCommonModes];
+        }
+    } else {
+        [self.elapsedTimer invalidate];
+        self.elapsedTimer=nil;
+        self.hudWindow.hidden=YES;
+        self.hudButton=nil;
+        self.hudWindow=nil;
+    }
+    [self update:self.currentCallButton];
+}
+- (void)timerFired:(__unused NSTimer *)timer {[self refreshRecordingUI];}
+- (void)recordingChanged:(__unused NSNotification *)note {
+    if(NSThread.isMainThread)[self refreshRecordingUI];
+    else dispatch_async(dispatch_get_main_queue(),^{[self refreshRecordingUI];});
 }
 - (void)dragged:(UIPanGestureRecognizer *)pan {
     UIView *v=pan.view,*parent=v.superview;
@@ -110,7 +221,7 @@ static void LeadInstallCallControl(UIView *callView) {
     button=[UIButton buttonWithType:UIButtonTypeCustom];
     button.frame=CGRectMake(MAX(4,callView.bounds.size.width-82),
                             MAX(100,callView.bounds.size.height*0.46),68,44);
-    button.layer.cornerRadius=22;
+    button.layer.cornerRadius=12;
     button.layer.borderWidth=1.5;
     button.titleLabel.font=[UIFont boldSystemFontOfSize:14];
     [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
@@ -124,17 +235,21 @@ static void LeadInstallCallControl(UIView *callView) {
     [button addGestureRecognizer:pan];
     [callView addSubview:button];
     objc_setAssociatedObject(callView,&kLeadCallRecordButtonKey,button,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [[LeadCallRecordButtonTarget shared] update:button];
+    [LeadCallRecordButtonTarget shared].currentCallButton=button;
+    [[LeadCallRecordButtonTarget shared] refreshRecordingUI];
 }
 
 static void LeadDetachCallControl(UIView *view) {
     UIButton *button=objc_getAssociatedObject(view,&kLeadCallRecordButtonKey);
-    if(button){[button removeFromSuperview];objc_setAssociatedObject(view,&kLeadCallRecordButtonKey,nil,OBJC_ASSOCIATION_ASSIGN);}
-    // The indicator cannot remain invisible while audio is captured.
-    if([LeadCallRecording shared].isRecording)
-        [[LeadCallRecording shared] stop:^(NSURL *file,NSError *error) {
-            NSLog(@"[LeadCalls] screen detached; stopped %@ %@",file,error);
-        }];
+    if(!button)return;
+    if([LeadCallRecordButtonTarget shared].currentCallButton==button)
+        [LeadCallRecordButtonTarget shared].currentCallButton=nil;
+    [button removeFromSuperview];
+    objc_setAssociatedObject(view,&kLeadCallRecordButtonKey,nil,OBJC_ASSOCIATION_ASSIGN);
+    // IMPORTANT: minimizing the call to browse Telegram chats destroys this
+    // view, but the underlying call and CoreAudio capture are still active.
+    // Recording is owned by LeadCallRecording, not this temporary call UI.
+    [[LeadCallRecordButtonTarget shared] refreshRecordingUI];
 }
 
 %group LeadPrivateCallScreenHooks
@@ -186,6 +301,10 @@ static void LeadTryInstallCallScreenHooks(void) {
     if([process containsString:@"notificationservice"])return;
     LeadCallAudioInstallHooks();
     dispatch_async(dispatch_get_main_queue(),^{
+        [[NSNotificationCenter defaultCenter] addObserver:
+            [LeadCallRecordButtonTarget shared]
+            selector:@selector(recordingChanged:)
+            name:LeadCallRecordingChangedNotification object:nil];
         LeadTryInstallCallScreenHooks();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),
                        dispatch_get_main_queue(),^{LeadTryInstallCallScreenHooks();});
