@@ -14,6 +14,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <math.h>
+#include <cmath>
 #import <atomic>
 #import <cstring>
 #import <algorithm>

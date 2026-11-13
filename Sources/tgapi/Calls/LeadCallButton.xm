@@ -141,10 +141,11 @@ static void LeadDetachCallControl(UIView *view) {
 %hook UIView
 - (void)didMoveToWindow {
     %orig;
-    if(self.window)LeadInstallCallControl(self);
+    UIView *callView=(UIView *)self;
+    if(callView.window)LeadInstallCallControl(callView);
 }
 - (void)willMoveToWindow:(UIWindow *)window {
-    if(!window)LeadDetachCallControl(self);
+    if(!window)LeadDetachCallControl((UIView *)self);
     %orig;
 }
 %end
@@ -154,10 +155,11 @@ static void LeadDetachCallControl(UIView *view) {
 %hook UIView
 - (void)didMoveToWindow {
     %orig;
-    if(self.window)LeadInstallCallControl(self);
+    UIView *callView=(UIView *)self;
+    if(callView.window)LeadInstallCallControl(callView);
 }
 - (void)willMoveToWindow:(UIWindow *)window {
-    if(!window)LeadDetachCallControl(self);
+    if(!window)LeadDetachCallControl((UIView *)self);
     %orig;
 }
 %end
