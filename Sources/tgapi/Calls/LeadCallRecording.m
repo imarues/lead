@@ -83,12 +83,20 @@ static NSError *LeadRecorderError(NSString *detail) {
     CVPixelBufferLockBaseAddress(pixel,0);
     void *buffer=CVPixelBufferGetBaseAddress(pixel);
     size_t stride=CVPixelBufferGetBytesPerRow(pixel);
+    CGColorSpaceRef colorSpace=CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx=CGBitmapContextCreate(buffer,(size_t)self.size.width,(size_t)self.size.height,8,stride,
-                     CGColorSpaceCreateDeviceRGB(),kCGImageAlphaNoneSkipFirst);
+                     colorSpace,kCGImageAlphaNoneSkipFirst);
+    CGColorSpaceRelease(colorSpace);
     // drawViewHierarchyInRect captures the current Telegram call layout. Some
     // hardware-backed video surfaces can still be black on particular clients.
     if(ctx) {
         CGContextClearRect(ctx,CGRectMake(0,0,self.size.width,self.size.height));
+        // UIKit draws into a top-left-origin context. CGBitmapContext's default
+        // bottom-left origin otherwise exports the entire call screen inverted
+        // vertically (including Arabic text and the visible REC indicator).
+        // Flip only the raster coordinates; the recorded audio is untouched.
+        CGContextTranslateCTM(ctx,0,self.size.height);
+        CGContextScaleCTM(ctx,1.0,-1.0);
         UIGraphicsPushContext(ctx);
         CGContextScaleCTM(ctx,self.size.width/MAX(view.bounds.size.width,1),
                               self.size.height/MAX(view.bounds.size.height,1));
