@@ -21,6 +21,8 @@
 namespace {
 struct AudioClip { std::vector<int16_t> samples; };
 static std::shared_ptr<AudioClip> gPCM;
+// Fixed-point 48 kHz media timeline. Advances by rendered AUDIO frames, not wall-clock jitter.
+static std::atomic<uint64_t> gAudioPositionQ32{0};
 static std::atomic<int> gMode{0}; // 0 normal, 1 armed/ringing, 2 connected/playing, 3 finished/muted
 static std::atomic<bool> gExpectCapturer{false};
 static std::atomic<bool> gConnected{false};
@@ -167,6 +169,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     gExpectCapturer.store(false);
     gConnected.store(false);
     gStartClock.store(0);
+    gAudioPositionQ32.store(0);
     gExternalAudio.store(false);
     gExternalAudioBytes.store(0);
     gMicInjectedFrames.store(0);
@@ -329,6 +332,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(!captured)return;
     int old=1;if(!gMode.compare_exchange_strong(old,2))return;
     gStartClock.store(CACurrentMediaTime());
+    gAudioPositionQ32.store(0);
     gExternalAudio.store(false);
     self.nextAudioSample=0;
     dispatch_queue_t queue=dispatch_queue_create("lead.virtual.call.frames",DISPATCH_QUEUE_SERIAL);
@@ -359,33 +363,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         dispatch_async(dispatch_get_main_queue(),^{[self endTelegramCallWhenFinished];});
         return;
     }
-    // ReplayKit uses signed 16-bit 48 kHz mono PCM; dispatch 20ms chunks.
-    // Keep microphone replacement running independently. The old build
-    // disabled it after the first attempted external packet, even if WebRTC
-    // did not transmit that external audio.
-    if(context && [context respondsToSelector:@selector(addExternalAudioData:)]) {
-        auto pcm=std::atomic_load(&gPCM);
-        if(pcm && !pcm->samples.empty()) {
-            const uint64_t target=(uint64_t)std::max(0.0,elapsed*48000.0);
-            int sent=0;
-            while(self.nextAudioSample+960<=target && sent<6 &&
-                  self.nextAudioSample<pcm->samples.size()) {
-                int16_t buffer[960]={};
-                const size_t offset=(size_t)self.nextAudioSample;
-                const size_t n=std::min((size_t)960,pcm->samples.size()-offset);
-                memcpy(buffer,pcm->samples.data()+offset,n*sizeof(int16_t));
-                NSData *data=[NSData dataWithBytes:buffer length:sizeof(buffer)];
-                ((void (*)(id,SEL,id))objc_msgSend)(
-                    context,@selector(addExternalAudioData:),data);
-                self.nextAudioSample+=960;
-                gExternalAudio.store(true);
-                gExternalAudioBytes.fetch_add(sizeof(buffer));
-                sent++;
-            }
-            if(target>self.nextAudioSample+960*10)
-                self.nextAudioSample=(target/960)*960;
-        }
-    }
+    // Private call HQ audio: ONE transport path only. Previous builds sent
+    // both native external audio and microphone-injected PCM, potentially
+    // causing doubling/comb filtering. Use the proven microphone PCM bridge
+    // exclusively; its sample cursor is continuous and independent of video.
     @synchronized(video) {
         for(int i=0;i<8;i++) {
             if(!video.next && !video.exhausted) {
@@ -510,9 +491,21 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 
 // Retain existing CoreAudio audio path only as fallback when native external
 // audio cannot be obtained. Any selected file suppresses genuine microphone.
+// Exposed to the early AudioUnit setup hook. HQ bypass is limited to a
+// user-chosen virtual-video private call, never ordinary microphone calls.
+extern "C" bool LeadVirtualMediaHighQualityEnabled(void) {
+    const int mode=gMode.load(std::memory_order_relaxed);
+    return mode==1 || mode==2;
+}
+
+// Direct 48k PCM injection at CoreAudio's outgoing mic boundary.
+// No volume boost, no limiter and no intermediate resampling to 8/16 kHz.
+// Audio output callbacks consume consecutive samples at exactly the target
+// format rate; linear interpolation only applies when rates differ.
 extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
                  const AudioStreamBasicDescription *format, UInt32 frames) {
-    if(gMode.load()==0)return false;
+    const int mode=gMode.load(std::memory_order_acquire);
+    if(mode==0)return false;
     if(!buffers || !format)return true;
     const bool flt=(format->mFormatFlags & kAudioFormatFlagIsFloat)!=0;
     const bool integer=(format->mFormatFlags & kAudioFormatFlagIsSignedInteger)!=0;
@@ -520,33 +513,50 @@ extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
     const unsigned bits=format->mBitsPerChannel;
     const unsigned channels=std::max(1u,format->mChannelsPerFrame);
     const double rate=format->mSampleRate;
-    const bool supported=(flt && bits==32)||(integer && (bits==16 || bits==32));
-    auto pcm=std::atomic_load(&gPCM);
-    const double start=gStartClock.load();
-    bool play=(gMode.load()==2 && start>0 &&
-        isfinite(rate) && rate>=8000 && rate<=192000 && pcm && !pcm->samples.empty());
-    double position=play?std::max(0.0,CACurrentMediaTime()-start):0;
+    const bool supported=(format->mFormatID==kAudioFormatLinearPCM) &&
+        ((flt && bits==32)||(integer && (bits==16||bits==32)));
+    const auto pcm=std::atomic_load(&gPCM);
+    const bool playing=(mode==2 && supported && rate>=8000 && rate<=192000 &&
+       std::isfinite(rate) && pcm && !pcm->samples.empty());
+    const uint64_t scale=UINT64_C(4294967296);
+    const uint64_t step=playing ? std::max(UINT64_C(1),
+        (uint64_t)llround((48000.0/rate)*(double)scale)) : 0;
+    const uint64_t origin=playing ? gAudioPositionQ32.fetch_add(
+        step*(uint64_t)frames,std::memory_order_relaxed) : 0;
     for(UInt32 b=0;b<buffers->mNumberBuffers;b++) {
         AudioBuffer &buf=buffers->mBuffers[b];
         if(!buf.mData)continue;
-        if(!play || !supported){memset(buf.mData,0,buf.mDataByteSize);continue;}
-        const unsigned countPerFrame=planar?1:channels;
-        const unsigned unit=bits/8;
-        const UInt32 limit=std::min(frames,buf.mDataByteSize/std::max(1u,countPerFrame*unit));
-        for(UInt32 i=0;i<limit;i++) {
-            uint64_t idx=(uint64_t)((position+i/rate)*48000.0);
-            float f=(idx<pcm->samples.size())?pcm->samples[(size_t)idx]/32768.0f:0;
-            for(unsigned c=0;c<countPerFrame;c++) {
-                size_t j=(size_t)i*countPerFrame+c;
-                if(flt)((float *)buf.mData)[j]=f;
-                else if(bits==16)((int16_t *)buf.mData)[j]=(int16_t)lrintf(f*32767);
-                else ((int32_t *)buf.mData)[j]=(int32_t)llrint((double)f*2147483647.0);
+        if(!playing) {
+            memset(buf.mData,0,buf.mDataByteSize);
+            continue;
+        }
+        const unsigned channelsInBuffer=planar?1:channels;
+        const unsigned sampleBytes=bits/8;
+        const UInt32 count=std::min(frames,buf.mDataByteSize/
+                  std::max(1u,channelsInBuffer*sampleBytes));
+        for(UInt32 i=0;i<count;i++) {
+            const uint64_t qpos=origin+(uint64_t)i*step;
+            const uint64_t ix=qpos>>32;
+            const float frac=(float)(uint32_t)qpos*(1.0f/4294967296.0f);
+            float value=0.0f;
+            if(ix<pcm->samples.size()) {
+                const float x=(float)pcm->samples[(size_t)ix];
+                const float y=(float)pcm->samples[std::min((size_t)ix+1,pcm->samples.size()-1)];
+                value=(x+(y-x)*frac)*(1.0f/32768.0f);
+            }
+            for(unsigned c=0;c<channelsInBuffer;c++) {
+                const size_t j=(size_t)i*channelsInBuffer+c;
+                if(flt)((float *)buf.mData)[j]=value;
+                else if(bits==16)
+                    ((int16_t *)buf.mData)[j]=(int16_t)lrintf(value*32767.0f);
+                else ((int32_t *)buf.mData)[j]=(int32_t)llrint((double)value*2147483647.0);
             }
         }
-        size_t bytes=(size_t)limit*countPerFrame*unit;
-        if(bytes<buf.mDataByteSize)memset((uint8_t *)buf.mData+bytes,0,buf.mDataByteSize-bytes);
+        size_t filled=(size_t)count*channelsInBuffer*sampleBytes;
+        if(filled<buf.mDataByteSize)
+            memset((uint8_t *)buf.mData+filled,0,buf.mDataByteSize-filled);
     }
-    if(play)gMicInjectedFrames.fetch_add(frames,std::memory_order_relaxed);
+    if(playing)gMicInjectedFrames.fetch_add(frames,std::memory_order_relaxed);
     return true;
 }
 
