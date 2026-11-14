@@ -157,10 +157,11 @@ static LeadTelegramNativeShareAttempt *gActiveTelegramShare=nil;
                     [self finishWithFallback:@"app is no longer in foreground"];
                     return;
                 }
-                self.remote=controller;
+                UIViewController *remoteController=(UIViewController *)controller;
+                self.remote=remoteController;
                 self.presented=YES;
-                controller.modalPresentationStyle=UIModalPresentationFormSheet;
-                [host presentViewController:controller animated:YES completion:nil];
+                remoteController.modalPresentationStyle=UIModalPresentationFormSheet;
+                [host presentViewController:remoteController animated:YES completion:nil];
             });
         };
         ((void (*)(id,SEL,id,id,id))objc_msgSend)(
