@@ -5,6 +5,9 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
+extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
+    const AudioStreamBasicDescription *format, UInt32 frames);
+
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <mach-o/nlist.h>
