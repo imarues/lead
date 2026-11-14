@@ -1,13 +1,13 @@
 // Lead manual call recording: name and save destination prompt after STOP.
-// iOS Photos saving is real. Telegram Saved Messages uses the iOS share
-// extension, so the account owner selects "Saved Messages" in Telegram.
+// iOS Photos saving is real. Telegram's bundled share extension is attempted
+// directly. We must not silently open the iOS activity sheet when unavailable.
 // Never claim an upload succeeded merely because the share UI was presented.
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
-// Try Telegram bundled in-app share UI, with a tested system-share fallback.
+// Attempt the app's own Telegram share extension; report unavailability.
 extern void LeadOpenTelegramSharePicker(NSURL *file, UIViewController *presenter,
-    void (^fallback)(void));
+    void (^fallback)(NSString *reason));
 
 typedef NS_ENUM(NSInteger, LeadRecordingSaveTarget) {
     LeadRecordingSaveTargetArchive=0,
@@ -95,7 +95,7 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     }
     NSString *extension=file.pathExtension.uppercaseString;
     NSString *message=[NSString stringWithFormat:
-        @"اكتب اسم التسجيل فقط، وصيغة %@ تنضاف تلقائياً.\nالرسائل المحفوظة تفتح اختيار محادثة Telegram داخلياً إذا كان متاحاً.",extension];
+        @"اكتب اسم التسجيل فقط، وصيغة %@ تنضاف تلقائياً.\nاختيار الرسائل المحفوظة يحاول فتح منتقي محادثات Telegram من دون قائمة مشاركة iOS.",extension];
     if(warning)message=[message stringByAppendingFormat:@"\nملاحظة: %@",warning.localizedDescription];
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"اسم تسجيل المكالمة"
         message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -119,8 +119,10 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
             style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             self.requestedName=weakAlert.textFields.firstObject.text?:@"";
             self.target=target;
-            // Wait until the naming dialog completes dismissal.
-            dispatch_async(dispatch_get_main_queue(),^{[self applyChoice];});
+            // Allow the naming alert to finish its dismissal before another
+            // controller (Telegram's remote share UI) is presented.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(350*NSEC_PER_MSEC)),
+                           dispatch_get_main_queue(),^{[self applyChoice];});
         }]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء (يبقى بالأرشيف)"
@@ -242,12 +244,16 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     }
 }
 - (void)openSavedMessagesShare {
-    // Prefer the application's bundled Telegram share UI. Sideloaded
-    // variants may not allow hosting their own share extension, in which
-    // case the older system share sheet remains as a safe fallback.
+    // Only request Telegram's own recipient chooser. Never surprise the user
+    // with a system-wide iOS sharing sheet if the Telegram extension is absent,
+    // not registered by the sideload signer, or rejected by the iOS host.
     NSURL *file=self.archiveFile;
-    LeadOpenTelegramSharePicker(file,[self presenter],^{
-        [self openSavedMessagesSystemShare];
+    LeadOpenTelegramSharePicker(file,[self presenter],^(NSString *reason) {
+        NSString *detail=reason.length?reason:@"هذه النسخة لا تدعم فتح مشاركة Telegram مباشرة.";
+        [self notice:@"تعذّر فتح مشاركة Telegram" text:
+           [NSString stringWithFormat:
+             @"ما انفتحت قائمة محادثات Telegram. السبب التقني: %@\n\nالتسجيل محفوظ بالأرشيف باسم %@، وما انرسل لأي محادثة. تحتاج نسخة Telegram/VoidGram تحتوي ShareExtension مفعّلة حتى يمكن تجربة الاختيار المباشر.",
+             detail,self.archiveFile.lastPathComponent]];
     });
 }
 - (void)openSavedMessagesSystemShare {
