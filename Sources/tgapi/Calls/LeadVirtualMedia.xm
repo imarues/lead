@@ -474,10 +474,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(button) {
         NSLog(@"[LeadVirtualMedia] EOF; performing Telegram end-call control");
         [button sendActionsForControlEvents:UIControlEventTouchUpInside];
-        // Reset after the hangup action has been sent; keep mic suppressed
-        // during the transition to the ended call screen.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),
-            dispatch_get_main_queue(),^{[self resetAll];});
+        // Keep gMode=3 until the next call choice resets us; never expose
+        // the real microphone if Telegram takes longer to disconnect.
     } else {
         // CallKit fallback when Telegram's view is minimized. Only use a
         // unique, outgoing, connected call; never terminate unrelated calls
@@ -488,14 +486,17 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             CXCall *call=calls.firstObject;
             if(call.outgoing && call.hasConnected && !call.hasEnded) {
                 CXCallController *controller=[CXCallController new];
-                CXEndCallAction *action=[[CXEndCallAction alloc] initWithCall:call.UUID];
+                CXEndCallAction *action=[[CXEndCallAction alloc] initWithCallUUID:call.UUID];
                 CXTransaction *transaction=[[CXTransaction alloc] initWithAction:action];
                 NSLog(@"[LeadVirtualMedia] EOF; requesting CallKit end-call transaction");
                 [controller requestTransaction:transaction completion:^(NSError *error){
                     if(error) {
                         NSLog(@"[LeadVirtualMedia] CallKit hangup failed: %@",error);
                         [self showError:@"انتهى الفيديو لكن فشل إغلاق الاتصال تلقائياً. انهي الاتصال يدوياً."];
-                    } else dispatch_async(dispatch_get_main_queue(),^{[self resetAll];});
+                    } else {
+                        NSLog(@"[LeadVirtualMedia] CallKit end-call request accepted");
+                        // Preserve microphone suppression until new call setup.
+                    }
                 }];
                 return;
             }
