@@ -3,6 +3,9 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 #import <QuartzCore/QuartzCore.h>
+// The gallery preview is an AVPlayerLayer; UIKit snapshots omit its actual
+// video pixels. Explicitly composite its decoded frame when recording.
+extern void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot);
 
 NSString *const LeadCallRecordingEnabledKey=@"LeadCallRecordingEnabled";
 NSString *const LeadCallRecordingChangedNotification=@"LeadCallRecordingChanged";
@@ -54,7 +57,7 @@ static NSError *LeadRecorderError(NSString *detail) {
        AVVideoWidthKey:@(width),
        AVVideoHeightKey:@(height),
        AVVideoCompressionPropertiesKey:@{
-          AVVideoAverageBitRateKey:@(8000000),
+          AVVideoAverageBitRateKey:@(14000000),
           AVVideoExpectedSourceFrameRateKey:@(30),
           AVVideoMaxKeyFrameIntervalKey:@(60)
        }
@@ -186,12 +189,15 @@ static NSError *LeadRecorderError(NSString *detail) {
                           self.size.height/MAX(view.bounds.size.height,1));
     UIGraphicsPushContext(ctx);
     BOOL drawn=[view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
-    UIGraphicsPopContext();
     if(!drawn) {
         // CALayer fallback avoids a zero-frame recording if UIKit declines
         // a snapshot during a Telegram transition or on a specific iOS build.
         [view.layer renderInContext:ctx];
     }
+    // Draw the actual gallery-video pixels *after* the UIKit snapshot.
+    // The user may drag/resize the preview; the recorder uses its live rect.
+    LeadVirtualMediaDrawRecordingPreview(view);
+    UIGraphicsPopContext();
     CGContextRelease(ctx);
     NSTimeInterval elapsed=MAX(0,CACurrentMediaTime()-self.startTime);
     CMTime presentationTime=CMTimeMakeWithSeconds(elapsed,600);
