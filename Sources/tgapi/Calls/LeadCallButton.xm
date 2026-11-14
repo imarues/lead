@@ -5,6 +5,8 @@
 #import "LeadCallRecording.h"
 #import "LeadCallAudio.h"
 #import "../UI/LeadDesign.h"
+extern "C" void LeadVirtualMediaInstallButton(UIView *view);
+extern "C" void LeadVirtualMediaRemoveButton(UIView *view);
 
 static char kLeadCallRecordButtonKey;
 static BOOL leadPrivateHooksInstalled=NO;
@@ -240,6 +242,7 @@ static BOOL leadGroupHooksInstalled=NO;
 @end
 
 static void LeadInstallCallControl(UIView *callView) {
+    if(callView.window) LeadVirtualMediaInstallButton(callView);
     if(!callView.window || ![[NSUserDefaults standardUserDefaults] boolForKey:LeadCallRecordingEnabledKey])
         return;
     UIButton *button=objc_getAssociatedObject(callView,&kLeadCallRecordButtonKey);
@@ -266,6 +269,7 @@ static void LeadInstallCallControl(UIView *callView) {
 }
 
 static void LeadDetachCallControl(UIView *view) {
+    LeadVirtualMediaRemoveButton(view);
     UIButton *button=objc_getAssociatedObject(view,&kLeadCallRecordButtonKey);
     if(!button)return;
     if([LeadCallRecordButtonTarget shared].currentCallButton==button)
