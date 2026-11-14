@@ -138,10 +138,10 @@ static OSStatus leadAudioRenderNotify(void *opaque, AudioUnitRenderActionFlags *
        !gActive.load(memory_order_relaxed) || !data)return noErr;
     AudioUnit unit=(AudioUnit)opaque;
     gRenderNotifyHits.fetch_add(1,memory_order_relaxed);
-    if(bus==0 && !gOutputCallbackHits.load(memory_order_relaxed)) {
+    if(bus==0 && gRemote.writeIndex.load(memory_order_acquire)==0) {
         AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Input,0);
         capture(gRemote,data,frames,f);
-    } else if(bus==1 && !gRenderCallHits.load(memory_order_relaxed)) {
+    } else if(bus==1 && gMic.writeIndex.load(memory_order_acquire)==0) {
         AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Output,1);
         capture(gMic,data,frames,f);
     }
