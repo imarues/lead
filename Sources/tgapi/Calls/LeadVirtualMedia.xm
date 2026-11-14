@@ -694,3 +694,70 @@ extern "C" void LeadVirtualMediaRemoveButton(UIView *view) {
     if(NSThread.isMainThread)[[LeadVirtualMedia shared] forgetCallView:view];
     else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] forgetCallView:view];});
 }
+
+// Incoming video choices are attached to Telegram's CallKit provider, not to
+// its outgoing "Video call" button. A CallKit answer action must be fulfilled
+// promptly; delay only the optional gallery picker, never the real answer.
+static NSMutableSet<NSUUID *> *LeadIncomingVideoIDs(void) {
+    static NSMutableSet<NSUUID *> *ids=nil;
+    static dispatch_once_t once;
+    dispatch_once(&once,^{ids=[NSMutableSet set];});
+    return ids;
+}
+static void (*gTelegramOriginalAnswer)(id,SEL,CXProvider *,CXAnswerCallAction *)=nullptr;
+static void LeadTelegramAnswer(id delegate,SEL selector,CXProvider *provider,CXAnswerCallAction *action) {
+    BOOL incomingVideo=NO;
+    @synchronized(LeadIncomingVideoIDs()) {
+        incomingVideo=[LeadIncomingVideoIDs() containsObject:action.callUUID];
+        [LeadIncomingVideoIDs() removeObject:action.callUUID];
+    }
+    if(incomingVideo) {
+        [[LeadVirtualMedia shared] incomingVideoAnswered];
+    } else if(gMode.load()==3) {
+        // Previous outgoing file ended; never carry muted PCM into the next
+        // ordinary voice/video call.
+        [[LeadVirtualMedia shared] normalIncomingAnswer];
+    }
+    if(gTelegramOriginalAnswer)gTelegramOriginalAnswer(delegate,selector,provider,action);
+    if(incomingVideo) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.7*NSEC_PER_SEC)),
+            dispatch_get_main_queue(),^{
+            [[LeadVirtualMedia shared] showIncomingSourceMenu];
+        });
+    }
+}
+static void LeadHookIncomingAnswerDelegate(id delegate) {
+    if(!delegate || ![NSStringFromClass([delegate class]) containsString:@"CallKitProviderDelegate"])return;
+    @synchronized([LeadVirtualMedia shared]) {
+        if(gTelegramOriginalAnswer)return;
+        Method method=class_getInstanceMethod([delegate class],
+                    NSSelectorFromString(@"provider:performAnswerCallAction:"));
+        if(!method) {
+            NSLog(@"[LeadVirtualMedia] Telegram CallKit answer handler unavailable");
+            return;
+        }
+        gTelegramOriginalAnswer=(decltype(gTelegramOriginalAnswer))
+            method_setImplementation(method,(IMP)LeadTelegramAnswer);
+        NSLog(@"[LeadVirtualMedia] incoming video answer options installed");
+    }
+}
+
+%hook CXProvider
+- (void)setDelegate:(id<CXProviderDelegate>)delegate queue:(dispatch_queue_t)queue {
+    LeadHookIncomingAnswerDelegate(delegate);
+    %orig(delegate,queue);
+}
+- (void)reportNewIncomingCallWithUUID:(NSUUID *)uuid update:(CXCallUpdate *)update
+    completion:(void (^)(NSError *))completion {
+    if(uuid && update.hasVideo) {
+        @synchronized(LeadIncomingVideoIDs()) {
+            [LeadIncomingVideoIDs() addObject:uuid];
+        }
+    }
+    // Reset any ended virtual call before an ordinary incoming call arrives.
+    if(gMode.load()==3) {
+        [[LeadVirtualMedia shared] normalIncomingAnswer];
+    }
+    %orig(uuid,update,completion);
+}
+%end
