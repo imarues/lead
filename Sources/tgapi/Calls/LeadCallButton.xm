@@ -4,7 +4,7 @@
 #import <objc/runtime.h>
 #import "LeadCallRecording.h"
 #import "LeadCallAudio.h"
-extern void LeadRecordingPresentSaveOptions(NSURL *file,NSError *warning,UIViewController *presenter);
+extern "C" void LeadRecordingPresentSaveOptions(NSURL *file,NSError *warning,UIViewController *presenter);
 #import "../UI/LeadDesign.h"
 extern "C" void LeadVirtualMediaInstallButton(UIView *view);
 extern "C" void LeadVirtualMediaInstallEarlyHooks(void);
