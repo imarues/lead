@@ -7,6 +7,7 @@
 #import <AudioUnit/AudioUnit.h>
 extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
     const AudioStreamBasicDescription *format, UInt32 frames);
+extern "C" bool LeadVirtualMediaHighQualityEnabled(void);
 
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -49,6 +50,12 @@ typedef OSStatus (*SetPropertyProc)(AudioUnit, AudioUnitPropertyID,
     AudioUnitScope, AudioUnitElement, const void *, UInt32);
 static RenderProc gOriginalRender = nullptr;
 static SetPropertyProc gOriginalSetProperty = nullptr;
+// Configure VoiceProcessingIO only during a user-chosen gallery video call.
+// No behavior change for a normal Telegram call.
+typedef OSStatus (*AudioUnitSimpleProc)(AudioUnit);
+static AudioUnitSimpleProc gOriginalInitialize = nullptr;
+static AudioUnitSimpleProc gOriginalOutputUnitStart = nullptr;
+static std::atomic<AudioUnit> gLastHQUnit{nullptr};
 
 struct OutputCallback {
     AURenderCallback original;
@@ -161,6 +168,43 @@ static OSStatus leadAudioUnitSetProperty(AudioUnit unit, AudioUnitPropertyID pro
     return gOriginalSetProperty(unit,property,scope,element,data,size);
 }
 
+// VoiceProcessingIO may run speech noise suppression / echo cancellation and
+// automatic gain control over prerecorded media. Apple exposes an explicit
+// bypass for its microphone uplink. This is scoped to virtual-video calls;
+// failures fall back to the normal (working) CoreAudio path.
+static void setVirtualVoiceProcessing(AudioUnit unit) {
+    if(!unit || !gOriginalSetProperty)return;
+    AudioComponent component=AudioComponentInstanceGetComponent(unit);
+    AudioComponentDescription d={};
+    if(!component || AudioComponentGetDescription(component,&d)!=noErr ||
+       d.componentType!=kAudioUnitType_Output ||
+       d.componentSubType!=kAudioUnitSubType_VoiceProcessingIO)return;
+    const bool highQuality=LeadVirtualMediaHighQualityEnabled();
+    if(!highQuality && gLastHQUnit.load(std::memory_order_acquire)!=unit)
+        return;
+    UInt32 bypass=highQuality?1:0;
+    UInt32 agc=highQuality?0:1;
+    const OSStatus b=gOriginalSetProperty(unit,kAUVoiceIOProperty_BypassVoiceProcessing,
+        kAudioUnitScope_Global,0,&bypass,sizeof(bypass));
+    const OSStatus a=gOriginalSetProperty(unit,kAUVoiceIOProperty_VoiceProcessingEnableAGC,
+        kAudioUnitScope_Global,0,&agc,sizeof(agc));
+    if(highQuality && b==noErr)gLastHQUnit.store(unit,std::memory_order_release);
+    else if(!highQuality && b==noErr)gLastHQUnit.store(nullptr,std::memory_order_release);
+    NSLog(@"[LeadVirtualMedia] VoiceProcessingIO high quality=%d bypass=%d agc=%d",
+          (int)highQuality,(int)b,(int)a);
+}
+static OSStatus leadAudioUnitInitialize(AudioUnit unit) {
+    if(!gOriginalInitialize)return -1;
+    const OSStatus status=gOriginalInitialize(unit);
+    if(status==noErr)setVirtualVoiceProcessing(unit);
+    return status;
+}
+static OSStatus leadAudioOutputUnitStart(AudioUnit unit) {
+    if(!gOriginalOutputUnitStart)return -1;
+    setVirtualVoiceProcessing(unit);
+    return gOriginalOutputUnitStart(unit);
+}
+
 // Rebind import slots in present/future Mach-O images. There are no global
 // behavioral changes unless explicit recording is active. Unwritable image
 // pages are left untouched (fail closed instead of risking a crash).
@@ -177,6 +221,8 @@ static void bindSection(const section_64 *sec, intptr_t slide,
         void *replacement=nullptr;
         if (strcmp(name,"_AudioUnitRender")==0) replacement=(void*)&leadAudioUnitRender;
         else if (strcmp(name,"_AudioUnitSetProperty")==0) replacement=(void*)&leadAudioUnitSetProperty;
+        else if (strcmp(name,"_AudioUnitInitialize")==0) replacement=(void*)&leadAudioUnitInitialize;
+        else if (strcmp(name,"_AudioOutputUnitStart")==0) replacement=(void*)&leadAudioOutputUnitStart;
         if (!replacement) continue;
         void **slot=(void**)(address+i*sizeof(void*));
         if (*slot==replacement) continue;
@@ -267,6 +313,8 @@ extern "C" void LeadCallAudioInstallHooks(void) {
         gWriterQueue=dispatch_queue_create("lead.calls.audio.writer",DISPATCH_QUEUE_SERIAL);
         gOriginalRender=(RenderProc)dlsym(RTLD_DEFAULT,"AudioUnitRender");
         gOriginalSetProperty=(SetPropertyProc)dlsym(RTLD_DEFAULT,"AudioUnitSetProperty");
+        gOriginalInitialize=(AudioUnitSimpleProc)dlsym(RTLD_DEFAULT,"AudioUnitInitialize");
+        gOriginalOutputUnitStart=(AudioUnitSimpleProc)dlsym(RTLD_DEFAULT,"AudioOutputUnitStart");
         if(gOriginalRender && gOriginalSetProperty) {
             _dyld_register_func_for_add_image(bindImage);
             gHooksReady=YES;
