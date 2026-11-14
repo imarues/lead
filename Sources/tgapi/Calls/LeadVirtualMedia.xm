@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CoreImage/CoreImage.h>
 #import <AVFoundation/AVPlayerLayer.h>
 #import <CallKit/CallKit.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -89,6 +90,9 @@ extern "C" id objc_retain(id);
 @property(nonatomic,strong) UIView *localPreviewView;
 @property(nonatomic,strong) AVPlayer *localPreviewPlayer;
 @property(nonatomic,strong) AVPlayerLayer *localPreviewLayer;
+@property(nonatomic,strong) AVPlayerItemVideoOutput *localPreviewPixelOutput;
+@property(nonatomic,strong) CIContext *localRecordingCIContext;
+@property(nonatomic,strong) UIImage *localRecordingLastFrame;
 // Preview-only UI layout. Never used by tgcalls, the video encoder, or audio.
 @property(nonatomic,assign) CGFloat localPreviewScale;
 @property(nonatomic,assign) CGPoint localPreviewNormalizedCenter;
@@ -115,6 +119,7 @@ extern "C" id objc_retain(id);
 - (void)capturePhysicalCamera:(id)camera;
 - (void)startLocalPreview;
 - (void)removeLocalPreview;
+- (void)drawGalleryPreviewIntoRecording:(UIView *)root;
 - (void)dragLocalPreview:(UIPanGestureRecognizer *)gesture;
 - (void)pinchLocalPreview:(UIPinchGestureRecognizer *)gesture;
 - (void)layoutLocalPreviewInHost:(UIView *)host;
@@ -383,8 +388,13 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     CGSize native=v.naturalSize;
     video.sourceWidth=(NSInteger)fabs(native.width);
     video.sourceHeight=(NSInteger)fabs(native.height);
-    video.sourceFPS=(v.nominalFrameRate>0 && isfinite(v.nominalFrameRate))
-                  ? std::min(60.0,(double)v.nominalFrameRate) : 30.0;
+    // High-detail calls: spending the same negotiated bandwidth on fewer
+    // frames usually preserves more detail per frame. Never upscale source.
+    // The actual encoder bitrate remains controlled by Telegram/WebRTC.
+    const double sourceRate=(v.nominalFrameRate>0 && isfinite(v.nominalFrameRate))
+                             ? (double)v.nominalFrameRate : 30.0;
+    const bool highPixels=(video.sourceWidth*video.sourceHeight>1280*720);
+    video.sourceFPS=std::max(12.0,std::min(highPixels?24.0:30.0,sourceRate));
     video.lastSubmittedPTS=-1.0;
     size_t inspected=std::min((size_t)48000,clipSound->samples.size());
     uint16_t peak=0;
@@ -783,6 +793,9 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     [self.localPreviewView removeFromSuperview];
     self.localPreviewPlayer=nil;
     self.localPreviewLayer=nil;
+    self.localPreviewPixelOutput=nil;
+    self.localRecordingLastFrame=nil;
+    self.localRecordingCIContext=nil;
     self.localPreviewView=nil;
     self.localPreviewScale=1.0;
     self.localPreviewNormalizedCenter=CGPointZero;
@@ -876,7 +889,18 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         return;
     }
     if(!self.localPreviewPlayer) {
-        self.localPreviewPlayer=[AVPlayer playerWithURL:self.selectedURL];
+        // The AVPlayerLayer is hardware-composited and is not reliably
+        // included in UIKit drawViewHierarchyInRect or CALayer snapshots.
+        // Feed the recorder a second pixel-buffer tap from this same player.
+        AVPlayerItem *item=[AVPlayerItem playerItemWithURL:self.selectedURL];
+        NSDictionary *pixelAttributes=@{
+            (id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferIOSurfacePropertiesKey:@{}
+        };
+        self.localPreviewPixelOutput=[[AVPlayerItemVideoOutput alloc]
+            initWithPixelBufferAttributes:pixelAttributes];
+        [item addOutput:self.localPreviewPixelOutput];
+        self.localPreviewPlayer=[AVPlayer playerWithPlayerItem:item];
         self.localPreviewPlayer.muted=YES;
         self.localPreviewPlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
         AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.localPreviewPlayer];
@@ -919,6 +943,65 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         [self.localPreviewView removeFromSuperview];
         [host addSubview:self.localPreviewView];
     }
+}
+
+
+- (void)drawGalleryPreviewIntoRecording:(UIView *)root {
+    // Called on the main-thread CADisplayLink while UIGraphics holds the
+    // recorder's pixel-buffer context (already scaled to the capture root).
+    // Only composite the visible, user-owned preview and never change the
+    // outgoing Telegram frames or the receiver's display.
+    if(!NSThread.isMainThread || gMode.load()!=2 || !root ||
+       !UIGraphicsGetCurrentContext())return;
+    UIView *preview=self.localPreviewView;
+    AVPlayerItemVideoOutput *output=self.localPreviewPixelOutput;
+    AVPlayer *player=self.localPreviewPlayer;
+    if(!preview || !preview.window || !output || !player ||
+       ![preview isDescendantOfView:root])return;
+    CGRect rect=[preview convertRect:preview.bounds toView:root];
+    rect=CGRectIntersection(rect,root.bounds);
+    if(CGRectIsNull(rect) || rect.size.width<8 || rect.size.height<8)return;
+    // The output returns exactly the composited AVPlayer video frame.
+    CMTime time=player.currentTime;
+    CVPixelBufferRef buffer=[output copyPixelBufferForItemTime:time
+                                      itemTimeForDisplay:NULL];
+    if(buffer) {
+        if(!self.localRecordingCIContext)
+            self.localRecordingCIContext=[CIContext contextWithOptions:
+                @{kCIContextUseSoftwareRenderer:@NO}];
+        CIImage *image=[CIImage imageWithCVPixelBuffer:buffer];
+        // Bound GPU readback to the preview size. A 4K source would otherwise
+        // force a full-resolution readback 30x per second.
+        CGFloat maxDimension=MAX(image.extent.size.width,image.extent.size.height);
+        CGFloat factor=MIN(1.0,850.0/MAX(1.0,maxDimension));
+        if(factor<1.0)
+            image=[image imageByApplyingTransform:
+                   CGAffineTransformMakeScale(factor,factor)];
+        CGImageRef picture=[self.localRecordingCIContext
+                           createCGImage:image fromRect:image.extent];
+        if(picture) {
+            self.localRecordingLastFrame=[UIImage imageWithCGImage:picture];
+            CGImageRelease(picture);
+        }
+        CVPixelBufferRelease(buffer);
+    }
+    UIImage *frame=self.localRecordingLastFrame;
+    if(!frame)return;
+    const CGSize size=frame.size;
+    CGFloat scale=MAX(rect.size.width/MAX(1.0,size.width),
+                      rect.size.height/MAX(1.0,size.height));
+    CGRect imageRect=CGRectMake(CGRectGetMidX(rect)-size.width*scale/2.0,
+                              CGRectGetMidY(rect)-size.height*scale/2.0,
+                              size.width*scale,size.height*scale);
+    CGContextRef context=UIGraphicsGetCurrentContext();
+    CGContextSaveGState(context);
+    [[UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:12] addClip];
+    [frame drawInRect:imageRect];
+    CGContextRestoreGState(context);
+    [[UIColor colorWithWhite:1.0 alpha:0.85] setStroke];
+    UIBezierPath *outline=[UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:12];
+    outline.lineWidth=1.0;
+    [outline stroke];
 }
 
 @end
@@ -1100,3 +1183,10 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
     %orig(uuid,update,completion);
 }
 %end
+
+// Draw the actual media frame over the hardware-backed preview which UIKit
+// screen capture would otherwise render as blank. Must be called while the
+// recording CG bitmap context is current on the main thread.
+extern "C" void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot) {
+    [[LeadVirtualMedia shared] drawGalleryPreviewIntoRecording:captureRoot];
+}
