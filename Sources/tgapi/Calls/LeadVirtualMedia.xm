@@ -350,10 +350,26 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     memcpy(clipSound->samples.data(),pcmData.bytes,pcmData.length);
     AVAssetReader *vr=[[AVAssetReader alloc] initWithAsset:asset error:&error];
     if(!vr){[self showError:@"فشل فتح مسار الفيديو."];[self finishPicker:NO];return;}
+    // Hardware video-range NV12 avoids costly BGRA->YUV conversions before
+    // Telegram's native I420/WebRTC encoder. Keep the original frame size.
     AVAssetReaderTrackOutput *vo=[[AVAssetReaderTrackOutput alloc] initWithTrack:v
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA)}];
+        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
+            @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)}];
     vo.alwaysCopiesSampleData=NO;[vr addOutput:vo];
-    if(![vr startReading]){[self showError:@"فشل فك إطارات الفيديو."];[self finishPicker:NO];return;}
+    if(![vr startReading]) {
+        NSLog(@"[LeadVirtualMedia] NV12 decode unsupported; falling back to BGRA");
+        vr=[[AVAssetReader alloc] initWithAsset:asset error:&error];
+        if(!vr){[self showError:@"فشل فك إطارات الفيديو."];[self finishPicker:NO];return;}
+        vo=[[AVAssetReaderTrackOutput alloc] initWithTrack:v
+            outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
+                @(kCVPixelFormatType_32BGRA)}];
+        vo.alwaysCopiesSampleData=NO;
+        [vr addOutput:vo];
+        if(![vr startReading]) {
+            [self showError:@"فشل فك إطارات الفيديو."];
+            [self finishPicker:NO];return;
+        }
+    }
     LeadVirtualClip *video=[LeadVirtualClip new];
     video.reader=vr;video.frames=vo;video.duration=duration;
     // Preserve every original-resolution frame; do not pre-downscale.
@@ -888,6 +904,11 @@ extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
     return true;
 }
 
+// Proactively hook native media before calls appear, so Telegram's physical
+// capturer can be retained even when constructed during the ringtone.
+extern "C" void LeadVirtualMediaInstallEarlyHooks(void) {
+    (void)[[LeadVirtualMedia shared] installNativeHooks];
+}
 extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL)) {
     dispatch_async(dispatch_get_main_queue(),^{
         LeadVirtualMedia *m=[LeadVirtualMedia shared];
@@ -927,14 +948,13 @@ static void LeadTelegramAnswer(id delegate,SEL selector,CXProvider *provider,CXA
         incomingVideo=[LeadIncomingVideoIDs() containsObject:action.callUUID];
         [LeadIncomingVideoIDs() removeObject:action.callUUID];
     }
-    // Answer synchronously first. Changing mic state or touching the call's
-    // WebRTC capturer before action.fulfill() could reject incoming calls.
-    if(gTelegramOriginalAnswer)gTelegramOriginalAnswer(delegate,selector,provider,action);
+    // Gate VIDEO frames only; do not block or delay CallKit's actual
+    // synchronous Answer. A video track can be initialized during acceptance.
     if(incomingVideo) {
-        // Extra protection directly before Telegram fulfills Answer.
         gIncomingPrivacyGate.store(true,std::memory_order_release);
         [[LeadVirtualMedia shared] protectIncomingCamera];
     }
+    if(gTelegramOriginalAnswer)gTelegramOriginalAnswer(delegate,selector,provider,action);
     if(incomingVideo) {
         dispatch_async(dispatch_get_main_queue(),^{
             LeadVirtualMedia *m=[LeadVirtualMedia shared];
@@ -974,6 +994,10 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
     [[LeadVirtualMedia shared] installIncomingObservers];
     (void)[[LeadVirtualMedia shared] installNativeHooks];
     gObservedCallState.store(-1);
+    // Reset the PREVIOUS terminated virtual clip before protecting the
+    // incoming camera, otherwise the reset would immediately disarm the gate.
+    if(gMode.load()==3)
+        [[LeadVirtualMedia shared] normalIncomingAnswer];
     if(uuid && update.hasVideo) {
         // This runs before the user taps Answer and before the WebRTC
         // outgoing video track can start from the incoming call.
@@ -982,10 +1006,6 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
         @synchronized(LeadIncomingVideoIDs()) {
             [LeadIncomingVideoIDs() addObject:uuid];
         }
-    }
-    // Reset any ended virtual call before an ordinary incoming call arrives.
-    if(gMode.load()==3) {
-        [[LeadVirtualMedia shared] normalIncomingAnswer];
     }
     %orig(uuid,update,completion);
 }
