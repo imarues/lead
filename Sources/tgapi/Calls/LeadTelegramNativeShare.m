@@ -179,7 +179,7 @@ static LeadTelegramNativeShareAttempt *gActiveTelegramShare=nil;
 }
 @end
 
-extern "C" void LeadOpenTelegramSharePicker(NSURL *file,
+void LeadOpenTelegramSharePicker(NSURL *file,
     UIViewController *presenter,void (^fallback)(void)) {
     if(!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(),^{
