@@ -31,6 +31,7 @@ static std::atomic<bool> gConnected{false};
 static std::atomic<bool> gIncomingChoice{false};
 static std::atomic<bool> gIncomingConnected{false};
 static std::atomic<int> gPreviousRemoteVideo{-1};
+static std::atomic<int> gObservedCallState{-1};
 static std::atomic<double> gStartClock{0};
 static std::atomic<bool> gExternalAudio{false};
 static std::atomic<uint64_t> gMicInjectedFrames{0};
@@ -75,6 +76,9 @@ extern "C" id objc_retain(id);
 @property(nonatomic,strong) NSURL *selectedURL;
 @property(nonatomic,assign) uint64_t nextAudioSample;
 @property(nonatomic,strong) dispatch_source_t playbackTimer;
+@property(nonatomic,assign) BOOL incomingMenuPresented;
+@property(nonatomic,assign) BOOL incomingAwaitingMenu;
+@property(nonatomic,assign) NSInteger incomingAttachAttempts;
 + (instancetype)shared;
 - (void)preparePicker:(void(^)(BOOL))completion;
 - (void)resetAll;
@@ -90,6 +94,8 @@ extern "C" id objc_retain(id);
 - (void)showIncomingSourceMenu;
 - (void)attachIncomingGalleryVideo;
 - (void)normalIncomingAnswer;
+- (void)installIncomingObservers;
+- (void)incomingDidBecomeActive:(NSNotification *)note;
 @end
 
 static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, bool keepLandscape) {
@@ -111,6 +117,8 @@ static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, 
     return gNativeInit ? gNativeInit(self,command,deviceId,keepLandscape) : self;
 }
 static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
+    // Observe the current WebRTC call even before a gallery movie is chosen.
+    // Late hook activation previously lost the incoming call context.
     [[LeadVirtualMedia shared] nativeContextReady:self];
     LeadStateBlock original=[block copy];
     LeadStateBlock wrapped=^(int32_t state,int32_t v,int32_t rv,int32_t ra,int32_t b,float aspect) {
@@ -337,15 +345,16 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     [self maybeStart];
 }
 - (void)nativeContextReady:(id)context {
-    if(gIncomingChoice.load()) {
-        self.incomingNativeContext=context;
-    }
+    // Keep a weak reference to the actual private-call transport, independent
+    // of any selected media. Do not hold terminated calls alive.
+    self.incomingNativeContext=context;
     if(gMode.load()==0 || gMode.load()==4)return;
     @synchronized(self){self.nativeCallContext=context;}
     [self maybeStart];
 }
 - (void)nativeState:(int32_t)state {
     // WebRTC: 0 initializing, 1 connected (answered), 2 failed, 3 reconnecting.
+    gObservedCallState.store(state);
     if(gIncomingChoice.load()) {
         if(state==1)gIncomingConnected.store(true);
         else if(state==2)gIncomingConnected.store(false);
@@ -502,7 +511,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         NSArray<CXCall *> *calls=observer.calls;
         if(calls.count==1) {
             CXCall *call=calls.firstObject;
-            if(call.outgoing && call.hasConnected && !call.hasEnded) {
+            if(call.hasConnected && !call.hasEnded) {
                 CXCallController *controller=[CXCallController new];
                 CXEndCallAction *action=[[CXEndCallAction alloc] initWithCallUUID:call.UUID];
                 CXTransaction *transaction=[[CXTransaction alloc] initWithAction:action];
@@ -527,34 +536,54 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 
 
 - (void)incomingVideoAnswered {
-    // CallKit requires the answer action to be fulfilled immediately. The
-    // original Telegram answer handler runs first; the menu is shown as soon
-    // as the normal in-app call screen is available.
-    [self resetAll];
-    self.incomingNativeContext=nil;
-    gPreviousRemoteVideo.store(-1);
-    gIncomingConnected.store(false);
+    // IMPORTANT: Run *after* CallKit's original answer handler. Do not touch
+    // audio, disable camera, or reset the WebRTC context during the handshake.
+    // The user can continue the already connected call normally.
+    if(gMode.load()==3)[self resetAll];
     gIncomingChoice.store(true);
-    gMode.store(4); // Silence only until a choice is made.
+    gIncomingConnected.store(gObservedCallState.load()==1);
+    self.incomingAwaitingMenu=YES;
+    self.incomingMenuPresented=NO;
+    self.incomingAttachAttempts=0;
     (void)[self installNativeHooks];
+    NSLog(@"[LeadVirtualMedia] incoming video answered; normal call remains active");
 }
 - (void)normalIncomingAnswer {
+    // Explicit normal path: never mute microphone or alter camera.
     [self resetAll];
     gIncomingChoice.store(false);
     gIncomingConnected.store(false);
+    self.incomingMenuPresented=NO;
+    self.incomingAwaitingMenu=NO;
+    self.incomingAttachAttempts=0;
     self.incomingNativeContext=nil;
 }
+- (void)installIncomingObservers {
+    static dispatch_once_t once;
+    dispatch_once(&once,^{
+        [[NSNotificationCenter defaultCenter] addObserver:self
+            selector:@selector(incomingDidBecomeActive:)
+            name:UIApplicationDidBecomeActiveNotification object:nil];
+    });
+}
+- (void)incomingDidBecomeActive:(__unused NSNotification *)note {
+    if(self.incomingAwaitingMenu)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.45*NSEC_PER_SEC)),
+            dispatch_get_main_queue(),^{[self showIncomingSourceMenu];});
+}
 - (void)showIncomingSourceMenu {
-    if(!gIncomingChoice.load())return;
+    if(!gIncomingChoice.load() || !self.incomingAwaitingMenu || self.incomingMenuPresented)return;
     if(!NSThread.isMainThread){
         dispatch_async(dispatch_get_main_queue(),^{[self showIncomingSourceMenu];});
         return;
     }
+    // iOS may show its CallKit answer UI while Telegram is backgrounded.
+    // Defer the optional menu; never reject or interrupt the accepted call.
+    if(UIApplication.sharedApplication.applicationState!=UIApplicationStateActive)return;
     UIViewController *host=[self host];
-    if(!host) {
-        [self normalIncomingAnswer];
-        return;
-    }
+    if(!host)return;
+    self.incomingMenuPresented=YES;
+    self.incomingAwaitingMenu=NO;
     UIAlertController *choices=[UIAlertController
         alertControllerWithTitle:@"الرد على مكالمة الفيديو"
         message:@"المكالمة تم قبولها. اختر كامرتك الطبيعية أو فيديو من المعرض"
@@ -576,6 +605,16 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 - (void)attachIncomingGalleryVideo {
     if(!gIncomingChoice.load() || gMode.load()!=1)return;
     id native=self.incomingNativeContext;
+    if(!native || gObservedCallState.load()!=1) {
+        if(self.incomingAttachAttempts++<12) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.5*NSEC_PER_SEC)),
+                dispatch_get_main_queue(),^{[self attachIncomingGalleryVideo];});
+            return;
+        }
+        NSLog(@"[LeadVirtualMedia] incoming call never connected; no gallery injection");
+        [self finishPicker:NO];
+        return;
+    }
     Class cls=objc_getClass("OngoingCallThreadLocalContextVideoCapturer");
     SEL factory=NSSelectorFromString(@"capturerWithExternalSampleBufferProvider");
     if(!native || !cls || ![cls respondsToSelector:factory] ||
@@ -592,15 +631,18 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         [self finishPicker:NO];
         return;
     }
+    // RequestVideo: does nothing while a previous camera capturer exists.
+    // Remove only the *outgoing* camera track, preserving incoming video.
+    if([native respondsToSelector:@selector(disableVideo)])
+        ((void (*)(id,SEL))objc_msgSend)(native,@selector(disableVideo));
+    ((void (*)(id,SEL,id))objc_msgSend)(native,@selector(requestVideo:),custom);
     @synchronized(self) {
         self.externalCapturer=custom;
         self.nativeCallContext=native;
     }
     gExpectCapturer.store(false);
-    gConnected.store(gIncomingConnected.load());
-    // Replace the incoming call's outgoing video track in the existing
-    // Telegram WebRTC call. No new call or separate transport is created.
-    ((void (*)(id,SEL,id))objc_msgSend)(native,@selector(requestVideo:),custom);
+    gConnected.store(true);
+    // The original remote incoming video track is untouched.
     [self maybeStart];
     [self finishPicker:YES];
 }
@@ -711,18 +753,19 @@ static void LeadTelegramAnswer(id delegate,SEL selector,CXProvider *provider,CXA
         incomingVideo=[LeadIncomingVideoIDs() containsObject:action.callUUID];
         [LeadIncomingVideoIDs() removeObject:action.callUUID];
     }
-    if(incomingVideo) {
-        [[LeadVirtualMedia shared] incomingVideoAnswered];
-    } else if(gMode.load()==3) {
-        // Previous outgoing file ended; never carry muted PCM into the next
-        // ordinary voice/video call.
-        [[LeadVirtualMedia shared] normalIncomingAnswer];
-    }
+    // Answer synchronously first. Changing mic state or touching the call's
+    // WebRTC capturer before action.fulfill() could reject incoming calls.
     if(gTelegramOriginalAnswer)gTelegramOriginalAnswer(delegate,selector,provider,action);
     if(incomingVideo) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.7*NSEC_PER_SEC)),
-            dispatch_get_main_queue(),^{
-            [[LeadVirtualMedia shared] showIncomingSourceMenu];
+        dispatch_async(dispatch_get_main_queue(),^{
+            LeadVirtualMedia *m=[LeadVirtualMedia shared];
+            [m incomingVideoAnswered];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.65*NSEC_PER_SEC)),
+                dispatch_get_main_queue(),^{[m showIncomingSourceMenu];});
+        });
+    } else if(gMode.load()!=0 && gMode.load()!=2) {
+        dispatch_async(dispatch_get_main_queue(),^{
+            [[LeadVirtualMedia shared] normalIncomingAnswer];
         });
     }
 }
@@ -749,6 +792,9 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
 }
 - (void)reportNewIncomingCallWithUUID:(NSUUID *)uuid update:(CXCallUpdate *)update
     completion:(void (^)(NSError *))completion {
+    [[LeadVirtualMedia shared] installIncomingObservers];
+    (void)[[LeadVirtualMedia shared] installNativeHooks];
+    gObservedCallState.store(-1);
     if(uuid && update.hasVideo) {
         @synchronized(LeadIncomingVideoIDs()) {
             [LeadIncomingVideoIDs() addObject:uuid];
