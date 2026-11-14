@@ -79,6 +79,7 @@ extern "C" id objc_retain(id);
 @property(nonatomic,assign) BOOL incomingMenuPresented;
 @property(nonatomic,assign) BOOL incomingAwaitingMenu;
 @property(nonatomic,assign) NSInteger incomingAttachAttempts;
+@property(nonatomic,strong) NSUUID *incomingAnsweredUUID;
 + (instancetype)shared;
 - (void)preparePicker:(void(^)(BOOL))completion;
 - (void)resetAll;
@@ -90,7 +91,8 @@ extern "C" id objc_retain(id);
 - (void)rememberCallView:(UIView *)view;
 - (void)forgetCallView:(UIView *)view;
 - (void)endTelegramCallWhenFinished;
-- (void)incomingVideoAnswered;
+- (void)incomingVideoAnsweredForUUID:(NSUUID *)uuid;
+- (BOOL)hasLiveIncomingVideoCall;
 - (void)showIncomingSourceMenu;
 - (void)attachIncomingGalleryVideo;
 - (void)normalIncomingAnswer;
@@ -535,7 +537,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 }
 
 
-- (void)incomingVideoAnswered {
+- (void)incomingVideoAnsweredForUUID:(NSUUID *)uuid {
+    self.incomingAnsweredUUID=uuid;
     // IMPORTANT: Run *after* CallKit's original answer handler. Do not touch
     // audio, disable camera, or reset the WebRTC context during the handshake.
     // The user can continue the already connected call normally.
@@ -557,6 +560,15 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     self.incomingAwaitingMenu=NO;
     self.incomingAttachAttempts=0;
     self.incomingNativeContext=nil;
+    self.incomingAnsweredUUID=nil;
+}
+- (BOOL)hasLiveIncomingVideoCall {
+    NSUUID *expected=self.incomingAnsweredUUID;
+    if(!expected)return NO;
+    for(CXCall *call in [CXCallObserver new].calls) {
+        if([call.UUID isEqual:expected] && !call.outgoing && !call.hasEnded)return YES;
+    }
+    return NO;
 }
 - (void)installIncomingObservers {
     static dispatch_once_t once;
@@ -580,6 +592,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     // iOS may show its CallKit answer UI while Telegram is backgrounded.
     // Defer the optional menu; never reject or interrupt the accepted call.
     if(UIApplication.sharedApplication.applicationState!=UIApplicationStateActive)return;
+    if(![self hasLiveIncomingVideoCall]) {
+        [self normalIncomingAnswer];
+        return;
+    }
     UIViewController *host=[self host];
     if(!host)return;
     self.incomingMenuPresented=YES;
@@ -721,11 +737,17 @@ extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
 }
 
 extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL)) {
-    dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] preparePicker:completion];});
+    dispatch_async(dispatch_get_main_queue(),^{
+        LeadVirtualMedia *m=[LeadVirtualMedia shared];
+        // An outgoing gallery call must never inherit the previous incoming
+        // call's video selector or finished/muted microphone state.
+        [m normalIncomingAnswer];
+        [m preparePicker:completion];
+    });
 }
 extern "C" void LeadVirtualMediaReset(void) {
-    if(NSThread.isMainThread)[[LeadVirtualMedia shared] resetAll];
-    else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] resetAll];});
+    if(NSThread.isMainThread)[[LeadVirtualMedia shared] normalIncomingAnswer];
+    else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] normalIncomingAnswer];});
 }
 // Remove the old VID overlay. All selection is now before the outgoing call.
 extern "C" void LeadVirtualMediaInstallButton(UIView *view) {
@@ -759,7 +781,7 @@ static void LeadTelegramAnswer(id delegate,SEL selector,CXProvider *provider,CXA
     if(incomingVideo) {
         dispatch_async(dispatch_get_main_queue(),^{
             LeadVirtualMedia *m=[LeadVirtualMedia shared];
-            [m incomingVideoAnswered];
+            [m incomingVideoAnsweredForUUID:action.callUUID];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.65*NSEC_PER_SEC)),
                 dispatch_get_main_queue(),^{[m showIncomingSourceMenu];});
         });
