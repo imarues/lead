@@ -1,6 +1,8 @@
 // Lead call audio capture. Written independently for Lead: no iQTele binary or
 // code is linked. Capture is inactive until the user explicitly agrees.
 #import "LeadCallAudio.h"
+extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
+    const AudioStreamBasicDescription *format, UInt32 frames);
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -114,10 +116,12 @@ static void capture(Ring &ring, const AudioBufferList *abl,
 static OSStatus leadAudioUnitRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
              const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *out) {
     OSStatus status = gOriginalRender ? gOriginalRender(unit, flags, time, bus, frames, out) : -1;
-    if (status == noErr && bus == 1 && gActive.load(memory_order_relaxed) &&
-        isCallAudioUnit(unit)) {
+    if (status == noErr && bus == 1 && isCallAudioUnit(unit)) {
         AudioStreamBasicDescription f = formatFor(unit, kAudioUnitScope_Output, 1);
-        capture(gMic,out,frames,f);
+        // Replace local microphone samples only during explicitly selected movie playback.
+        // Do not leak the real microphone while the movie is preparing or after it ends.
+        LeadVirtualMediaReplaceMic(out,&f,frames);
+        if(gActive.load(memory_order_relaxed)) capture(gMic,out,frames,f);
     }
     return status;
 }
