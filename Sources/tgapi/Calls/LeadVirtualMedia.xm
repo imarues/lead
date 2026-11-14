@@ -1,15 +1,17 @@
-// Experimental outgoing-call media source for Lead.
-// Opt-in only. Never sends camera frames while a virtual clip is selected.
-// The AVFoundation delegate route varies across Telegram versions; verified
-// remote transmission requires device testing.
+// Lead virtual video call - experimental private call video source.
+// Selection occurs before dialing. No virtual frames or audio are sent until
+// tgcalls reports OngoingCallStateConnected. No ordinary microphone fallback.
 #import <UIKit/UIKit.h>
-#import <AVFoundation/AVFoundation.h>
 #import <PhotosUI/PhotosUI.h>
+#import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
+#import <math.h>
 #include <atomic>
-#include <cmath>
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -17,383 +19,391 @@
 
 namespace {
 struct AudioClip { std::vector<int16_t> samples; };
-static std::shared_ptr<AudioClip> gAudioClip;
-static std::atomic<int> gVirtualState{0}; // 0 normal; 1 waiting for camera; 2 streaming; 3 completed/muted
+static std::shared_ptr<AudioClip> gPCM;
+static std::atomic<int> gMode{0}; // 0 normal, 1 armed/ringing, 2 connected/playing, 3 finished/muted
+static std::atomic<bool> gExpectCapturer{false};
+static std::atomic<bool> gConnected{false};
 static std::atomic<double> gStartClock{0};
-static std::atomic<double> gClipDuration{0};
-static char kVirtualButtonKey;
-static char kCaptureProxyKey;
-}
-
-extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
-                                           const AudioStreamBasicDescription *format,
-                                           UInt32 frames) {
-    if(gVirtualState.load(std::memory_order_acquire)==0) return false;
-    if(!buffers || !format) return true;
-    // Explicit privacy rule: no microphone fallback even for unsupported formats.
-    const bool flt=(format->mFormatFlags & kAudioFormatFlagIsFloat)!=0;
-    const bool planar=(format->mFormatFlags & kAudioFormatFlagIsNonInterleaved)!=0;
-    const bool integer=(format->mFormatFlags & kAudioFormatFlagIsSignedInteger)!=0;
-    const unsigned bits=format->mBitsPerChannel;
-    const unsigned channels=std::max(1u,format->mChannelsPerFrame);
-    const double outputRate=format->mSampleRate;
-    const bool supported=(flt && bits==32)||(integer && (bits==16 || bits==32));
-    auto pcm=std::atomic_load(&gAudioClip);
-    double start=gStartClock.load(std::memory_order_acquire);
-    const bool playing=gVirtualState.load(std::memory_order_relaxed)==2 && start>0
-        && outputRate>=8000 && outputRate<=192000 && std::isfinite(outputRate)
-        && pcm && !pcm->samples.empty();
-    const double position=playing ? std::max(0.0,CACurrentMediaTime()-start) : 0;
-    for(UInt32 b=0;b<buffers->mNumberBuffers;b++) {
-        AudioBuffer &buf=buffers->mBuffers[b];
-        if(!buf.mData)continue;
-        if(!supported || !playing || (planar && b>0 && b>=channels)) {
-            memset(buf.mData,0,buf.mDataByteSize);
-            continue;
-        }
-        unsigned samplesPerFrame=planar?1:channels;
-        unsigned bytesPerSample=bits/8;
-        UInt32 count=std::min(frames,buf.mDataByteSize/
-                                    std::max(1u,samplesPerFrame*bytesPerSample));
-        // The movie's PCM is converted to 48 kHz mono before enabling this hook.
-        for(UInt32 i=0;i<count;i++) {
-            uint64_t mediaIndex=(uint64_t)((position+i/outputRate)*48000.0);
-            float value=mediaIndex<pcm->samples.size()
-                     ? pcm->samples[(size_t)mediaIndex]/32768.0f:0.0f;
-            for(unsigned c=0;c<samplesPerFrame;c++) {
-                size_t idx=(size_t)i*samplesPerFrame+c;
-                if(flt)((float*)buf.mData)[idx]=value;
-                else if(bits==16)((int16_t*)buf.mData)[idx]=(int16_t)lrintf(value*32767.0f);
-                else ((int32_t*)buf.mData)[idx]=(int32_t)llrint((double)value*2147483647.0);
-            }
-        }
-        const size_t used=(size_t)count*samplesPerFrame*bytesPerSample;
-        if(used<buf.mDataByteSize)memset((uint8_t*)buf.mData+used,0,buf.mDataByteSize-used);
-    }
-    return true;
+static std::atomic<bool> gExternalAudio{false};
+static bool gNativeHooksReady=false;
+static id (*gNativeInit)(id,SEL,NSString *,bool)=nullptr;
+typedef void (^LeadStateBlock)(int32_t,int32_t,int32_t,int32_t,int32_t,float);
+static void (*gNativeStateSetter)(id,SEL,LeadStateBlock)=nullptr;
+static void (*gNativeRequestVideo)(id,SEL,id)=nullptr;
+extern "C" void objc_release(id);
 }
 
 @interface LeadVirtualClip : NSObject
 @property(nonatomic,strong) AVAssetReader *reader;
-@property(nonatomic,strong) AVAssetReaderTrackOutput *output;
-@property(nonatomic,assign) CMSampleBufferRef currentFrame;
-@property(nonatomic,assign) CMSampleBufferRef futureFrame;
-@property(nonatomic,assign) BOOL reachedEnd;
+@property(nonatomic,strong) AVAssetReaderTrackOutput *frames;
+@property(nonatomic,assign) CMSampleBufferRef current;
+@property(nonatomic,assign) CMSampleBufferRef next;
+@property(nonatomic,assign) BOOL exhausted;
 @property(nonatomic,assign) NSTimeInterval duration;
 @end
 @implementation LeadVirtualClip
 - (void)dealloc {
-    if(_currentFrame)CFRelease(_currentFrame);
-    if(_futureFrame)CFRelease(_futureFrame);
+    if(_current)CFRelease(_current);
+    if(_next)CFRelease(_next);
     [_reader cancelReading];
 }
 @end
 
-@class LeadVirtualCameraProxy;
 @interface LeadVirtualMedia : NSObject <PHPickerViewControllerDelegate>
+@property(nonatomic,copy) void (^pendingCall)(BOOL);
 @property(nonatomic,strong) LeadVirtualClip *clip;
-@property(nonatomic,weak) UIView *callView;
-@property(nonatomic,weak) UIButton *button;
+@property(nonatomic,strong) id externalCapturer;
+@property(nonatomic,strong) id nativeCallContext;
+@property(nonatomic,strong) NSURL *selectedURL;
+@property(nonatomic,assign) uint64_t nextAudioSample;
+@property(nonatomic,assign) dispatch_source_t playbackTimer;
 + (instancetype)shared;
-- (void)openMenu:(UIButton *)button;
-- (void)installOnView:(UIView *)view;
-- (void)removeFromView:(UIView *)view;
-- (CMSampleBufferRef)replacementForSample:(CMSampleBufferRef)original CF_RETURNS_RETAINED;
+- (void)preparePicker:(void(^)(BOOL))completion;
+- (void)resetAll;
+- (void)nativeCapturerReady:(id)capturer;
+- (void)nativeContextReady:(id)context;
+- (void)nativeState:(int32_t)state;
+- (BOOL)installNativeHooks;
+- (void)showError:(NSString *)message;
 @end
 
-@interface LeadVirtualCameraProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-@property(nonatomic,weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> upstream;
-@end
-@implementation LeadVirtualCameraProxy
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sample
-       fromConnection:(AVCaptureConnection *)connection {
-    id<AVCaptureVideoDataOutputSampleBufferDelegate> upstream=self.upstream;
-    if(!upstream || ![upstream respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)])return;
-    if(gVirtualState.load(std::memory_order_acquire)==0) {
-        [upstream captureOutput:output didOutputSampleBuffer:sample fromConnection:connection];
-        return;
+static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, bool keepLandscape) {
+    if(gMode.load()==1 && gExpectCapturer.exchange(false)) {
+        Class klass=object_getClass(self);
+        SEL sel=NSSelectorFromString(@"capturerWithExternalSampleBufferProvider");
+        if([klass respondsToSelector:sel]) {
+            id custom=((id (*)(id,SEL))objc_msgSend)(klass,sel);
+            if(custom) {
+                NSLog(@"[LeadVirtualMedia] installed tgcalls external video source");
+                [[LeadVirtualMedia shared] nativeCapturerReady:custom];
+                // -init replaces the allocated receiver with the custom capturer.
+                objc_release(self);
+                return custom;
+            }
+        }
+        NSLog(@"[LeadVirtualMedia] external video factory unavailable");
     }
-    CMSampleBufferRef replacement=[[LeadVirtualMedia shared] replacementForSample:sample];
-    // Never forward real camera frames when a virtual movie was requested.
-    if(replacement) {
-        [upstream captureOutput:output didOutputSampleBuffer:replacement fromConnection:connection];
-        CFRelease(replacement);
-    }
+    return gNativeInit ? gNativeInit(self,command,deviceId,keepLandscape) : self;
 }
-- (void)captureOutput:(AVCaptureOutput *)output didDropSampleBuffer:(CMSampleBufferRef)sample
-       fromConnection:(AVCaptureConnection *)connection {
-    id<AVCaptureVideoDataOutputSampleBufferDelegate> upstream=self.upstream;
-    if([upstream respondsToSelector:@selector(captureOutput:didDropSampleBuffer:fromConnection:)])
-        [upstream captureOutput:output didDropSampleBuffer:sample fromConnection:connection];
+static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
+    LeadStateBlock original=[block copy];
+    LeadStateBlock wrapped=^(int32_t state,int32_t v,int32_t rv,int32_t ra,int32_t b,float aspect) {
+        [[LeadVirtualMedia shared] nativeState:state];
+        if(original)original(state,v,rv,ra,b,aspect);
+    };
+    if(gNativeStateSetter)gNativeStateSetter(self,command,wrapped);
 }
-@end
+static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
+    [[LeadVirtualMedia shared] nativeContextReady:self];
+    if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
+}
 
 @implementation LeadVirtualMedia
 + (instancetype)shared {
-    static LeadVirtualMedia *media;
-    static dispatch_once_t once;
-    dispatch_once(&once,^{media=[LeadVirtualMedia new];});
-    return media;
+    static LeadVirtualMedia *shared=nil;static dispatch_once_t once;
+    dispatch_once(&once,^{shared=[LeadVirtualMedia new];});
+    return shared;
 }
 - (UIViewController *)host {
-    UIResponder *responder=self.button ?: self.callView;
-    while(responder && ![responder isKindOfClass:[UIViewController class]])
-        responder=[responder nextResponder];
-    if([responder isKindOfClass:[UIViewController class]])
-        return (UIViewController*)responder;
-    UIWindow *window=self.callView.window ?: UIApplication.sharedApplication.keyWindow;
-    return window.rootViewController;
+    UIWindow *window=UIApplication.sharedApplication.keyWindow;
+    if(!window)for(UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if(![scene isKindOfClass:[UIWindowScene class]])continue;
+        if(scene.activationState!=UISceneActivationStateForegroundActive)continue;
+        for(UIWindow *w in scene.windows)if(w.isKeyWindow){window=w;break;}
+        if(window)break;
+    }
+    UIViewController *root=window.rootViewController;
+    while(root.presentedViewController)root=root.presentedViewController;
+    return root;
 }
-- (void)showMessage:(NSString *)title detail:(NSString *)detail {
+- (void)showError:(NSString *)message {
     dispatch_async(dispatch_get_main_queue(),^{
-        UIViewController *host=[self host];
-        if(!host)return;
-        while(host.presentedViewController)host=host.presentedViewController;
-        UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:detail
-                    preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *host=[self host];if(!host)return;
+        UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Lead — فيديو المكالمة"
+            message:message preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"موافق" style:UIAlertActionStyleCancel handler:nil]];
         [host presentViewController:alert animated:YES completion:nil];
     });
 }
-- (void)setNormal {
-    gVirtualState.store(0,std::memory_order_release);
-    gStartClock.store(0,std::memory_order_release);
-    std::atomic_store(&gAudioClip,std::shared_ptr<AudioClip>());
-    @synchronized(self) {self.clip=nil;}
+- (BOOL)installNativeHooks {
+    @synchronized(self) {
+        if(gNativeHooksReady)return YES;
+        Class c=objc_getClass("OngoingCallThreadLocalContextVideoCapturer");
+        Class w=objc_getClass("OngoingCallThreadLocalContextWebrtc");
+        SEL factory=NSSelectorFromString(@"capturerWithExternalSampleBufferProvider");
+        Method init=c?class_getInstanceMethod(c,@selector(initWithDeviceId:keepLandscape:)):NULL;
+        Method state=w?class_getInstanceMethod(w,@selector(setStateChanged:)):NULL;
+        Method req=w?class_getInstanceMethod(w,@selector(requestVideo:)):NULL;
+        if(!c || !w || !init || !state || !req || ![c respondsToSelector:factory]) {
+            NSLog(@"[LeadVirtualMedia] native capturer/state API not found in installed Telegram");
+            return NO;
+        }
+        gNativeInit=(decltype(gNativeInit))method_setImplementation(init,(IMP)LeadInitNativeVideoCapturer);
+        gNativeStateSetter=(decltype(gNativeStateSetter))method_setImplementation(state,(IMP)LeadSetNativeCallState);
+        gNativeRequestVideo=(decltype(gNativeRequestVideo))method_setImplementation(req,(IMP)LeadRequestNativeVideo);
+        gNativeHooksReady=true;
+        return YES;
+    }
+}
+- (void)stopTimer {
+    if(self.playbackTimer){dispatch_source_cancel(self.playbackTimer);self.playbackTimer=nil;}
+}
+- (void)resetAll {
+    gMode.store(0);
+    gExpectCapturer.store(false);
+    gConnected.store(false);
+    gStartClock.store(0);
+    gExternalAudio.store(false);
+    std::atomic_store(&gPCM,std::shared_ptr<AudioClip>());
+    [self stopTimer];
+    @synchronized(self) {
+        self.clip=nil;self.externalCapturer=nil;self.nativeCallContext=nil;self.nextAudioSample=0;
+        if(self.selectedURL)[[NSFileManager defaultManager] removeItemAtURL:self.selectedURL error:nil];
+        self.selectedURL=nil;
+    }
+}
+- (void)finishPicker:(BOOL)success {
     dispatch_async(dispatch_get_main_queue(),^{
-        self.button.backgroundColor=UIColor.systemBlueColor;
-        [self.button setTitle:@"VID" forState:UIControlStateNormal];
+        void (^call)(BOOL)=self.pendingCall;
+        self.pendingCall=nil;
+        if(!success)[self resetAll];
+        if(call)call(success);
     });
 }
-- (void)installOnView:(UIView *)view {
-    if(!view.window || objc_getAssociatedObject(view,&kVirtualButtonKey))return;
-    UIButton *button=[UIButton buttonWithType:UIButtonTypeCustom];
-    CGFloat y=MAX(90,MIN(view.bounds.size.height-55,view.bounds.size.height*0.39));
-    button.frame=CGRectMake(8,y,56,42);
-    button.backgroundColor=UIColor.systemBlueColor;
-    button.layer.cornerRadius=10;
-    button.layer.borderColor=UIColor.whiteColor.CGColor;
-    button.layer.borderWidth=1;
-    button.titleLabel.font=[UIFont boldSystemFontOfSize:14];
-    [button setTitle:@"VID" forState:UIControlStateNormal];
-    button.accessibilityLabel=@"خيارات الفيديو للمكالمة";
-    [button addTarget:self action:@selector(openMenu:) forControlEvents:UIControlEventTouchUpInside];
-    [view addSubview:button];
-    objc_setAssociatedObject(view,&kVirtualButtonKey,button,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    self.callView=view;
-    self.button=button;
-}
-- (void)removeFromView:(UIView *)view {
-    UIButton *button=objc_getAssociatedObject(view,&kVirtualButtonKey);
-    [button removeFromSuperview];
-    objc_setAssociatedObject(view,&kVirtualButtonKey,nil,OBJC_ASSOCIATION_ASSIGN);
-    if(self.button==button){self.button=nil;self.callView=nil;}
-}
-- (void)openMenu:(UIButton *)button {
+- (void)preparePicker:(void(^)(BOOL))completion {
+    [self resetAll];
+    self.pendingCall=[completion copy];
+    if(![self installNativeHooks]) {
+        [self showError:@"هذا إصدار Telegram ما يعرض واجهة بث الفيديو الخارجية المطلوبة. تم إلغاء الاتصال بدلاً من إرسال كاميرا حقيقية بالغلط."];
+        [self finishPicker:NO];
+        return;
+    }
     UIViewController *host=[self host];
-    if(!host)return;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"مصدر الفيديو"
-        message:@"الفيديو التجريبي يستبدل إطارات الكاميرا وصوت المايك؛ افتح الكاميرا داخل المكالمة بعد اختيار الملف."
-        preferredStyle:UIAlertControllerStyleActionSheet];
-    [menu addAction:[UIAlertAction actionWithTitle:@"الكاميرا الحقيقية + المايك"
-        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){[self setNormal];}]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"فيديو من المعرض بدل الكاميرا"
-        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){[self pickVideo];}]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"فيديو بدل مشاركة الشاشة"
-        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
-            [self showMessage:@"مشاركة الشاشة"
-                detail:@"ما نكدر نوصل لامتداد BroadcastUpload من ديلب التطبيق وحده. هذا المسار يحتاج باتش للـIPA، وما راح نعرض فيديو غير مرسل على أنه شغال."];
-        }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    menu.popoverPresentationController.sourceView=button;
-    menu.popoverPresentationController.sourceRect=button.bounds;
-    [host presentViewController:menu animated:YES completion:nil];
-}
-- (void)pickVideo {
+    if(!host){[self finishPicker:NO];return;}
     PHPickerConfiguration *conf=[[PHPickerConfiguration alloc] init];
-    conf.selectionLimit=1;
-    conf.filter=[PHPickerFilter videosFilter];
+    conf.filter=[PHPickerFilter videosFilter];conf.selectionLimit=1;
     PHPickerViewController *picker=[[PHPickerViewController alloc] initWithConfiguration:conf];
     picker.delegate=self;
-    [[self host] presentViewController:picker animated:YES completion:nil];
+    [host presentViewController:picker animated:YES completion:nil];
 }
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
-    if(!results.count)return;
-    NSItemProvider *provider=results.firstObject.itemProvider;
-    if(![provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
-        [self showMessage:@"الملف غير مدعوم" detail:@"اختَر فيديو يحتوي على صوت."];
-        return;
+    if(!results.count){[self finishPicker:NO];return;}
+    NSItemProvider *item=results.firstObject.itemProvider;
+    if(![item hasItemConformingToTypeIdentifier:@"public.movie"]) {
+        [self showError:@"اختَر ملف فيديو من المعرض."];
+        [self finishPicker:NO];return;
     }
-    [provider loadFileRepresentationForTypeIdentifier:@"public.movie"
-        completionHandler:^(NSURL *temporary,NSError *e) {
-        if(e || !temporary) {
-            [self showMessage:@"تعذر فتح الفيديو" detail:e.localizedDescription?:@"فشل استيراد الفيديو."];
-            return;
+    [item loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url,NSError *error) {
+        if(error || !url) {
+            [self showError:error.localizedDescription?:@"فشل قراءة الفيديو."];
+            [self finishPicker:NO];return;
         }
-        NSURL *copied=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"lead-virtual-%@.mov",NSUUID.UUID.UUIDString]]];
+        NSURL *copy=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"lead-call-%@.mov",NSUUID.UUID.UUIDString]]];
         NSError *copyError=nil;
-        [[NSFileManager defaultManager] copyItemAtURL:temporary toURL:copied error:&copyError];
+        [[NSFileManager defaultManager] copyItemAtURL:url toURL:copy error:&copyError];
         if(copyError) {
-            [self showMessage:@"خطأ نسخ الفيديو" detail:copyError.localizedDescription];
-            return;
+            [self showError:copyError.localizedDescription];
+            [self finishPicker:NO];return;
         }
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
-            [self prepareMovie:copied];
-        });
+        self.selectedURL=copy;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{[self decodeMovie:copy];});
     }];
 }
-- (void)prepareMovie:(NSURL *)url {
+- (void)decodeMovie:(NSURL *)url {
     AVURLAsset *asset=[AVURLAsset URLAssetWithURL:url options:nil];
-    AVAssetTrack *video=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
-    AVAssetTrack *audio=[asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+    AVAssetTrack *v=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+    AVAssetTrack *a=[asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
     NSTimeInterval duration=CMTimeGetSeconds(asset.duration);
-    if(!video || !audio || !std::isfinite(duration) || duration<=0 || duration>720) {
-        [self showMessage:@"تعذر تجهيز الفيديو"
-            detail:@"يلزم ملف فيديو يحتوي على صوت، مدته من ثانية إلى 12 دقيقة بالحد الأقصى في النسخة التجريبية."];
-        return;
+    if(!v || !a || !isfinite(duration) || duration<=0 || duration>600) {
+        [self showError:@"الفيديو لازم يحتوي على صورة وصوت، ومدته أقل من 10 دقائق بالتجربة الحالية."];
+        [self finishPicker:NO];return;
     }
     NSError *error=nil;
-    AVAssetReader *audioReader=[[AVAssetReader alloc] initWithAsset:asset error:&error];
-    if(!audioReader){[self showMessage:@"قراءة الصوت" detail:error.localizedDescription];return;}
-    NSDictionary *audioSettings=@{AVFormatIDKey:@(kAudioFormatLinearPCM),
-        AVSampleRateKey:@48000,AVNumberOfChannelsKey:@1,
-        AVLinearPCMBitDepthKey:@16,AVLinearPCMIsFloatKey:@NO,
-        AVLinearPCMIsBigEndianKey:@NO,AVLinearPCMIsNonInterleaved:@NO};
-    AVAssetReaderTrackOutput *audioOutput=[[AVAssetReaderTrackOutput alloc]
-        initWithTrack:audio outputSettings:audioSettings];
-    [audioReader addOutput:audioOutput];
-    if(![audioReader startReading]){
-        [self showMessage:@"فشل الصوت" detail:audioReader.error.localizedDescription?:@"خطأ فك الصوت."];
-        return;
-    }
-    NSMutableData *decoded=[NSMutableData data];
+    AVAssetReader *ar=[[AVAssetReader alloc] initWithAsset:asset error:&error];
+    if(!ar){[self showError:@"فشل فتح المسار الصوتي."];[self finishPicker:NO];return;}
+    NSDictionary *audio=@{AVFormatIDKey:@(kAudioFormatLinearPCM),
+       AVSampleRateKey:@48000,AVNumberOfChannelsKey:@1,
+       AVLinearPCMBitDepthKey:@16,AVLinearPCMIsFloatKey:@NO,
+       AVLinearPCMIsBigEndianKey:@NO,AVLinearPCMIsNonInterleavedKey:@NO};
+    AVAssetReaderTrackOutput *ao=[[AVAssetReaderTrackOutput alloc] initWithTrack:a outputSettings:audio];
+    [ar addOutput:ao];
+    if(![ar startReading]){[self showError:@"فشل استخراج صوت الفيديو."];[self finishPicker:NO];return;}
+    NSMutableData *pcmData=[NSMutableData data];
     CMSampleBufferRef packet=NULL;
-    while((packet=[audioOutput copyNextSampleBuffer])) {
+    while((packet=[ao copyNextSampleBuffer])) {
         CMBlockBufferRef block=CMSampleBufferGetDataBuffer(packet);
         size_t length=block?CMBlockBufferGetDataLength(block):0;
-        if(length && decoded.length+length<75000000) {
-            NSUInteger offset=decoded.length;
-            [decoded increaseLengthBy:length];
-            CMBlockBufferCopyDataBytes(block,0,length,(uint8_t*)decoded.mutableBytes+offset);
+        if(length && pcmData.length+length <= 62000000) {
+            NSUInteger offset=pcmData.length;
+            [pcmData increaseLengthBy:length];
+            CMBlockBufferCopyDataBytes(block,0,length,(uint8_t *)pcmData.mutableBytes+offset);
         }
         CFRelease(packet);
-        if(decoded.length>=74990000)break;
+        if(pcmData.length >= 61900000)break;
     }
-    if(audioReader.status==AVAssetReaderStatusFailed || decoded.length<2) {
-        [self showMessage:@"فشل استخراج الصوت"
-            detail:audioReader.error.localizedDescription?:@"ما حصلنا عينات صوت مناسبة."];
-        return;
+    if(pcmData.length<2 || ar.status==AVAssetReaderStatusFailed) {
+        [self showError:@"ما تم استخراج بيانات صوت صحيحة."];
+        [self finishPicker:NO];return;
     }
-    auto pcm=std::make_shared<AudioClip>();
-    pcm->samples.resize(decoded.length/sizeof(int16_t));
-    memcpy(pcm->samples.data(),decoded.bytes,pcm->samples.size()*sizeof(int16_t));
-
-    AVAssetReader *reader=[[AVAssetReader alloc] initWithAsset:asset error:&error];
-    if(!reader){[self showMessage:@"قراءة الفيديو" detail:error.localizedDescription];return;}
-    AVAssetReaderTrackOutput *output=[[AVAssetReaderTrackOutput alloc] initWithTrack:video
+    auto clipSound=std::make_shared<AudioClip>();
+    clipSound->samples.resize(pcmData.length/2);
+    memcpy(clipSound->samples.data(),pcmData.bytes,pcmData.length);
+    AVAssetReader *vr=[[AVAssetReader alloc] initWithAsset:asset error:&error];
+    if(!vr){[self showError:@"فشل فتح مسار الفيديو."];[self finishPicker:NO];return;}
+    AVAssetReaderTrackOutput *vo=[[AVAssetReaderTrackOutput alloc] initWithTrack:v
         outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA)}];
-    output.alwaysCopiesSampleData=NO;
-    [reader addOutput:output];
-    if(![reader startReading]){
-        [self showMessage:@"فشل الفيديو" detail:reader.error.localizedDescription?:@"خطأ فك الفيديو."];
+    vo.alwaysCopiesSampleData=NO;[vr addOutput:vo];
+    if(![vr startReading]){[self showError:@"فشل فك إطارات الفيديو."];[self finishPicker:NO];return;}
+    LeadVirtualClip *video=[LeadVirtualClip new];
+    video.reader=vr;video.frames=vo;video.duration=duration;
+    @synchronized(self) {
+        self.clip=video;self.nextAudioSample=0;
+        std::atomic_store(&gPCM,clipSound);
+        gStartClock.store(0);gConnected.store(false);
+        gExpectCapturer.store(true);
+        gMode.store(1); // Ready; nothing transmitted until connected.
+    }
+    NSLog(@"[LeadVirtualMedia] file prepared, now dialing real Telegram video call");
+    [self finishPicker:YES];
+}
+- (void)nativeCapturerReady:(id)capturer {
+    @synchronized(self){self.externalCapturer=capturer;}
+    [self maybeStart];
+}
+- (void)nativeContextReady:(id)context {
+    if(gMode.load()==0)return;
+    @synchronized(self){self.nativeCallContext=context;}
+    [self maybeStart];
+}
+- (void)nativeState:(int32_t)state {
+    // WebRTC: 0 initializing, 1 connected (answered), 2 failed, 3 reconnecting.
+    if(gMode.load()==0)return;
+    if(state==1) {
+        NSLog(@"[LeadVirtualMedia] remote connected; starting virtual camera");
+        gConnected.store(true);
+        [self maybeStart];
+    } else if(state==2) {
+        NSLog(@"[LeadVirtualMedia] call connection failed");
+        dispatch_async(dispatch_get_main_queue(),^{[self resetAll];});
+    }
+}
+- (void)maybeStart {
+    if(!gConnected.load() || gMode.load()!=1)return;
+    id captured=nil;
+    @synchronized(self){captured=self.externalCapturer;}
+    if(!captured)return;
+    int old=1;if(!gMode.compare_exchange_strong(old,2))return;
+    gStartClock.store(CACurrentMediaTime());
+    gExternalAudio.store(false);
+    self.nextAudioSample=0;
+    dispatch_queue_t queue=dispatch_queue_create("lead.virtual.call.frames",DISPATCH_QUEUE_SERIAL);
+    self.playbackTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+    dispatch_source_set_timer(self.playbackTimer,dispatch_time(DISPATCH_TIME_NOW,0),
+        (uint64_t)(0.020*NSEC_PER_SEC),(uint64_t)(0.004*NSEC_PER_SEC));
+    dispatch_source_set_event_handler(self.playbackTimer,^{[self playbackTick];});
+    dispatch_resume(self.playbackTimer);
+}
+- (void)playbackTick {
+    if(gMode.load()!=2)return;
+    LeadVirtualClip *video=nil;id capturer=nil;id context=nil;
+    @synchronized(self) {video=self.clip;capturer=self.externalCapturer;context=self.nativeCallContext;}
+    if(!video || !capturer)return;
+    double elapsed=CACurrentMediaTime()-gStartClock.load();
+    if(elapsed>=video.duration) {
+        gMode.store(3);[self stopTimer];
+        if([capturer respondsToSelector:@selector(setIsVideoEnabled:)]) {
+            ((void (*)(id,SEL,bool))objc_msgSend)(capturer,@selector(setIsVideoEnabled:),false);
+        }
+        NSLog(@"[LeadVirtualMedia] movie completed; outgoing audio remains muted");
+        dispatch_async(dispatch_get_main_queue(),^{
+           [self showError:@"انتهى الفيديو وتوقف بثه. المكالمة مستمرة والمايك مكتوم."];
+        });
         return;
     }
-    LeadVirtualClip *clip=[LeadVirtualClip new];
-    clip.reader=reader;clip.output=output;clip.duration=duration;
-    @synchronized(self) {
-        self.clip=clip;
-        gClipDuration.store(duration);
-        gStartClock.store(0,std::memory_order_release);
-        std::atomic_store(&gAudioClip,pcm);
-        gVirtualState.store(1,std::memory_order_release);
+    if(context && [context respondsToSelector:@selector(addExternalAudioData:)]) {
+        auto pcm=std::atomic_load(&gPCM);
+        if(pcm && !pcm->samples.empty()) {
+            // ReplayKit uses the same 48k mono 16-bit PCM for this native method.
+            int16_t buffer[960]={};
+            const size_t offset=(size_t)self.nextAudioSample;
+            const size_t available= offset<pcm->samples.size() ? pcm->samples.size()-offset:0;
+            const size_t n=std::min((size_t)960,available);
+            if(n)memcpy(buffer,pcm->samples.data()+offset,n*2);
+            NSData *data=[NSData dataWithBytes:buffer length:sizeof(buffer)];
+            ((void (*)(id,SEL,id))objc_msgSend)(context,@selector(addExternalAudioData:),data);
+            self.nextAudioSample+=960;
+            gExternalAudio.store(true);
+        }
     }
-    dispatch_async(dispatch_get_main_queue(),^{
-        self.button.backgroundColor=UIColor.systemOrangeColor;
-        [self.button setTitle:@"FILE" forState:UIControlStateNormal];
-        [self showMessage:@"تم تجهيز الفيديو"
-           detail:@"شغّل الكاميرا داخل المكالمة. بمجرد ظهور إطارات الكاميرا يبدأ بث الملف وصوته، والمايك يبقى مكتوماً. اختبر النتيجة من جهاز ثاني."];
-    });
-}
-- (void)completed {
-    int expected=2;
-    if(!gVirtualState.compare_exchange_strong(expected,3))return;
-    // The outgoing microphone stays suppressed after EOF.
-    dispatch_async(dispatch_get_main_queue(),^{
-        self.button.backgroundColor=UIColor.systemRedColor;
-        [self.button setTitle:@"END" forState:UIControlStateNormal];
-        [self showMessage:@"انتهى الفيديو"
-            detail:@"توقف بث إطارات الملف وصوته، والمايك باقي مكتوم. أوقف الكاميرا من زر Telegram؛ المكالمة تبقى مستمرة. اختَر الكاميرا الحقيقية من VID حتى يرجع المايك."];
-    });
-}
-- (CMSampleBufferRef)replacementForSample:(CMSampleBufferRef)original {
-    LeadVirtualClip *clip=nil;
-    @synchronized(self) {clip=self.clip;}
-    if(!clip)return NULL;
-    @synchronized(clip) {
-        int state=gVirtualState.load(std::memory_order_acquire);
-        if(state==0 || state==3)return NULL;
-        double start=gStartClock.load(std::memory_order_acquire);
-        if(state==1 || start<=0) {
-            start=CACurrentMediaTime();
-            gStartClock.store(start,std::memory_order_release);
-            gVirtualState.store(2,std::memory_order_release);
-        }
-        double elapsed=CACurrentMediaTime()-start;
-        if(elapsed>=clip.duration) {
-            [self completed];
-            return NULL;
-        }
-        for(int i=0;i<15;i++) {
-            if(!clip.futureFrame && !clip.reachedEnd) {
-                clip.futureFrame=[clip.output copyNextSampleBuffer];
-                if(!clip.futureFrame)clip.reachedEnd=YES;
+    @synchronized(video) {
+        for(int i=0;i<8;i++) {
+            if(!video.next && !video.exhausted) {
+                video.next=[video.frames copyNextSampleBuffer];
+                if(!video.next)video.exhausted=YES;
             }
-            if(!clip.futureFrame)break;
-            double pts=CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(clip.futureFrame));
-            if(!std::isfinite(pts) || pts>elapsed+0.02)break;
-            if(clip.currentFrame)CFRelease(clip.currentFrame);
-            clip.currentFrame=clip.futureFrame;
-            clip.futureFrame=NULL;
+            if(!video.next)break;
+            double t=CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(video.next));
+            if(isfinite(t) && t>elapsed+0.010)break;
+            if(video.current)CFRelease(video.current);
+            video.current=video.next;video.next=NULL;
         }
-        if(!clip.currentFrame)return NULL;
-        CVImageBufferRef pixels=CMSampleBufferGetImageBuffer(clip.currentFrame);
-        if(!pixels)return NULL;
-        CMVideoFormatDescriptionRef desc=NULL;
-        if(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,pixels,&desc)!=noErr)
-            return NULL;
-        CMSampleTimingInfo timing={CMSampleBufferGetDuration(original),
-                                  CMSampleBufferGetPresentationTimeStamp(original),kCMTimeInvalid};
-        CMSampleBufferRef replacement=NULL;
-        OSStatus status=CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,pixels,true,NULL,NULL,
-                              desc,&timing,&replacement);
-        CFRelease(desc);
-        return status==noErr?replacement:NULL;
+        if(!video.current)return;
+        // Native tgcalls custom provider sends this frame to the remote peer.
+        ((void (*)(id,SEL,CMSampleBufferRef,int,void(^)(void)))objc_msgSend)(
+            capturer,@selector(submitSampleBuffer:rotation:completion:),video.current,0,^{});
     }
 }
 @end
 
-// Intercept only live AVFoundation camera capture delegates.
-// If Telegram uses a private tgcalls capture pathway instead, no false
-// claim of successful transmission is made: this is a device-test probe.
-%hook AVCaptureVideoDataOutput
-- (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate
-                           queue:(dispatch_queue_t)queue {
-    if(!delegate || [delegate isKindOfClass:[LeadVirtualCameraProxy class]]) {
-        %orig(delegate,queue);
-        return;
+// Retain existing CoreAudio audio path only as fallback when native external
+// audio cannot be obtained. Any selected file suppresses genuine microphone.
+extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
+                 const AudioStreamBasicDescription *format, UInt32 frames) {
+    if(gMode.load()==0)return false;
+    if(!buffers || !format)return true;
+    const bool flt=(format->mFormatFlags & kAudioFormatFlagIsFloat)!=0;
+    const bool integer=(format->mFormatFlags & kAudioFormatFlagIsSignedInteger)!=0;
+    const bool planar=(format->mFormatFlags & kAudioFormatFlagIsNonInterleaved)!=0;
+    const unsigned bits=format->mBitsPerChannel;
+    const unsigned channels=std::max(1u,format->mChannelsPerFrame);
+    const double rate=format->mSampleRate;
+    const bool supported=(flt && bits==32)||(integer && (bits==16 || bits==32));
+    auto pcm=std::atomic_load(&gPCM);
+    const double start=gStartClock.load();
+    bool play=(gMode.load()==2 && !gExternalAudio.load() && start>0 &&
+        isfinite(rate) && rate>=8000 && rate<=192000 && pcm && !pcm->samples.empty());
+    double position=play?std::max(0.0,CACurrentMediaTime()-start):0;
+    for(UInt32 b=0;b<buffers->mNumberBuffers;b++) {
+        AudioBuffer &buf=buffers->mBuffers[b];
+        if(!buf.mData)continue;
+        if(!play || !supported){memset(buf.mData,0,buf.mDataByteSize);continue;}
+        const unsigned countPerFrame=planar?1:channels;
+        const unsigned unit=bits/8;
+        const UInt32 limit=std::min(frames,buf.mDataByteSize/std::max(1u,countPerFrame*unit));
+        for(UInt32 i=0;i<limit;i++) {
+            uint64_t idx=(uint64_t)((position+i/rate)*48000.0);
+            float f=(idx<pcm->samples.size())?pcm->samples[(size_t)idx]/32768.0f:0;
+            for(unsigned c=0;c<countPerFrame;c++) {
+                size_t j=(size_t)i*countPerFrame+c;
+                if(flt)((float *)buf.mData)[j]=f;
+                else if(bits==16)((int16_t *)buf.mData)[j]=(int16_t)lrintf(f*32767);
+                else ((int32_t *)buf.mData)[j]=(int32_t)llrint((double)f*2147483647.0);
+            }
+        }
+        size_t bytes=(size_t)limit*countPerFrame*unit;
+        if(bytes<buf.mDataByteSize)memset((uint8_t *)buf.mData+bytes,0,buf.mDataByteSize-bytes);
     }
-    LeadVirtualCameraProxy *proxy=[LeadVirtualCameraProxy new];
-    proxy.upstream=delegate;
-    objc_setAssociatedObject(self,&kCaptureProxyKey,proxy,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    %orig((id<AVCaptureVideoDataOutputSampleBufferDelegate>)proxy,queue);
+    return true;
 }
-%end
 
-extern "C" void LeadVirtualMediaInstallButton(UIView *view) {
-    dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] installOnView:view];});
+extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL)) {
+    dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] preparePicker:completion];});
 }
-extern "C" void LeadVirtualMediaRemoveButton(UIView *view) {
-    dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] removeFromView:view];});
+extern "C" void LeadVirtualMediaReset(void) {
+    dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] resetAll];});
 }
+// Remove the old VID overlay. All selection is now before the outgoing call.
+extern "C" void LeadVirtualMediaInstallButton(__unused UIView *view) {}
+extern "C" void LeadVirtualMediaRemoveButton(__unused UIView *view) {}
