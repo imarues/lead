@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AVFoundation/AVPlayerLayer.h>
 #import <CallKit/CallKit.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
@@ -31,6 +32,8 @@ static std::atomic<bool> gConnected{false};
 static std::atomic<bool> gIncomingChoice{false};
 static std::atomic<bool> gIncomingConnected{false};
 static std::atomic<int> gPreviousRemoteVideo{-1};
+// Incoming camera must never send real frames before an explicit selection.
+static std::atomic<bool> gIncomingPrivacyGate{false};
 static std::atomic<int> gObservedCallState{-1};
 static std::atomic<double> gStartClock{0};
 static std::atomic<bool> gExternalAudio{false};
@@ -80,6 +83,11 @@ extern "C" id objc_retain(id);
 @property(nonatomic,assign) BOOL incomingAwaitingMenu;
 @property(nonatomic,assign) NSInteger incomingAttachAttempts;
 @property(nonatomic,strong) NSUUID *incomingAnsweredUUID;
+@property(nonatomic,weak) id lastPhysicalCamera;
+@property(nonatomic,weak) id protectedPhysicalCamera;
+@property(nonatomic,strong) UIView *localPreviewView;
+@property(nonatomic,strong) AVPlayer *localPreviewPlayer;
+@property(nonatomic,strong) AVPlayerLayer *localPreviewLayer;
 + (instancetype)shared;
 - (void)preparePicker:(void(^)(BOOL))completion;
 - (void)resetAll;
@@ -98,6 +106,10 @@ extern "C" id objc_retain(id);
 - (void)normalIncomingAnswer;
 - (void)installIncomingObservers;
 - (void)incomingDidBecomeActive:(NSNotification *)note;
+- (void)protectIncomingCamera;
+- (void)capturePhysicalCamera:(id)camera;
+- (void)startLocalPreview;
+- (void)removeLocalPreview;
 @end
 
 static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, bool keepLandscape) {
@@ -116,7 +128,9 @@ static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, 
         }
         NSLog(@"[LeadVirtualMedia] external video factory unavailable");
     }
-    return gNativeInit ? gNativeInit(self,command,deviceId,keepLandscape) : self;
+    id camera=gNativeInit ? gNativeInit(self,command,deviceId,keepLandscape) : self;
+    if(camera)[[LeadVirtualMedia shared] capturePhysicalCamera:camera];
+    return camera;
 }
 static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
     // Observe the current WebRTC call even before a gallery movie is chosen.
@@ -133,7 +147,15 @@ static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
     if(gNativeStateSetter)gNativeStateSetter(self,command,wrapped);
 }
 static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
-    [[LeadVirtualMedia shared] nativeContextReady:self];
+    LeadVirtualMedia *m=[LeadVirtualMedia shared];
+    [m nativeContextReady:self];
+    if(gIncomingPrivacyGate.load(std::memory_order_acquire) &&
+       capturer != m.externalCapturer) {
+        [m protectIncomingCamera];
+        if(capturer && [capturer respondsToSelector:@selector(setIsVideoEnabled:)])
+            ((void (*)(id,SEL,bool))objc_msgSend)(
+                capturer,@selector(setIsVideoEnabled:),false);
+    }
     if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
 }
 
@@ -199,6 +221,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     gFramesSubmitted.store(0);
     std::atomic_store(&gPCM,std::shared_ptr<AudioClip>());
     [self stopTimer];
+    [self removeLocalPreview];
     @synchronized(self) {
         self.clip=nil;self.externalCapturer=nil;self.nativeCallContext=nil;self.nextAudioSample=0;
         if(self.selectedURL)[[NSFileManager defaultManager] removeItemAtURL:self.selectedURL error:nil];
@@ -211,9 +234,20 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         self.pendingCall=nil;
         if(!success) {
             [self resetAll];
-            gIncomingChoice.store(false);
-            gIncomingConnected.store(false);
-            self.incomingNativeContext=nil;
+            if(gIncomingPrivacyGate.load() && [self hasLiveIncomingVideoCall]) {
+                // Gallery cancellation must not activate the real camera.
+                gIncomingChoice.store(true);
+                self.incomingAwaitingMenu=YES;
+                self.incomingMenuPresented=NO;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                    [self showIncomingSourceMenu];
+                });
+            } else {
+                gIncomingChoice.store(false);
+                gIncomingConnected.store(false);
+                self.incomingNativeContext=nil;
+            }
         }
         if(call)call(success);
     });
@@ -394,6 +428,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         step,(uint64_t)(0.002*NSEC_PER_SEC));
     dispatch_source_set_event_handler(self.playbackTimer,^{[self playbackTick];});
     dispatch_resume(self.playbackTimer);
+    dispatch_async(dispatch_get_main_queue(),^{[self startLocalPreview];});
 }
 - (void)playbackTick {
     if(gMode.load()!=2)return;
@@ -404,6 +439,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(elapsed>=video.duration) {
         gMode.store(3);
         [self stopTimer];
+        dispatch_async(dispatch_get_main_queue(),^{[self removeLocalPreview];});
         NSLog(@"[LeadVirtualMedia] EOF: video=%llu, microphone-replaced=%llu, external bytes=%llu",
              (unsigned long long)gFramesSubmitted.load(),
              (unsigned long long)gMicInjectedFrames.load(),
@@ -439,11 +475,16 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 }
 
 - (void)rememberCallView:(UIView *)view {
-    if(view && [NSStringFromClass(view.class) containsString:@"PrivateCallScreen"])
+    if(view && [NSStringFromClass(view.class) containsString:@"PrivateCallScreen"]) {
         self.privateCallView=view;
+        if(gMode.load()==2)[self startLocalPreview];
+    }
 }
 - (void)forgetCallView:(UIView *)view {
-    if(self.privateCallView==view)self.privateCallView=nil;
+    if(self.privateCallView==view) {
+        self.privateCallView=nil;
+        [self.localPreviewView removeFromSuperview];
+    }
 }
 - (UIView *)findButtonsGroup:(UIView *)root {
     if(!root)return nil;
@@ -544,6 +585,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     // The user can continue the already connected call normally.
     if(gMode.load()==3)[self resetAll];
     gIncomingChoice.store(true);
+    gIncomingPrivacyGate.store(true);
+    [self protectIncomingCamera];
     gIncomingConnected.store(gObservedCallState.load()==1);
     self.incomingAwaitingMenu=YES;
     self.incomingMenuPresented=NO;
@@ -552,7 +595,15 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     NSLog(@"[LeadVirtualMedia] incoming video answered; normal call remains active");
 }
 - (void)normalIncomingAnswer {
-    // Explicit normal path: never mute microphone or alter camera.
+    // A user explicitly choosing "رد طبيعي" is the only action that
+    // re-enables the physical camera while an incoming call is active.
+    BOOL resume=gIncomingPrivacyGate.load() && [self hasLiveIncomingVideoCall];
+    id camera=self.protectedPhysicalCamera ?: self.lastPhysicalCamera;
+    gIncomingPrivacyGate.store(false);
+    if(resume && camera && [camera respondsToSelector:@selector(setIsVideoEnabled:)])
+        ((void (*)(id,SEL,bool))objc_msgSend)(
+            camera,@selector(setIsVideoEnabled:),true);
+    self.protectedPhysicalCamera=nil;
     [self resetAll];
     gIncomingChoice.store(false);
     gIncomingConnected.store(false);
@@ -661,6 +712,96 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     // The original remote incoming video track is untouched.
     [self maybeStart];
     [self finishPicker:YES];
+}
+
+
+// The privacy gate can be armed before CallKit accepts. Keep an early weak
+// reference to Telegram's physical camera, even if it was constructed during
+// the incoming ringtone. Disable production of frames before any track sends.
+- (void)capturePhysicalCamera:(id)camera {
+    if(!camera)return;
+    @synchronized(self) {
+        self.lastPhysicalCamera=camera;
+        if(gIncomingPrivacyGate.load())self.protectedPhysicalCamera=camera;
+    }
+    if(gIncomingPrivacyGate.load() &&
+       [camera respondsToSelector:@selector(setIsVideoEnabled:)]) {
+        ((void (*)(id,SEL,bool))objc_msgSend)(
+            camera,@selector(setIsVideoEnabled:),false);
+        NSLog(@"[LeadVirtualMedia] physical camera held until source choice");
+    }
+}
+- (void)protectIncomingCamera {
+    if(!gIncomingPrivacyGate.load())return;
+    id camera=self.protectedPhysicalCamera ?: self.lastPhysicalCamera;
+    if(!camera)return;
+    self.protectedPhysicalCamera=camera;
+    if([camera respondsToSelector:@selector(setIsVideoEnabled:)])
+        ((void (*)(id,SEL,bool))objc_msgSend)(
+            camera,@selector(setIsVideoEnabled:),false);
+}
+- (void)removeLocalPreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self removeLocalPreview];});
+        return;
+    }
+    [self.localPreviewPlayer pause];
+    [self.localPreviewView removeFromSuperview];
+    self.localPreviewPlayer=nil;
+    self.localPreviewLayer=nil;
+    self.localPreviewView=nil;
+}
+- (void)startLocalPreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self startLocalPreview];});
+        return;
+    }
+    if(gMode.load()!=2 || !self.selectedURL)return;
+    UIView *host=self.privateCallView;
+    if(!host || !host.window)return;
+    if(host.bounds.size.width<130 || host.bounds.size.height<300) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.15*NSEC_PER_SEC)),
+            dispatch_get_main_queue(),^{if(gMode.load()==2)[self startLocalPreview];});
+        return;
+    }
+    if(!self.localPreviewPlayer) {
+        self.localPreviewPlayer=[AVPlayer playerWithURL:self.selectedURL];
+        self.localPreviewPlayer.muted=YES;
+        self.localPreviewPlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
+        AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.localPreviewPlayer];
+        layer.videoGravity=AVLayerVideoGravityResizeAspectFill;
+        self.localPreviewLayer=layer;
+        UIView *preview=[[UIView alloc] initWithFrame:CGRectZero];
+        preview.userInteractionEnabled=NO;
+        preview.layer.cornerRadius=12;
+        preview.layer.masksToBounds=YES;
+        preview.layer.borderWidth=1.5;
+        preview.layer.borderColor=UIColor.whiteColor.CGColor;
+        preview.layer.zPosition=90000;
+        [preview.layer addSublayer:layer];
+        self.localPreviewView=preview;
+        // The gallery file is shown locally ONLY as preview; its audio is
+        // muted here because the uplink already injects the original PCM.
+        double elapsed=std::max(0.0,CACurrentMediaTime()-gStartClock.load());
+        CMTime time=CMTimeMakeWithSeconds(elapsed,600);
+        [self.localPreviewPlayer seekToTime:time toleranceBefore:kCMTimeZero
+            toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished){
+            if(finished && gMode.load()==2)
+                dispatch_async(dispatch_get_main_queue(),^{[self.localPreviewPlayer play];});
+        }];
+    }
+    const CGFloat width=MIN(126.0,host.bounds.size.width*0.30);
+    const CGFloat height=width*1.48;
+    self.localPreviewView.frame=CGRectMake(
+        host.bounds.size.width-width-15,
+        MAX(74.0,host.bounds.size.height-height-190),width,height);
+    self.localPreviewLayer.frame=self.localPreviewView.bounds;
+    self.localPreviewView.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|
+        UIViewAutoresizingFlexibleTopMargin;
+    if(self.localPreviewView.superview!=host) {
+        [self.localPreviewView removeFromSuperview];
+        [host addSubview:self.localPreviewView];
+    }
 }
 
 @end
