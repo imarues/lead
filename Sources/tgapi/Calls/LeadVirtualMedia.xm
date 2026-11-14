@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CallKit/CallKit.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
@@ -476,8 +477,29 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),
             dispatch_get_main_queue(),^{[self resetAll];});
     } else {
-        NSLog(@"[LeadVirtualMedia] EOF; no visible call end control");
-        [self showError:@"انتهى الفيديو، لكن زر إنهاء المكالمة غير متاح. انهي الاتصال يدوياً."];
+        // CallKit fallback when Telegram's view is minimized. Only use a
+        // unique, outgoing, connected call; never terminate unrelated calls
+        // when there is any ambiguity.
+        CXCallObserver *observer=[CXCallObserver new];
+        NSArray<CXCall *> *calls=observer.calls;
+        if(calls.count==1) {
+            CXCall *call=calls.firstObject;
+            if(call.outgoing && call.hasConnected && !call.hasEnded) {
+                CXCallController *controller=[CXCallController new];
+                CXEndCallAction *action=[[CXEndCallAction alloc] initWithCall:call.UUID];
+                CXTransaction *transaction=[[CXTransaction alloc] initWithAction:action];
+                NSLog(@"[LeadVirtualMedia] EOF; requesting CallKit end-call transaction");
+                [controller requestTransaction:transaction completion:^(NSError *error){
+                    if(error) {
+                        NSLog(@"[LeadVirtualMedia] CallKit hangup failed: %@",error);
+                        [self showError:@"انتهى الفيديو لكن فشل إغلاق الاتصال تلقائياً. انهي الاتصال يدوياً."];
+                    } else dispatch_async(dispatch_get_main_queue(),^{[self resetAll];});
+                }];
+                return;
+            }
+        }
+        NSLog(@"[LeadVirtualMedia] EOF; hangup UI and unique CallKit call not found");
+        [self showError:@"انتهى الفيديو، لكن لا يوجد زر إنهاء متاح أو مكالمة CallKit مطابقة. انهي الاتصال يدوياً."];
     }
 }
 
