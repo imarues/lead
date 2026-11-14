@@ -367,10 +367,22 @@ static NSError *LeadRecorderError(NSString *detail) {
         LeadCallAudioStop(^(NSURL *audioFile,NSError *audioError) {
             typeof(self) strongSelf=weakSelf;
             if(!strongSelf) return;
-            // Do not claim a complete two-sided audio call if AudioUnit hooks
-            // were incompatible with this Telegram version.
+            // A call's screen frames are independent of its audio capture.
+            // Never lose a finished MP4 merely because one/both CoreAudio
+            // paths were unavailable on this fork of Telegram.
             if(audioError) {
-                if(completion)completion(nil,audioError);
+                if(videoFile && !videoError) {
+                    [strongSelf finishOutputAudio:nil video:videoFile completion:^(NSURL *savedVideo,NSError *savingError) {
+                        if(savedVideo && !savingError) {
+                            NSError *warning=[NSError errorWithDomain:@"Lead.CallRecorder" code:3
+                                 userInfo:@{NSLocalizedDescriptionKey:
+                                     [NSString stringWithFormat:
+                                         @"Audio capture failed (%@). The video was saved WITHOUT AUDIO. Please check call audio compatibility before your next recording.",
+                                         audioError.localizedDescription?:@"unknown reason"]}];
+                            if(completion)completion(savedVideo,warning);
+                        } else if(completion)completion(nil,savingError?:audioError);
+                    }];
+                } else if(completion)completion(nil,audioError);
                 return;
             }
             if(videoError) {
