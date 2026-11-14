@@ -1,8 +1,6 @@
 // Lead call audio capture. Written independently for Lead: no iQTele binary or
 // code is linked. Capture is inactive until the user explicitly agrees.
 #import "LeadCallAudio.h"
-extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
-    const AudioStreamBasicDescription *format, UInt32 frames);
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
