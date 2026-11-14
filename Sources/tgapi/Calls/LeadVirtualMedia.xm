@@ -349,8 +349,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 }
 - (void)playbackTick {
     if(gMode.load()!=2)return;
-    LeadVirtualClip *video=nil;id capturer=nil;id context=nil;
-    @synchronized(self) {video=self.clip;capturer=self.externalCapturer;context=self.nativeCallContext;}
+    LeadVirtualClip *video=nil;id capturer=nil;
+    @synchronized(self) {video=self.clip;capturer=self.externalCapturer;}
     if(!video || !capturer)return;
     double elapsed=CACurrentMediaTime()-gStartClock.load();
     if(elapsed>=video.duration) {
@@ -517,7 +517,7 @@ extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
         ((flt && bits==32)||(integer && (bits==16||bits==32)));
     const auto pcm=std::atomic_load(&gPCM);
     const bool playing=(mode==2 && supported && rate>=8000 && rate<=192000 &&
-       std::isfinite(rate) && pcm && !pcm->samples.empty());
+       isfinite(rate) && pcm && !pcm->samples.empty());
     const uint64_t scale=UINT64_C(4294967296);
     const uint64_t step=playing ? std::max(UINT64_C(1),
         (uint64_t)llround((48000.0/rate)*(double)scale)) : 0;
