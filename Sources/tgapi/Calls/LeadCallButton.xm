@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #import "LeadCallRecording.h"
 #import "LeadCallAudio.h"
+extern void LeadRecordingPresentSaveOptions(NSURL *file,NSError *warning,UIViewController *presenter);
 #import "../UI/LeadDesign.h"
 extern "C" void LeadVirtualMediaInstallButton(UIView *view);
 extern "C" void LeadVirtualMediaInstallEarlyHooks(void);
@@ -207,16 +208,20 @@ static BOOL leadGroupHooksInstalled=NO;
         [recorder stop:^(NSURL *file,NSError *error){
             button.enabled=YES;
             [self update:button];
-            NSString *message=(file && error)?
-                [NSString stringWithFormat:@"تم حفظ الصوت فقط في: %@\n%@",file.lastPathComponent,error.localizedDescription]:
-                (error?error.localizedDescription:
-                [NSString stringWithFormat:@"تم حفظ التسجيل: %@",file.lastPathComponent]);
-            UIAlertController *result=[UIAlertController alertControllerWithTitle:
-               (file && error?@"تم حفظ الصوت فقط":error?@"التسجيل غير مكتمل":@"تم حفظ التسجيل") message:message
-               preferredStyle:UIAlertControllerStyleAlert];
-            [result addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
-            UIViewController *top=LeadTopPresenter();
-            if(top)[top presentViewController:result animated:YES completion:nil];
+            if(file) {
+                // Finalized MP4/M4A is ready. Let the user name it and select
+                // archive, Photos, Saved Messages, or all destinations.
+                LeadRecordingPresentSaveOptions(file,error,LeadTopPresenter());
+            } else {
+                UIAlertController *failed=[UIAlertController alertControllerWithTitle:
+                    @"تعذّر إنهاء التسجيل"
+                    message:error.localizedDescription?:@"ما تم إنشاء ملف صالح."
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [failed addAction:[UIAlertAction actionWithTitle:@"موافق"
+                    style:UIAlertActionStyleCancel handler:nil]];
+                UIViewController *top=LeadTopPresenter();
+                if(top)[top presentViewController:failed animated:YES completion:nil];
+            }
         }];
         return;
     }
