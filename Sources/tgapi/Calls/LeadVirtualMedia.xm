@@ -405,6 +405,82 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             capturer,@selector(submitSampleBuffer:rotation:completion:),video.current,0,^{});
     }
 }
+
+- (void)rememberCallView:(UIView *)view {
+    if(view && [NSStringFromClass(view.class) containsString:@"PrivateCallScreen"])
+        self.privateCallView=view;
+}
+- (void)forgetCallView:(UIView *)view {
+    if(self.privateCallView==view)self.privateCallView=nil;
+}
+- (UIView *)findButtonsGroup:(UIView *)root {
+    if(!root)return nil;
+    if([NSStringFromClass(root.class) containsString:@"ButtonGroupView"])
+        return root;
+    for(UIView *sub in root.subviews) {
+        UIView *group=[self findButtonsGroup:sub];
+        if(group)return group;
+    }
+    return nil;
+}
+- (UIControl *)endButtonInView:(UIView *)view {
+    UIView *group=[self findButtonsGroup:view];
+    if(!group || group.hidden || group.alpha<0.1)return nil;
+    // In Telegram's PrivateCallScreen the final ContentOverlayButton
+    // is the red End Call button (same action as a user tapping it).
+    UIControl *end=nil;
+    CGFloat right=-CGFLOAT_MAX;
+    NSUInteger count=0;
+    for(UIView *button in group.subviews) {
+        if(![NSStringFromClass(button.class) containsString:@"ContentOverlayButton"])continue;
+        if(button.hidden || button.alpha<0.1 || !button.userInteractionEnabled)continue;
+        if(![button isKindOfClass:[UIControl class]])continue;
+        count++;
+        CGRect frame=[button convertRect:button.bounds toView:group];
+        if(CGRectGetMidX(frame)>right){right=CGRectGetMidX(frame);end=(UIControl *)button;}
+    }
+    return count>=3 ? end : nil;
+}
+- (void)endTelegramCallWhenFinished {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self endTelegramCallWhenFinished];});
+        return;
+    }
+    UIView *screen=self.privateCallView;
+    UIControl *button=[self endButtonInView:screen];
+    if(!button) {
+        // Resolve the live Telegram screen if its UIView has been recreated.
+        for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if(![scene isKindOfClass:[UIWindowScene class]])continue;
+            for(UIWindow *w in ((UIWindowScene *)scene).windows) {
+                NSMutableArray<UIView *> *stack=[NSMutableArray arrayWithObject:w];
+                while(stack.count && !button) {
+                    UIView *candidate=stack.lastObject;[stack removeLastObject];
+                    if([NSStringFromClass(candidate.class) containsString:@"PrivateCallScreen"] &&
+                       candidate.window && !candidate.hidden) {
+                        button=[self endButtonInView:candidate];
+                        if(button)break;
+                    }
+                    [stack addObjectsFromArray:candidate.subviews];
+                }
+                if(button)break;
+            }
+            if(button)break;
+        }
+    }
+    if(button) {
+        NSLog(@"[LeadVirtualMedia] EOF; performing Telegram end-call control");
+        [button sendActionsForControlEvents:UIControlEventTouchUpInside];
+        // Reset after the hangup action has been sent; keep mic suppressed
+        // during the transition to the ended call screen.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.0*NSEC_PER_SEC)),
+            dispatch_get_main_queue(),^{[self resetAll];});
+    } else {
+        NSLog(@"[LeadVirtualMedia] EOF; no visible call end control");
+        [self showError:@"انتهى الفيديو، لكن زر إنهاء المكالمة غير متاح. انهي الاتصال يدوياً."];
+    }
+}
+
 @end
 
 // Retain existing CoreAudio audio path only as fallback when native external
@@ -457,5 +533,11 @@ extern "C" void LeadVirtualMediaReset(void) {
     else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] resetAll];});
 }
 // Remove the old VID overlay. All selection is now before the outgoing call.
-extern "C" void LeadVirtualMediaInstallButton(__unused UIView *view) {}
-extern "C" void LeadVirtualMediaRemoveButton(__unused UIView *view) {}
+extern "C" void LeadVirtualMediaInstallButton(UIView *view) {
+    if(NSThread.isMainThread)[[LeadVirtualMedia shared] rememberCallView:view];
+    else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] rememberCallView:view];});
+}
+extern "C" void LeadVirtualMediaRemoveButton(UIView *view) {
+    if(NSThread.isMainThread)[[LeadVirtualMedia shared] forgetCallView:view];
+    else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] forgetCallView:view];});
+}
