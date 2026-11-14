@@ -31,6 +31,7 @@ typedef void (^LeadStateBlock)(int32_t,int32_t,int32_t,int32_t,int32_t,float);
 static void (*gNativeStateSetter)(id,SEL,LeadStateBlock)=nullptr;
 static void (*gNativeRequestVideo)(id,SEL,id)=nullptr;
 extern "C" void objc_release(id);
+extern "C" id objc_retain(id);
 }
 
 @interface LeadVirtualClip : NSObject
@@ -78,7 +79,7 @@ static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, 
                 [[LeadVirtualMedia shared] nativeCapturerReady:custom];
                 // -init replaces the allocated receiver with the custom capturer.
                 objc_release(self);
-                return custom;
+                return objc_retain(custom);
             }
         }
         NSLog(@"[LeadVirtualMedia] external video factory unavailable");
