@@ -10,13 +10,14 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 
 @interface LeadTelegramNativeShareAttempt : NSObject
 @property(nonatomic,strong) NSURL *file;
 @property(nonatomic,weak) UIViewController *origin;
 @property(nonatomic,strong) id extension;
 @property(nonatomic,strong) UIViewController *remote;
-@property(nonatomic,copy) void (^fallback)(void);
+@property(nonatomic,copy) void (^fallback)(NSString *reason);
 @property(nonatomic,assign) BOOL finished;
 @property(nonatomic,assign) BOOL presented;
 - (void)begin;
@@ -33,10 +34,10 @@ static LeadTelegramNativeShareAttempt *gActiveTelegramShare=nil;
     @synchronized([LeadTelegramNativeShareAttempt class]) {
         if(gActiveTelegramShare==self)gActiveTelegramShare=nil;
     }
-    void (^callback)(void)=self.fallback;
+    void (^callback)(NSString *)=self.fallback;
     self.fallback=nil;
     self.extension=nil;
-    if(callback)dispatch_async(dispatch_get_main_queue(),callback);
+    if(callback)dispatch_async(dispatch_get_main_queue(),^{callback(reason?:@"تعذّر تشغيل إضافة مشاركة Telegram");});
 }
 - (void)complete:(BOOL)success {
     if(self.finished)return;
@@ -86,11 +87,21 @@ static LeadTelegramNativeShareAttempt *gActiveTelegramShare=nil;
         return;
     }
     NSBundle *bundle=[self findOwnShareExtension];
+    // The extension-host class is in a system private framework on some iOS
+    // versions and is not necessarily registered when Telegram first launches.
+    // Loading it is an optional capability probe, not a dependency on any
+    // particular third-party share application.
     Class klass=NSClassFromString(@"NSExtension");
+    if(!klass) {
+        dlopen("/System/Library/PrivateFrameworks/PlugInKit.framework/PlugInKit",RTLD_LAZY|RTLD_LOCAL);
+        klass=NSClassFromString(@"NSExtension");
+    }
     SEL create=NSSelectorFromString(@"extensionWithIdentifier:error:");
     SEL instantiate=NSSelectorFromString(@"instantiateViewControllerWithInputItems:listenerEndpoint:connectionHandler:");
     if(!bundle || !klass || ![klass respondsToSelector:create]) {
-        [self finishWithFallback:@"no usable bundled Telegram ShareExtension"];
+        [self finishWithFallback:!bundle?@"This Telegram build has no bundled ShareExtension":
+            (!klass?@"iOS did not expose its extension host class":
+                    @"iOS has no supported extension lookup selector")];
         return;
     }
     NSError *err=nil;
@@ -172,7 +183,7 @@ static LeadTelegramNativeShareAttempt *gActiveTelegramShare=nil;
     }
     // Avoid trapping the user if a sideloaded Telegram build has no usable
     // share extension process. The regular system activity sheet still works.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5*NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(12*NSEC_PER_SEC)),
         dispatch_get_main_queue(),^{
             if(!self.finished && !self.presented)
                 [self finishWithFallback:@"direct share view did not appear"];
@@ -181,7 +192,7 @@ static LeadTelegramNativeShareAttempt *gActiveTelegramShare=nil;
 @end
 
 void LeadOpenTelegramSharePicker(NSURL *file,
-    UIViewController *presenter,void (^fallback)(void)) {
+    UIViewController *presenter,void (^fallback)(NSString *reason)) {
     if(!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(),^{
             LeadOpenTelegramSharePicker(file,presenter,fallback);
@@ -189,12 +200,13 @@ void LeadOpenTelegramSharePicker(NSURL *file,
         return;
     }
     if(!file.isFileURL || ![[NSFileManager defaultManager] fileExistsAtPath:file.path]) {
-        if(fallback)fallback();
+        if(fallback)fallback(@"Recording file is unavailable");
         return;
     }
     @synchronized([LeadTelegramNativeShareAttempt class]) {
         if(gActiveTelegramShare && !gActiveTelegramShare.finished) {
             NSLog(@"[LeadTelegramShare] second request ignored while picker is already open");
+            if(fallback)fallback(@"Telegram recipient picker is already opening");
             return;
         }
         LeadTelegramNativeShareAttempt *attempt=[LeadTelegramNativeShareAttempt new];
