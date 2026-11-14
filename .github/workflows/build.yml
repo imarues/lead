@@ -3,7 +3,7 @@
 name: Build
 
 permissions:
-    contents: read
+    contents: write
 
 on:
     push:
@@ -48,3 +48,29 @@ jobs:
                 path: |
                     packages/*.deb
                     packages/Lead.dylib
+
+            # Publish the compiled binary, not an artifact ZIP, for sideload users.
+            # The separate branch is excluded from the push trigger, avoiding CI loops.
+            - name: Publish standalone Lead.dylib
+              if: github.ref == 'refs/heads/feature/virtual-media-call-test'
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  test -s packages/Lead.dylib
+                  if ! gh api "repos/${GITHUB_REPOSITORY}/branches/compiled-lead" >/dev/null 2>&1; then
+                      gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                          -f ref='refs/heads/compiled-lead' -f sha="${GITHUB_SHA}" >/dev/null
+                  fi
+                  current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/Lead.dylib?ref=compiled-lead" --jq .sha 2>/dev/null || true)"
+                  base64 < packages/Lead.dylib | tr -d '\n' > "${RUNNER_TEMP}/Lead.b64"
+                  jq -n --rawfile encoded "${RUNNER_TEMP}/Lead.b64" \
+                      --arg message "Build Lead.dylib from ${GITHUB_SHA}" \
+                      --arg branch compiled-lead --arg sha "${current_sha}" \
+                      '{message:$message,branch:$branch,content:$encoded} +
+                        (if $sha == "" then {} else {sha:$sha} end)' \
+                      > "${RUNNER_TEMP}/lead-payload.json"
+                  gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/Lead.dylib" \
+                      --input "${RUNNER_TEMP}/lead-payload.json" >/dev/null
+                  echo "Direct dylib: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/compiled-lead/Lead.dylib"
