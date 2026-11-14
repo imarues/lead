@@ -20,7 +20,7 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     NSString *ext=value.pathExtension.lowercaseString;
     if([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"m4a"])
         value=[value stringByDeletingPathExtension];
-    NSMutableCharacterSet *forbidden=[NSMutableCharacterSet controlCharacterSet];
+    NSMutableCharacterSet *forbidden=[[NSCharacterSet controlCharacterSet] mutableCopy];
     [forbidden addCharactersInString:@"/\\:"];
     NSMutableString *clean=[NSMutableString new];
     for(NSUInteger i=0;i<value.length;i++) {
