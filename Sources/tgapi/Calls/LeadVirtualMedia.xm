@@ -199,6 +199,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(!host){[self finishPicker:NO];return;}
     PHPickerConfiguration *conf=[[PHPickerConfiguration alloc] init];
     conf.filter=[PHPickerFilter videosFilter];conf.selectionLimit=1;
+    // Prefer the untouched original video asset instead of a Photos export.
+    conf.preferredAssetRepresentationMode=PHPickerConfigurationAssetRepresentationModeCurrent;
     PHPickerViewController *picker=[[PHPickerViewController alloc] initWithConfiguration:conf];
     picker.delegate=self;
     [host presentViewController:picker animated:YES completion:nil];
