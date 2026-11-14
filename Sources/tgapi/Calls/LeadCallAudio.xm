@@ -184,10 +184,12 @@ static void setVirtualVoiceProcessing(AudioUnit unit) {
         return;
     UInt32 bypass=highQuality?1:0;
     UInt32 agc=highQuality?0:1;
+    // VoiceProcessingIO uses its input bus (element 1) for these uplink
+    // properties, matching WebRTC's own iOS VPIO configuration.
     const OSStatus b=gOriginalSetProperty(unit,kAUVoiceIOProperty_BypassVoiceProcessing,
-        kAudioUnitScope_Global,0,&bypass,sizeof(bypass));
+        kAudioUnitScope_Global,1,&bypass,sizeof(bypass));
     const OSStatus a=gOriginalSetProperty(unit,kAUVoiceIOProperty_VoiceProcessingEnableAGC,
-        kAudioUnitScope_Global,0,&agc,sizeof(agc));
+        kAudioUnitScope_Global,1,&agc,sizeof(agc));
     if(highQuality && b==noErr)gLastHQUnit.store(unit,std::memory_order_release);
     else if(!highQuality && b==noErr)gLastHQUnit.store(nullptr,std::memory_order_release);
     NSLog(@"[LeadVirtualMedia] VoiceProcessingIO high quality=%d bypass=%d agc=%d",
