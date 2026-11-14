@@ -15,6 +15,7 @@ extern "C" bool LeadVirtualMediaHighQualityEnabled(void);
 #import <mach/mach.h>
 #import <dlfcn.h>
 #import <sys/mman.h>
+#import <sys/stat.h>
 #import <fcntl.h>
 #import <unistd.h>
 #import <math.h>
