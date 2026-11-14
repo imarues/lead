@@ -56,7 +56,7 @@ extern "C" void objc_release(id);
 @property(nonatomic,strong) id nativeCallContext;
 @property(nonatomic,strong) NSURL *selectedURL;
 @property(nonatomic,assign) uint64_t nextAudioSample;
-@property(nonatomic,assign) dispatch_source_t playbackTimer;
+@property(nonatomic,strong) dispatch_source_t playbackTimer;
 + (instancetype)shared;
 - (void)preparePicker:(void(^)(BOOL))completion;
 - (void)resetAll;
@@ -86,6 +86,7 @@ static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, 
     return gNativeInit ? gNativeInit(self,command,deviceId,keepLandscape) : self;
 }
 static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
+    [[LeadVirtualMedia shared] nativeContextReady:self];
     LeadStateBlock original=[block copy];
     LeadStateBlock wrapped=^(int32_t state,int32_t v,int32_t rv,int32_t ra,int32_t b,float aspect) {
         [[LeadVirtualMedia shared] nativeState:state];
@@ -402,7 +403,8 @@ extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL)) {
     dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] preparePicker:completion];});
 }
 extern "C" void LeadVirtualMediaReset(void) {
-    dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] resetAll];});
+    if(NSThread.isMainThread)[[LeadVirtualMedia shared] resetAll];
+    else dispatch_async(dispatch_get_main_queue(),^{[[LeadVirtualMedia shared] resetAll];});
 }
 // Remove the old VID overlay. All selection is now before the outgoing call.
 extern "C" void LeadVirtualMediaInstallButton(__unused UIView *view) {}
