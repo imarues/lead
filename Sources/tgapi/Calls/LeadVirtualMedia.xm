@@ -45,6 +45,7 @@ static id (*gNativeInit)(id,SEL,NSString *,bool)=nullptr;
 typedef void (^LeadStateBlock)(int32_t,int32_t,int32_t,int32_t,int32_t,float);
 static void (*gNativeStateSetter)(id,SEL,LeadStateBlock)=nullptr;
 static void (*gNativeRequestVideo)(id,SEL,id)=nullptr;
+static void (*gNativeSetVideoEnabled)(id,SEL,bool)=nullptr;
 extern "C" void objc_release(id);
 extern "C" id objc_retain(id);
 }
@@ -146,6 +147,13 @@ static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
     };
     if(gNativeStateSetter)gNativeStateSetter(self,command,wrapped);
 }
+static void LeadNativeCameraEnabled(id self,SEL cmd,bool enabled) {
+    // Source may already exist when CallKit accepts. Even if Telegram tries
+    // to enable the camera again, the incoming-source gate denies it.
+    LeadVirtualMedia *m=[LeadVirtualMedia shared];
+    if(gIncomingPrivacyGate.load() && self!=m.externalCapturer)enabled=false;
+    if(gNativeSetVideoEnabled)gNativeSetVideoEnabled(self,cmd,enabled);
+}
 static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     LeadVirtualMedia *m=[LeadVirtualMedia shared];
     [m nativeContextReady:self];
@@ -195,6 +203,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         Method init=c?class_getInstanceMethod(c,@selector(initWithDeviceId:keepLandscape:)):NULL;
         Method state=w?class_getInstanceMethod(w,@selector(setStateChanged:)):NULL;
         Method req=w?class_getInstanceMethod(w,@selector(requestVideo:)):NULL;
+        Method enabled=c?class_getInstanceMethod(c,@selector(setIsVideoEnabled:)):NULL;
         if(!c || !w || !init || !state || !req || ![c respondsToSelector:factory]) {
             NSLog(@"[LeadVirtualMedia] native capturer/state API not found in installed Telegram");
             return NO;
@@ -202,6 +211,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         gNativeInit=(decltype(gNativeInit))method_setImplementation(init,(IMP)LeadInitNativeVideoCapturer);
         gNativeStateSetter=(decltype(gNativeStateSetter))method_setImplementation(state,(IMP)LeadSetNativeCallState);
         gNativeRequestVideo=(decltype(gNativeRequestVideo))method_setImplementation(req,(IMP)LeadRequestNativeVideo);
+        if(enabled)gNativeSetVideoEnabled=(decltype(gNativeSetVideoEnabled))
+            method_setImplementation(enabled,(IMP)LeadNativeCameraEnabled);
         gNativeHooksReady=true;
         return YES;
     }
@@ -702,11 +713,11 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     // Remove only the *outgoing* camera track, preserving incoming video.
     if([native respondsToSelector:@selector(disableVideo)])
         ((void (*)(id,SEL))objc_msgSend)(native,@selector(disableVideo));
-    ((void (*)(id,SEL,id))objc_msgSend)(native,@selector(requestVideo:),custom);
     @synchronized(self) {
         self.externalCapturer=custom;
         self.nativeCallContext=native;
     }
+    ((void (*)(id,SEL,id))objc_msgSend)(native,@selector(requestVideo:),custom);
     gExpectCapturer.store(false);
     gConnected.store(true);
     // The original remote incoming video track is untouched.
@@ -920,6 +931,11 @@ static void LeadTelegramAnswer(id delegate,SEL selector,CXProvider *provider,CXA
     // WebRTC capturer before action.fulfill() could reject incoming calls.
     if(gTelegramOriginalAnswer)gTelegramOriginalAnswer(delegate,selector,provider,action);
     if(incomingVideo) {
+        // Extra protection directly before Telegram fulfills Answer.
+        gIncomingPrivacyGate.store(true,std::memory_order_release);
+        [[LeadVirtualMedia shared] protectIncomingCamera];
+    }
+    if(incomingVideo) {
         dispatch_async(dispatch_get_main_queue(),^{
             LeadVirtualMedia *m=[LeadVirtualMedia shared];
             [m incomingVideoAnsweredForUUID:action.callUUID];
@@ -959,6 +975,10 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
     (void)[[LeadVirtualMedia shared] installNativeHooks];
     gObservedCallState.store(-1);
     if(uuid && update.hasVideo) {
+        // This runs before the user taps Answer and before the WebRTC
+        // outgoing video track can start from the incoming call.
+        gIncomingPrivacyGate.store(true,std::memory_order_release);
+        [[LeadVirtualMedia shared] protectIncomingCamera];
         @synchronized(LeadIncomingVideoIDs()) {
             [LeadIncomingVideoIDs() addObject:uuid];
         }
