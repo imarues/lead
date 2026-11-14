@@ -1528,65 +1528,103 @@ static void LeadInstallProfileItems(UIViewController *controller) {
 }
 %end
 
-%group CallConfirmHooks
+// Video call source is chosen before Telegram sends the outgoing call.
+extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL));
+extern "C" void LeadVirtualMediaReset(void);
+static BOOL gLeadCallPromptOpen=NO;
+static __thread BOOL gLeadCallPromptBypass=NO;
 
+%group CallConfirmHooks
 %hook ASControlNode
 - (void)sendActionsForControlEvents:(NSUInteger)controlEvents withEvent:(UIEvent *)event {
-    if (controlEvents == (1 << 4)) { // ASControlNodeEventTouchUpInside
-        NSString *label = [(id)self accessibilityLabel];
-        if (label && label.length > 0 && [[NSUserDefaults standardUserDefaults] boolForKey:kConfirmCalls]) {
-            NSString *lower = [label lowercaseString];
-            
-            // Fallback EN/RU labels plus whatever the active Telegram language
-            // calls the profile buttons (PeerInfo.ButtonCall / ButtonVideoCall).
-            NSMutableSet *callLabels = [NSMutableSet setWithArray:@[
-                @"call", @"позвонить", @"звонок"
-            ]];
-            NSMutableSet *videoLabels = [NSMutableSet setWithArray:@[
-                @"video", @"видео", @"video call", @"видеозвонок"
-            ]];
-            TGLocalization *loc = getActiveTGLocalization();
-            NSString *localizedCall = [[loc get:@"PeerInfo.ButtonCall"] lowercaseString];
-            NSString *localizedVideo = [[loc get:@"PeerInfo.ButtonVideoCall"] lowercaseString];
-            if (localizedCall.length > 0 && ![localizedCall isEqualToString:@"peerinfo.buttoncall"]) [callLabels addObject:localizedCall];
-            if (localizedVideo.length > 0 && ![localizedVideo isEqualToString:@"peerinfo.buttonvideocall"]) [videoLabels addObject:localizedVideo];
-            
-            BOOL isCall = [callLabels containsObject:lower];
-            BOOL isVideo = [videoLabels containsObject:lower];
-            
-            if (isCall || isVideo) {
-                UIWindow *window = LeadMainWindow();
-                UIViewController *rootVC = window.rootViewController;
-                while (rootVC.presentedViewController) {
-                    rootVC = rootVC.presentedViewController;
-                }
-                if (rootVC) {
-                    NSString *confirmTitle = isVideo ? @"Video Call" : @"Call";
-                    NSString *alertTitle = isVideo ? @"Start Video Call?" : @"Start Call?";
-                    
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:alertTitle
-                                                                                   message:nil
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-                    
-                    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                                             style:UIAlertActionStyleCancel
-                                                           handler:nil]];
-                    [alert addAction:[UIAlertAction actionWithTitle:confirmTitle
-                                                             style:UIAlertActionStyleDefault
-                                                           handler:^(UIAlertAction *action) {
-                        %orig(controlEvents, event);
-                    }]];
-                    
-                    [rootVC presentViewController:alert animated:YES completion:nil];
+    if(gLeadCallPromptBypass){%orig(controlEvents,event);return;}
+    if(controlEvents==(1<<4)) {
+        NSString *label=[(id)self accessibilityLabel];
+        NSString *lower=label.lowercaseString;
+        if(lower.length>0) {
+            TGLocalization *loc=getActiveTGLocalization();
+            NSMutableSet *callLabels=[NSMutableSet setWithArray:@[@"call",@"позвонить",@"звонок"]];
+            NSMutableSet *videoLabels=[NSMutableSet setWithArray:
+                @[@"video",@"видео",@"video call",@"видеозвонок"]];
+            NSString *localizedCall=[[loc get:@"PeerInfo.ButtonCall"] lowercaseString];
+            NSString *localizedVideo=[[loc get:@"PeerInfo.ButtonVideoCall"] lowercaseString];
+            if(localizedCall.length && ![localizedCall isEqualToString:@"peerinfo.buttoncall"])
+                [callLabels addObject:localizedCall];
+            if(localizedVideo.length && ![localizedVideo isEqualToString:@"peerinfo.buttonvideocall"])
+                [videoLabels addObject:localizedVideo];
+            BOOL isVideo=[videoLabels containsObject:lower];
+            BOOL isCall=[callLabels containsObject:lower];
+            BOOL confirmVoice=[[NSUserDefaults standardUserDefaults] boolForKey:kConfirmCalls];
+            if((isVideo || (isCall && confirmVoice)) && !gLeadCallPromptOpen) {
+                UIWindow *window=LeadMainWindow();
+                UIViewController *root=window.rootViewController;
+                while(root.presentedViewController)root=root.presentedViewController;
+                if(root) {
+                    gLeadCallPromptOpen=YES;
+                    __weak id weakControl=self;
+                    void (^dial)(void)=^{
+                        id control=weakControl;
+                        if(!control)return;
+                        // Dispatch through the original node only after the picker
+                        // disappears; no actual call is placed before media decoding.
+                        gLeadCallPromptBypass=YES;
+                        @try {
+                            [(id)control sendActionsForControlEvents:controlEvents withEvent:nil];
+                        } @finally {
+                            gLeadCallPromptBypass=NO;
+                        }
+                    };
+                    if(isVideo) {
+                        UIAlertController *select=[UIAlertController
+                            alertControllerWithTitle:@"نوع اتصال الفيديو"
+                            message:@"اختَر المصدر قبل بدء الاتصال" preferredStyle:UIAlertControllerStyleAlert];
+                        [select addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+                            style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a){
+                                gLeadCallPromptOpen=NO;
+                            }]];
+                        [select addAction:[UIAlertAction actionWithTitle:@"اتصال فيديو طبيعي"
+                            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+                                gLeadCallPromptOpen=NO;
+                                LeadVirtualMediaReset();
+                                dial();
+                            }]];
+                        [select addAction:[UIAlertAction actionWithTitle:@"رفع فيديو من المعرض"
+                            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+                                LeadVirtualMediaPrepareVideoCall(^(BOOL ready){
+                                    gLeadCallPromptOpen=NO;
+                                    if(!ready)return;
+                                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                        (int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                                        dial();
+                                    });
+                                });
+                            }]];
+                        [root presentViewController:select animated:YES completion:nil];
+                    } else {
+                        UIAlertController *confirm=[UIAlertController
+                            alertControllerWithTitle:@"Start Call?" message:nil
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                            style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a){
+                                gLeadCallPromptOpen=NO;
+                            }]];
+                        [confirm addAction:[UIAlertAction actionWithTitle:@"Call"
+                            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+                                gLeadCallPromptOpen=NO;
+                                LeadVirtualMediaReset();
+                                dial();
+                            }]];
+                        [root presentViewController:confirm animated:YES completion:nil];
+                    }
                     return;
                 }
             }
+            if(gLeadCallPromptOpen && (isVideo || isCall))return;
         }
     }
     %orig;
 }
 %end
-
 %end // CallConfirmHooks
 
 %group SiriBypassHooks
