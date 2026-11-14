@@ -303,6 +303,77 @@ static void drain(Ring &ring) {
     }
     ring.readIndex.store(r,memory_order_release);
 }
+
+// Postprocess the TWO separate 16-bit WAV stems before making the M4A.
+// Doing this off CoreAudio's real-time render callback preserves the call
+// and provides predictable gain without a live mic/remote imbalance.
+// Voice-gated RMS avoids boosting long periods of digital silence.
+static void normalizeRecordedWav(NSString *path, bool remote) {
+    if(!path.length)return;
+    int fd=open(path.fileSystemRepresentation,O_RDWR);
+    if(fd<0)return;
+    struct stat st={};
+    if(fstat(fd,&st)!=0 || st.st_size<=44) {close(fd);return;}
+    const off_t first=44;
+    const off_t countBytes=(st.st_size-first)&~(off_t)1;
+    int16_t samples[8192]={};
+    double squares=0.0;
+    uint64_t active=0,total=0;
+    const double gate=remote?0.0035:0.0045;
+    for(off_t off=0;off<countBytes;) {
+        size_t limit=(size_t)std::min((off_t)sizeof(samples),countBytes-off);
+        ssize_t n=pread(fd,samples,limit,first+off);
+        if(n<=0)break;
+        size_t count=(size_t)n/sizeof(int16_t);
+        for(size_t i=0;i<count;i++){
+            double x=(double)samples[i]*(1.0/32768.0);
+            if(std::fabs(x)>=gate){squares+=x*x;active++;}
+        }
+        total+=count;
+        off+=(off_t)(count*sizeof(int16_t));
+    }
+    if(!total || active<total/250) { // nearly silent: do NOT amplify noise.
+        NSLog(@"[LeadRecorder] %@ track quiet, gain unchanged",
+             remote?@"remote":@"microphone");
+        close(fd);return;
+    }
+    const double rms=std::sqrt(squares/(double)active);
+    // Remote voice gets ~5 dB stronger target than local voice.
+    // Gain is capped, and a smooth peak knee prevents hard clipping.
+    const double targetRms=remote?0.195:0.108;
+    const double minimum=remote?1.10:1.04;
+    const double maximum=remote?5.0:3.2;
+    const double gain=std::max(minimum,std::min(maximum,
+        targetRms/std::max(0.0001,rms)));
+    for(off_t off=0;off<countBytes;) {
+        size_t limit=(size_t)std::min((off_t)sizeof(samples),countBytes-off);
+        ssize_t n=pread(fd,samples,limit,first+off);
+        if(n<=0)break;
+        size_t count=(size_t)n/sizeof(int16_t);
+        for(size_t i=0;i<count;i++) {
+            double value=((double)samples[i]/32768.0)*gain;
+            const double sign=value<0?-1.0:1.0;
+            double a=std::fabs(value);
+            // Identity below 0.80, progressively limit above it.
+            // Max output is ~0.99, never an integer wrap/clipped square wave.
+            if(a>0.80)a=0.80+0.19*(1.0-std::exp(-(a-0.80)/0.19));
+            a=std::min(0.99,a);
+            samples[i]=(int16_t)std::lrint(sign*a*32767.0);
+        }
+        size_t bytes=count*sizeof(int16_t);
+        if(pwrite(fd,samples,bytes,first+off)!=(ssize_t)bytes){
+            NSLog(@"[LeadRecorder] failed gain write for %@ stem",
+                  remote?@"remote":@"microphone");
+            break;
+        }
+        off+=(off_t)bytes;
+    }
+    close(fd);
+    NSLog(@"[LeadRecorder] %@ voice RMS=%.4f, gain=%.2fx, active=%llu",
+          remote?@"remote":@"microphone",rms,gain,
+          (unsigned long long)active);
+}
+
 static NSError *recordingError(NSString *message) {
     return [NSError errorWithDomain:@"Lead.CallAudio" code:1
       userInfo:@{NSLocalizedDescriptionKey:message}];
@@ -366,6 +437,10 @@ extern "C" void LeadCallAudioStop(void (^completion)(NSURL *,NSError *)) {
         wavHeader(gMic.fd,micFrames,gMic.sampleRate.load());
         wavHeader(gRemote.fd,remoteFrames,gRemote.sampleRate.load());
         close(gMic.fd);close(gRemote.fd);gMic.fd=gRemote.fd=-1;
+        if(micFrames>0 && remoteFrames>0) {
+            normalizeRecordedWav([gTemporaryDirectory stringByAppendingPathComponent:@"mic.wav"],false);
+            normalizeRecordedWav([gTemporaryDirectory stringByAppendingPathComponent:@"remote.wav"],true);
+        }
         if(micFrames==0 || remoteFrames==0) {
             NSError *error=recordingError(@"The call audio paths were not captured on this Telegram version. No valid two-sided recording was produced.");
             dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(nil,error);});
@@ -386,7 +461,11 @@ extern "C" void LeadCallAudioStop(void (^completion)(NSURL *,NSError *)) {
                             ofTrack:source atTime:kCMTimeZero error:&composeError])break;
             AVMutableAudioMixInputParameters *params=[AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track];
             // Preserve full captured voice levels; do not attenuate each side to 80%.
-            [params setVolume:1.0 atTime:kCMTimeZero];[mixParameters addObject:params];
+            // Mic is kept lower than the normalized remote track; both are
+            // noticeably louder than their original quiet captures.
+            [params setVolume:([url.lastPathComponent isEqualToString:@"remote.wav"]?1.0:0.78)
+                       atTime:kCMTimeZero];
+            [mixParameters addObject:params];
         }
         if(composeError) {
             dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(nil,composeError);});
