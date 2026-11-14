@@ -6,6 +6,7 @@
 #import "LeadCallAudio.h"
 #import "../UI/LeadDesign.h"
 extern "C" void LeadVirtualMediaInstallButton(UIView *view);
+extern "C" void LeadVirtualMediaInstallEarlyHooks(void);
 extern "C" void LeadVirtualMediaRemoveButton(UIView *view);
 
 static char kLeadCallRecordButtonKey;
@@ -330,11 +331,13 @@ static void LeadTryInstallCallScreenHooks(void) {
     NSString *process=NSProcessInfo.processInfo.processName.lowercaseString;
     if([process containsString:@"notificationservice"])return;
     LeadCallAudioInstallHooks();
+    LeadVirtualMediaInstallEarlyHooks();
     dispatch_async(dispatch_get_main_queue(),^{
         [[NSNotificationCenter defaultCenter] addObserver:
             [LeadCallRecordButtonTarget shared]
             selector:@selector(recordingChanged:)
             name:LeadCallRecordingChangedNotification object:nil];
+        LeadVirtualMediaInstallEarlyHooks();
         LeadTryInstallCallScreenHooks();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),
                        dispatch_get_main_queue(),^{LeadTryInstallCallScreenHooks();});
