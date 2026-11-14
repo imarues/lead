@@ -44,6 +44,13 @@ static dispatch_queue_t gWriterQueue;
 static dispatch_source_t gWriterTimer;
 static NSString *gTemporaryDirectory;
 static BOOL gHooksReady = NO;
+// Diagnostics are atomic: no logging or allocation on CoreAudio render threads.
+static std::atomic<uint32_t> gBoundAudioImports{0};
+static std::atomic<uint32_t> gRenderCallHits{0};
+static std::atomic<uint32_t> gOutputCallbackHits{0};
+static std::atomic<uint32_t> gRenderNotifyHits{0};
+static std::atomic<uint32_t> gRenderCallbackConfigurations{0};
+static std::atomic<AudioUnit> gNotifiedUnits[128];
 
 typedef OSStatus (*RenderProc)(AudioUnit, AudioUnitRenderActionFlags *,
     const AudioTimeStamp *, UInt32, UInt32, AudioBufferList *);
@@ -122,10 +129,44 @@ static void capture(Ring &ring, const AudioBufferList *abl,
     ring.writeIndex.store(w+n, memory_order_release);
 }
 
+// Render notify is a second CoreAudio tap for clients that don't expose
+// their playback PCM in the wrapped SetRenderCallback path. Never replace
+// playback buffers; capturing a post-render copy cannot change call audio.
+static OSStatus leadAudioRenderNotify(void *opaque, AudioUnitRenderActionFlags *flags,
+       const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *data) {
+    if(!flags || !(*flags & kAudioUnitRenderAction_PostRender) ||
+       !gActive.load(memory_order_relaxed) || !data)return noErr;
+    AudioUnit unit=(AudioUnit)opaque;
+    gRenderNotifyHits.fetch_add(1,memory_order_relaxed);
+    if(bus==0 && !gOutputCallbackHits.load(memory_order_relaxed)) {
+        AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Input,0);
+        capture(gRemote,data,frames,f);
+    } else if(bus==1 && !gRenderCallHits.load(memory_order_relaxed)) {
+        AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Output,1);
+        capture(gMic,data,frames,f);
+    }
+    return noErr;
+}
+static void leadEnsureAudioRenderNotify(AudioUnit unit) {
+    if(!isCallAudioUnit(unit))return;
+    for(auto &slot:gNotifiedUnits) {
+        if(slot.load(memory_order_acquire)==unit)return;
+    }
+    for(auto &slot:gNotifiedUnits) {
+        AudioUnit empty=nullptr;
+        if(slot.compare_exchange_strong(empty,unit,memory_order_acq_rel)) {
+            OSStatus status=AudioUnitAddRenderNotify(unit,leadAudioRenderNotify,unit);
+            if(status!=noErr)slot.store(nullptr,memory_order_release);
+            return;
+        }
+    }
+}
 static OSStatus leadAudioUnitRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
              const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *out) {
     OSStatus status = gOriginalRender ? gOriginalRender(unit, flags, time, bus, frames, out) : -1;
     if (status == noErr && bus == 1 && isCallAudioUnit(unit)) {
+        if(gActive.load(memory_order_relaxed))
+            gRenderCallHits.fetch_add(1,memory_order_relaxed);
         AudioStreamBasicDescription f = formatFor(unit, kAudioUnitScope_Output, 1);
         // Replace local microphone samples only during explicitly selected movie playback.
         // Do not leak the real microphone while the movie is preparing or after it ends.
@@ -141,6 +182,7 @@ static OSStatus leadOutputCallback(void *opaque, AudioUnitRenderActionFlags *fla
     if (!binding || !binding->original) return -1;
     OSStatus status = binding->original(binding->context, flags, time, bus, frames, data);
     if (status == noErr && gActive.load(memory_order_relaxed)) {
+        gOutputCallbackHits.fetch_add(1,memory_order_relaxed);
         if (!binding->format.mSampleRate)
             binding->format = formatFor(binding->unit,kAudioUnitScope_Input,0);
         capture(gRemote,data,frames,binding->format);
@@ -153,6 +195,7 @@ static OSStatus leadAudioUnitSetProperty(AudioUnit unit, AudioUnitPropertyID pro
     if (!gOriginalSetProperty) return -1;
     if (property == kAudioUnitProperty_SetRenderCallback && element == 0 &&
         size >= sizeof(AURenderCallbackStruct) && data && isCallAudioUnit(unit)) {
+        gRenderCallbackConfigurations.fetch_add(1,memory_order_relaxed);
         uint32_t index = gCallbackCount.fetch_add(1, memory_order_relaxed);
         if (index < 128) {
             OutputCallback *binding = &gCallbackSlots[index];
@@ -199,12 +242,16 @@ static void setVirtualVoiceProcessing(AudioUnit unit) {
 static OSStatus leadAudioUnitInitialize(AudioUnit unit) {
     if(!gOriginalInitialize)return -1;
     const OSStatus status=gOriginalInitialize(unit);
-    if(status==noErr)setVirtualVoiceProcessing(unit);
+    if(status==noErr) {
+        setVirtualVoiceProcessing(unit);
+        leadEnsureAudioRenderNotify(unit);
+    }
     return status;
 }
 static OSStatus leadAudioOutputUnitStart(AudioUnit unit) {
     if(!gOriginalOutputUnitStart)return -1;
     setVirtualVoiceProcessing(unit);
+    leadEnsureAudioRenderNotify(unit);
     return gOriginalOutputUnitStart(unit);
 }
 
@@ -235,6 +282,7 @@ static void bindSection(const section_64 *sec, intptr_t slide,
                  VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY) != KERN_SUCCESS) continue;
         }
         *slot=replacement;
+        gBoundAudioImports.fetch_add(1,memory_order_relaxed);
     }
 }
 static void bindImage(const mach_header *header, intptr_t slide) {
@@ -407,6 +455,11 @@ extern "C" BOOL LeadCallAudioStart(NSString *directory) {
         ring->writeIndex.store(0);ring->readIndex.store(0);
         ring->writtenFrames=0;ring->sampleRate.store(48000);
     }
+    gRenderCallHits.store(0,memory_order_relaxed);
+    gOutputCallbackHits.store(0,memory_order_relaxed);
+    gRenderNotifyHits.store(0,memory_order_relaxed);
+    NSLog(@"[LeadRecorder] start CoreAudio hooks ready=%d imported=%u configuredCallbacks=%u",
+          gHooksReady,gBoundAudioImports.load(),gRenderCallbackConfigurations.load());
     NSString *mic=[directory stringByAppendingPathComponent:@"mic.wav"];
     NSString *remote=[directory stringByAppendingPathComponent:@"remote.wav"];
     gMic.fd=open(mic.fileSystemRepresentation,O_CREAT|O_TRUNC|O_RDWR,0600);
@@ -443,7 +496,16 @@ extern "C" void LeadCallAudioStop(void (^completion)(NSURL *,NSError *)) {
             normalizeRecordedWav([gTemporaryDirectory stringByAppendingPathComponent:@"remote.wav"],true);
         }
         if(micFrames==0 || remoteFrames==0) {
-            NSError *error=recordingError(@"The call audio paths were not captured on this Telegram version. No valid two-sided recording was produced.");
+            // The previous generic message hid whether just one side was
+            // missing or the injected app never reached our CoreAudio hooks.
+            NSString *detail=[NSString stringWithFormat:
+                @"VoidGram audio capture incomplete: microphone=%llu frames, remote=%llu frames. CoreAudio hooks=%u, render=%u, output callbacks=%u, render notifications=%u, callback configs=%u. No two-sided audio was produced.",
+                (unsigned long long)micFrames,(unsigned long long)remoteFrames,
+                gBoundAudioImports.load(),gRenderCallHits.load(),
+                gOutputCallbackHits.load(),gRenderNotifyHits.load(),
+                gRenderCallbackConfigurations.load()];
+            NSLog(@"[LeadRecorder] %@",detail);
+            NSError *error=recordingError(detail);
             dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(nil,error);});
             return;
         }
