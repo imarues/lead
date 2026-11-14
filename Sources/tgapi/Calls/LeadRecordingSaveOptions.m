@@ -256,53 +256,6 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
              detail,self.archiveFile.lastPathComponent]];
     });
 }
-- (void)openSavedMessagesSystemShare {
-    NSURL *file=self.archiveFile;
-    UIActivityViewController *share=[[UIActivityViewController alloc]
-        initWithActivityItems:@[file] applicationActivities:nil];
-    share.popoverPresentationController.sourceView=[self presenter].view;
-    share.popoverPresentationController.sourceRect=CGRectMake(20,20,1,1);
-    share.completionWithItemsHandler=^(UIActivityType activity,BOOL completed,
-                                      NSArray *returned,NSError *error) {
-        dispatch_async(dispatch_get_main_queue(),^{
-            BOOL keepArchive=(self.target==LeadRecordingSaveTargetAll);
-            if(!completed || error) {
-                NSString *message=error.localizedDescription?:
-                   @"ما اكتملت المشاركة. التسجيل محفوظ بالأرشيف حتى ما يضيع.";
-                if(self.gallerySaved)message=[message stringByAppendingString:
-                    @"\nنسخة المعرض محفوظة أيضاً."];
-                [self notice:@"المشاركة لم تكتمل" text:message];
-                return;
-            }
-            // An iOS share completion does not prove that the upload has
-            // reached Telegram's servers. Keep a non-archived backup copy in
-            // app caches for recovery before dropping the visible archive.
-            if(!keepArchive) {
-                NSString *cache=[NSSearchPathForDirectoriesInDomains(NSCachesDirectory,
-                    NSUserDomainMask,YES).firstObject
-                    stringByAppendingPathComponent:@"Lead/RecentSharedCallRecordings"];
-                [[NSFileManager defaultManager] createDirectoryAtPath:cache
-                    withIntermediateDirectories:YES attributes:nil error:nil];
-                NSURL *backup=[NSURL fileURLWithPath:[cache stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"%@-%@",NSUUID.UUID.UUIDString,
-                        file.lastPathComponent]]];
-                if([[NSFileManager defaultManager] copyItemAtURL:file toURL:backup error:nil])
-                    [[NSFileManager defaultManager] removeItemAtURL:file error:nil];
-            }
-            NSMutableArray *status=[NSMutableArray array];
-            if(keepArchive)[status addObject:@"الأرشيف: محفوظ"];
-            if(self.gallerySaved)[status addObject:@"المعرض: محفوظ"];
-            if(self.galleryFailure)[status addObject:
-                [NSString stringWithFormat:@"المعرض: %@",self.galleryFailure]];
-            [status addObject:@"المشاركة: اكتملت من iOS. تأكد من ظهور الملف في رسائلك المحفوظة على Telegram."];
-            [self notice:@"نتيجة الحفظ" text:[status componentsJoinedByString:@"\n"]];
-        });
-    };
-    UIViewController *host=[self presenter];
-    if(host)[host presentViewController:share animated:YES completion:nil];
-    else [self notice:@"تعذر فتح المشاركة" text:
-         @"ملف التسجيل محفوظ بالأرشيف. افتح الأرشيف وشاركه إلى رسائلك المحفوظة."];
-}
 @end
 
 void LeadRecordingPresentSaveOptions(NSURL *file,NSError *warning,UIViewController *presenter) {
