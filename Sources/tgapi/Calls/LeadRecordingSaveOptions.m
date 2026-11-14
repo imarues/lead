@@ -5,6 +5,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
+// Try Telegram bundled in-app share UI, with a tested system-share fallback.
+extern void LeadOpenTelegramSharePicker(NSURL *file, UIViewController *presenter,
+    void (^fallback)(void));
 
 typedef NS_ENUM(NSInteger, LeadRecordingSaveTarget) {
     LeadRecordingSaveTargetArchive=0,
@@ -92,7 +95,7 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     }
     NSString *extension=file.pathExtension.uppercaseString;
     NSString *message=[NSString stringWithFormat:
-        @"اكتب اسم التسجيل فقط، وصيغة %@ تنضاف تلقائياً.\nالرسائل المحفوظة تفتح مشاركة Telegram حتى تختار محادثة نفسك.",extension];
+        @"اكتب اسم التسجيل فقط، وصيغة %@ تنضاف تلقائياً.\nالرسائل المحفوظة تفتح اختيار محادثة Telegram داخلياً إذا كان متاحاً.",extension];
     if(warning)message=[message stringByAppendingFormat:@"\nملاحظة: %@",warning.localizedDescription];
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"اسم تسجيل المكالمة"
         message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -239,9 +242,15 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     }
 }
 - (void)openSavedMessagesShare {
-    // iOS doesn't offer a stable public API for uploading directly into the
-    // logged-in Telegram account from an injected dylib. Telegram's share
-    // extension asks the user to explicitly pick their Saved Messages.
+    // Prefer the application's bundled Telegram share UI. Sideloaded
+    // variants may not allow hosting their own share extension, in which
+    // case the older system share sheet remains as a safe fallback.
+    NSURL *file=self.archiveFile;
+    LeadOpenTelegramSharePicker(file,[self presenter],^{
+        [self openSavedMessagesSystemShare];
+    });
+}
+- (void)openSavedMessagesSystemShare {
     NSURL *file=self.archiveFile;
     UIActivityViewController *share=[[UIActivityViewController alloc]
         initWithActivityItems:@[file] applicationActivities:nil];
