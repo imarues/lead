@@ -89,6 +89,10 @@ extern "C" id objc_retain(id);
 @property(nonatomic,strong) UIView *localPreviewView;
 @property(nonatomic,strong) AVPlayer *localPreviewPlayer;
 @property(nonatomic,strong) AVPlayerLayer *localPreviewLayer;
+// Preview-only UI layout. Never used by tgcalls, the video encoder, or audio.
+@property(nonatomic,assign) CGFloat localPreviewScale;
+@property(nonatomic,assign) CGPoint localPreviewNormalizedCenter;
+@property(nonatomic,assign) BOOL localPreviewHasSavedCenter;
 + (instancetype)shared;
 - (void)preparePicker:(void(^)(BOOL))completion;
 - (void)resetAll;
@@ -111,6 +115,9 @@ extern "C" id objc_retain(id);
 - (void)capturePhysicalCamera:(id)camera;
 - (void)startLocalPreview;
 - (void)removeLocalPreview;
+- (void)dragLocalPreview:(UIPanGestureRecognizer *)gesture;
+- (void)pinchLocalPreview:(UIPinchGestureRecognizer *)gesture;
+- (void)layoutLocalPreviewInHost:(UIView *)host;
 @end
 
 static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, bool keepLandscape) {
@@ -777,6 +784,83 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     self.localPreviewPlayer=nil;
     self.localPreviewLayer=nil;
     self.localPreviewView=nil;
+    self.localPreviewScale=1.0;
+    self.localPreviewNormalizedCenter=CGPointZero;
+    self.localPreviewHasSavedCenter=NO;
+}
+- (void)dragLocalPreview:(UIPanGestureRecognizer *)gesture {
+    UIView *preview=self.localPreviewView;
+    UIView *host=self.privateCallView;
+    if(!preview || !host || ![preview isDescendantOfView:host])return;
+    if(gesture.state==UIGestureRecognizerStateBegan ||
+       gesture.state==UIGestureRecognizerStateChanged) {
+        CGPoint movement=[gesture translationInView:host];
+        CGPoint newCenter=CGPointMake(preview.center.x+movement.x,
+                                       preview.center.y+movement.y);
+        const CGFloat margin=6.0;
+        const CGFloat minY=MAX(60.0,host.safeAreaInsets.top+6.0);
+        const CGFloat maxY=host.bounds.size.height-MAX(40.0,host.safeAreaInsets.bottom+10.0);
+        newCenter.x=MAX(margin+preview.bounds.size.width*0.5,
+                        MIN(host.bounds.size.width-margin-preview.bounds.size.width*0.5,newCenter.x));
+        newCenter.y=MAX(minY+preview.bounds.size.height*0.5,
+                        MIN(maxY-preview.bounds.size.height*0.5,newCenter.y));
+        preview.center=newCenter;
+        [gesture setTranslation:CGPointZero inView:host];
+        self.localPreviewHasSavedCenter=YES;
+        self.localPreviewNormalizedCenter=CGPointMake(
+            newCenter.x/MAX(1.0,host.bounds.size.width),
+            newCenter.y/MAX(1.0,host.bounds.size.height));
+    }
+}
+- (void)pinchLocalPreview:(UIPinchGestureRecognizer *)gesture {
+    if(gesture.state!=UIGestureRecognizerStateBegan &&
+       gesture.state!=UIGestureRecognizerStateChanged)return;
+    if(!self.localPreviewView || !self.privateCallView)return;
+    const CGFloat multiplier=gesture.scale;
+    if(!isfinite((double)multiplier) || multiplier<=0)return;
+    // A simple on-screen thumbnail zoom, not a change to the sent video.
+    self.localPreviewScale=MAX(0.52,MIN(2.6,
+        (self.localPreviewScale>0?self.localPreviewScale:1.0)*multiplier));
+    gesture.scale=1.0;
+    UIView *host=self.privateCallView;
+    if(!self.localPreviewHasSavedCenter) {
+        self.localPreviewNormalizedCenter=CGPointMake(
+            self.localPreviewView.center.x/MAX(1.0,host.bounds.size.width),
+            self.localPreviewView.center.y/MAX(1.0,host.bounds.size.height));
+        self.localPreviewHasSavedCenter=YES;
+    }
+    [self layoutLocalPreviewInHost:host];
+}
+- (void)layoutLocalPreviewInHost:(UIView *)host {
+    if(!host || !self.localPreviewView)return;
+    const CGFloat baseWidth=MIN(126.0,host.bounds.size.width*0.30);
+    const CGFloat ratio=1.48;
+    const CGFloat maxHeight=MAX(70.0,host.bounds.size.height
+        -MAX(60.0,host.safeAreaInsets.top+6.0)
+        -MAX(40.0,host.safeAreaInsets.bottom+10.0)-12.0);
+    const CGFloat maxWidth=MIN(host.bounds.size.width-12.0,maxHeight/ratio);
+    const CGFloat effectiveScale=self.localPreviewScale>0?self.localPreviewScale:1.0;
+    const CGFloat width=MIN(MAX(64.0,baseWidth*effectiveScale),maxWidth);
+    const CGFloat height=width*ratio;
+    CGPoint center;
+    if(self.localPreviewHasSavedCenter) {
+        center=CGPointMake(self.localPreviewNormalizedCenter.x*host.bounds.size.width,
+                           self.localPreviewNormalizedCenter.y*host.bounds.size.height);
+    } else {
+        center=CGPointMake(host.bounds.size.width-width*0.5-15.0,
+            MAX(74.0,host.bounds.size.height-height-190.0)+height*0.5);
+    }
+    const CGFloat minY=MAX(60.0,host.safeAreaInsets.top+6.0);
+    const CGFloat maxY=host.bounds.size.height
+        -MAX(40.0,host.safeAreaInsets.bottom+10.0);
+    center.x=MAX(6.0+width*0.5,MIN(host.bounds.size.width-6.0-width*0.5,center.x));
+    center.y=MAX(minY+height*0.5,MIN(maxY-height*0.5,center.y));
+    self.localPreviewView.bounds=CGRectMake(0,0,width,height);
+    self.localPreviewView.center=center;
+    self.localPreviewLayer.frame=self.localPreviewView.bounds;
+    self.localPreviewNormalizedCenter=CGPointMake(
+        center.x/MAX(1.0,host.bounds.size.width),
+        center.y/MAX(1.0,host.bounds.size.height));
 }
 - (void)startLocalPreview {
     if(!NSThread.isMainThread) {
@@ -799,7 +883,18 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         layer.videoGravity=AVLayerVideoGravityResizeAspectFill;
         self.localPreviewLayer=layer;
         UIView *preview=[[UIView alloc] initWithFrame:CGRectZero];
-        preview.userInteractionEnabled=NO;
+        preview.userInteractionEnabled=YES;
+        preview.multipleTouchEnabled=YES;
+        UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc]
+            initWithTarget:self action:@selector(dragLocalPreview:)];
+        pan.minimumNumberOfTouches=1;
+        pan.maximumNumberOfTouches=1;
+        [preview addGestureRecognizer:pan];
+        UIPinchGestureRecognizer *pinch=[[UIPinchGestureRecognizer alloc]
+            initWithTarget:self action:@selector(pinchLocalPreview:)];
+        [preview addGestureRecognizer:pinch];
+        self.localPreviewScale=1.0;
+        self.localPreviewHasSavedCenter=NO;
         preview.layer.cornerRadius=12;
         preview.layer.masksToBounds=YES;
         preview.layer.borderWidth=1.5;
@@ -817,14 +912,9 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
                 dispatch_async(dispatch_get_main_queue(),^{[self.localPreviewPlayer play];});
         }];
     }
-    const CGFloat width=MIN(126.0,host.bounds.size.width*0.30);
-    const CGFloat height=width*1.48;
-    self.localPreviewView.frame=CGRectMake(
-        host.bounds.size.width-width-15,
-        MAX(74.0,host.bounds.size.height-height-190),width,height);
-    self.localPreviewLayer.frame=self.localPreviewView.bounds;
-    self.localPreviewView.autoresizingMask=UIViewAutoresizingFlexibleLeftMargin|
-        UIViewAutoresizingFlexibleTopMargin;
+    [self layoutLocalPreviewInHost:host];
+    // The thumbnail handles its own position/size after gestures.
+    self.localPreviewView.autoresizingMask=UIViewAutoresizingNone;
     if(self.localPreviewView.superview!=host) {
         [self.localPreviewView removeFromSuperview];
         [host addSubview:self.localPreviewView];
