@@ -25,6 +25,9 @@ static std::atomic<bool> gExpectCapturer{false};
 static std::atomic<bool> gConnected{false};
 static std::atomic<double> gStartClock{0};
 static std::atomic<bool> gExternalAudio{false};
+static std::atomic<uint64_t> gMicInjectedFrames{0};
+static std::atomic<uint64_t> gExternalAudioBytes{0};
+static std::atomic<uint64_t> gFramesSubmitted{0};
 static bool gNativeHooksReady=false;
 static id (*gNativeInit)(id,SEL,NSString *,bool)=nullptr;
 typedef void (^LeadStateBlock)(int32_t,int32_t,int32_t,int32_t,int32_t,float);
@@ -41,6 +44,10 @@ extern "C" id objc_retain(id);
 @property(nonatomic,assign) CMSampleBufferRef next;
 @property(nonatomic,assign) BOOL exhausted;
 @property(nonatomic,assign) NSTimeInterval duration;
+@property(nonatomic,assign) double sourceFPS;
+@property(nonatomic,assign) NSInteger sourceWidth;
+@property(nonatomic,assign) NSInteger sourceHeight;
+@property(nonatomic,assign) double lastSubmittedPTS;
 @end
 @implementation LeadVirtualClip
 - (void)dealloc {
@@ -55,6 +62,7 @@ extern "C" id objc_retain(id);
 @property(nonatomic,strong) LeadVirtualClip *clip;
 @property(nonatomic,strong) id externalCapturer;
 @property(nonatomic,strong) id nativeCallContext;
+@property(nonatomic,weak) UIView *privateCallView;
 @property(nonatomic,strong) NSURL *selectedURL;
 @property(nonatomic,assign) uint64_t nextAudioSample;
 @property(nonatomic,strong) dispatch_source_t playbackTimer;
@@ -66,6 +74,9 @@ extern "C" id objc_retain(id);
 - (void)nativeState:(int32_t)state;
 - (BOOL)installNativeHooks;
 - (void)showError:(NSString *)message;
+- (void)rememberCallView:(UIView *)view;
+- (void)forgetCallView:(UIView *)view;
+- (void)endTelegramCallWhenFinished;
 @end
 
 static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, bool keepLandscape) {
@@ -156,6 +167,9 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     gConnected.store(false);
     gStartClock.store(0);
     gExternalAudio.store(false);
+    gExternalAudioBytes.store(0);
+    gMicInjectedFrames.store(0);
+    gFramesSubmitted.store(0);
     std::atomic_store(&gPCM,std::shared_ptr<AudioClip>());
     [self stopTimer];
     @synchronized(self) {
@@ -260,6 +274,20 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(![vr startReading]){[self showError:@"فشل فك إطارات الفيديو."];[self finishPicker:NO];return;}
     LeadVirtualClip *video=[LeadVirtualClip new];
     video.reader=vr;video.frames=vo;video.duration=duration;
+    // Preserve every original-resolution frame; do not pre-downscale.
+    CGSize native=v.naturalSize;
+    video.sourceWidth=(NSInteger)fabs(native.width);
+    video.sourceHeight=(NSInteger)fabs(native.height);
+    video.sourceFPS=(v.nominalFrameRate>0 && isfinite(v.nominalFrameRate))
+                  ? std::min(60.0,(double)v.nominalFrameRate) : 30.0;
+    video.lastSubmittedPTS=-1.0;
+    size_t inspected=std::min((size_t)48000,clipSound->samples.size());
+    uint16_t peak=0;
+    for(size_t n=0;n<inspected;n++)
+        peak=std::max((uint16_t)abs((int)clipSound->samples[n]),peak);
+    NSLog(@"[LeadVirtualMedia] source %ldx%ld ~%.1ffps; audio samples=%lu, peak=%u",
+          (long)video.sourceWidth,(long)video.sourceHeight,video.sourceFPS,
+          (unsigned long)clipSound->samples.size(),(unsigned)peak);
     @synchronized(self) {
         self.clip=video;self.nextAudioSample=0;
         std::atomic_store(&gPCM,clipSound);
@@ -302,8 +330,13 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     self.nextAudioSample=0;
     dispatch_queue_t queue=dispatch_queue_create("lead.virtual.call.frames",DISPATCH_QUEUE_SERIAL);
     self.playbackTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+    LeadVirtualClip *clip=nil;
+    @synchronized(self){clip=self.clip;}
+    double fps=clip ? clip.sourceFPS : 30.0;
+    fps=std::max(12.0,std::min(60.0,fps));
+    uint64_t step=(uint64_t)(NSEC_PER_SEC/fps);
     dispatch_source_set_timer(self.playbackTimer,dispatch_time(DISPATCH_TIME_NOW,0),
-        (uint64_t)(0.020*NSEC_PER_SEC),(uint64_t)(0.004*NSEC_PER_SEC));
+        step,(uint64_t)(0.002*NSEC_PER_SEC));
     dispatch_source_set_event_handler(self.playbackTimer,^{[self playbackTick];});
     dispatch_resume(self.playbackTimer);
 }
@@ -314,29 +347,40 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(!video || !capturer)return;
     double elapsed=CACurrentMediaTime()-gStartClock.load();
     if(elapsed>=video.duration) {
-        gMode.store(3);[self stopTimer];
-        if([capturer respondsToSelector:@selector(setIsVideoEnabled:)]) {
-            ((void (*)(id,SEL,bool))objc_msgSend)(capturer,@selector(setIsVideoEnabled:),false);
-        }
-        NSLog(@"[LeadVirtualMedia] movie completed; outgoing audio remains muted");
-        dispatch_async(dispatch_get_main_queue(),^{
-           [self showError:@"انتهى الفيديو وتوقف بثه. المكالمة مستمرة والمايك مكتوم."];
-        });
+        gMode.store(3);
+        [self stopTimer];
+        NSLog(@"[LeadVirtualMedia] EOF: video=%llu, microphone-replaced=%llu, external bytes=%llu",
+             (unsigned long long)gFramesSubmitted.load(),
+             (unsigned long long)gMicInjectedFrames.load(),
+             (unsigned long long)gExternalAudioBytes.load());
+        dispatch_async(dispatch_get_main_queue(),^{[self endTelegramCallWhenFinished];});
         return;
     }
+    // ReplayKit uses signed 16-bit 48 kHz mono PCM; dispatch 20ms chunks.
+    // Keep microphone replacement running independently. The old build
+    // disabled it after the first attempted external packet, even if WebRTC
+    // did not transmit that external audio.
     if(context && [context respondsToSelector:@selector(addExternalAudioData:)]) {
         auto pcm=std::atomic_load(&gPCM);
         if(pcm && !pcm->samples.empty()) {
-            // ReplayKit uses the same 48k mono 16-bit PCM for this native method.
-            int16_t buffer[960]={};
-            const size_t offset=(size_t)self.nextAudioSample;
-            const size_t available= offset<pcm->samples.size() ? pcm->samples.size()-offset:0;
-            const size_t n=std::min((size_t)960,available);
-            if(n)memcpy(buffer,pcm->samples.data()+offset,n*2);
-            NSData *data=[NSData dataWithBytes:buffer length:sizeof(buffer)];
-            ((void (*)(id,SEL,id))objc_msgSend)(context,@selector(addExternalAudioData:),data);
-            self.nextAudioSample+=960;
-            gExternalAudio.store(true);
+            const uint64_t target=(uint64_t)std::max(0.0,elapsed*48000.0);
+            int sent=0;
+            while(self.nextAudioSample+960<=target && sent<6 &&
+                  self.nextAudioSample<pcm->samples.size()) {
+                int16_t buffer[960]={};
+                const size_t offset=(size_t)self.nextAudioSample;
+                const size_t n=std::min((size_t)960,pcm->samples.size()-offset);
+                memcpy(buffer,pcm->samples.data()+offset,n*sizeof(int16_t));
+                NSData *data=[NSData dataWithBytes:buffer length:sizeof(buffer)];
+                ((void (*)(id,SEL,id))objc_msgSend)(
+                    context,@selector(addExternalAudioData:),data);
+                self.nextAudioSample+=960;
+                gExternalAudio.store(true);
+                gExternalAudioBytes.fetch_add(sizeof(buffer));
+                sent++;
+            }
+            if(target>self.nextAudioSample+960*10)
+                self.nextAudioSample=(target/960)*960;
         }
     }
     @synchronized(video) {
@@ -352,7 +396,11 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             video.current=video.next;video.next=NULL;
         }
         if(!video.current)return;
-        // Native tgcalls custom provider sends this frame to the remote peer.
+        double pts=CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(video.current));
+        if(isfinite(pts) && pts<=video.lastSubmittedPTS)return;
+        if(isfinite(pts))video.lastSubmittedPTS=pts;
+        gFramesSubmitted.fetch_add(1);
+        // Full original-resolution source frames; WebRTC controls network resolution.
         ((void (*)(id,SEL,CMSampleBufferRef,int,void(^)(void)))objc_msgSend)(
             capturer,@selector(submitSampleBuffer:rotation:completion:),video.current,0,^{});
     }
@@ -374,7 +422,7 @@ extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
     const bool supported=(flt && bits==32)||(integer && (bits==16 || bits==32));
     auto pcm=std::atomic_load(&gPCM);
     const double start=gStartClock.load();
-    bool play=(gMode.load()==2 && !gExternalAudio.load() && start>0 &&
+    bool play=(gMode.load()==2 && start>0 &&
         isfinite(rate) && rate>=8000 && rate<=192000 && pcm && !pcm->samples.empty());
     double position=play?std::max(0.0,CACurrentMediaTime()-start):0;
     for(UInt32 b=0;b<buffers->mNumberBuffers;b++) {
@@ -397,6 +445,7 @@ extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
         size_t bytes=(size_t)limit*countPerFrame*unit;
         if(bytes<buf.mDataByteSize)memset((uint8_t *)buf.mData+bytes,0,buf.mDataByteSize-bytes);
     }
+    if(play)gMicInjectedFrames.fetch_add(frames,std::memory_order_relaxed);
     return true;
 }
 
