@@ -129,7 +129,7 @@ static NSData *LeadJPEGThumbnail(UIImage *image) {
 - (void)deliverWithThumbId:(NSNumber *)thumbId {
     NSString *originalName = self.sourceURL.lastPathComponent ?: @"";
     NSString *newName = self.chosenName.length ? self.chosenName : originalName;
-    if (originalName.length && newName.length && ![newName isEqualToString:originalName] || thumbId) {
+    if ((originalName.length && newName.length && ![newName isEqualToString:originalName]) || thumbId) {
         [TLParser registerCustomFileSendForOriginalName:originalName
                                            displayName:newName
                                        thumbnailFileId:thumbId];
