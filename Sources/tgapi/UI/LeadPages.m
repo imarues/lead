@@ -684,5 +684,10 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   discovery.symbol = @"text.magnifyingglass";
   discovery.sections = @[];
 
-  return @[ messages, discovery, content, media, calls, location, extras ];
+  LeadPage *conversions = [LeadPage new];
+  conversions.titleKey = @"UI_CONVERSIONS_TITLE";
+  conversions.symbol = @"arrow.triangle.2.circlepath";
+  conversions.sections = @[];
+
+  return @[ messages, discovery, content, media, conversions, calls, location, extras ];
 }

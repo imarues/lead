@@ -111,3 +111,7 @@ NSInteger LeadExtensionInjected(void);
 // Read-only cross-chat search with explicit user-selected forwarding.
 @interface LeadMessageDiscoveryViewController : UITableViewController
 @end
+
+// Offline PDF/image converter with optional user-initiated export to Saved Messages.
+@interface LeadConversionsViewController : UITableViewController
+@end

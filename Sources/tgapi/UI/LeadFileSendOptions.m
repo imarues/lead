@@ -316,6 +316,7 @@ static NSData *LeadJPEGThumbnail(UIImage *image) {
 static void LeadInterceptDocumentDelegate(id picker, SEL selector, id delegate) {
     if (!gLeadOriginalSetDocumentDelegate) return;
     if (!delegate || [delegate isKindOfClass:LeadFilePickerProxy.class] ||
+        (NSClassFromString(@"LeadConversionPDFPicker") && [picker isKindOfClass:NSClassFromString(@"LeadConversionPDFPicker")]) ||
         ![[NSUserDefaults standardUserDefaults] boolForKey:@"LeadCustomFileSend"]) {
         gLeadOriginalSetDocumentDelegate(picker, selector, delegate);
         return;

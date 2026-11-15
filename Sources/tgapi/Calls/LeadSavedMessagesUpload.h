@@ -14,5 +14,14 @@
                     peerData:(NSData *)peerData
                     progress:(void (^)(double fraction))progress
                   completion:(void (^)(NSString *error))completion;
+// Generic documents: correct PDF MIME and filename, optional 320px JPEG thumbnail.
++ (instancetype)sendDocumentToSavedMessages:(NSURL *)file
+                             thumbnailJPEG:(NSData *)thumbnailJPEG
+                                  progress:(void (^)(double fraction))progress
+                                completion:(void (^)(NSString *error))completion;
+// Native photo message (not a document attachment) for extracted PDF pages.
++ (instancetype)sendPhotoToSavedMessages:(NSURL *)file
+                               progress:(void (^)(double fraction))progress
+                             completion:(void (^)(NSString *error))completion;
 - (void)cancel;
 @end

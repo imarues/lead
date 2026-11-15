@@ -17,6 +17,7 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
 #define kLeadTLSendMedia           ((int32_t)53536639)    // messages.sendMedia
 #define kLeadTLInputPeerSelf       ((int32_t)2107670217)  // inputPeerSelf
 #define kLeadTLUploadedDocument    ((int32_t)58495792)    // inputMediaUploadedDocument
+#define kLeadTLUploadedPhoto       ((int32_t)2105767386)  // inputMediaUploadedPhoto
 #define kLeadTLInputFile           ((int32_t)-181407105)  // inputFile
 #define kLeadTLInputFileBig        ((int32_t)-95482955)   // inputFileBig
 #define kLeadTLVector              ((int32_t)481674261)   // vector
@@ -71,6 +72,11 @@ static void TLString(NSMutableData *d, NSString *s) {
 @property(nonatomic, copy) NSData *targetPeer;
 @property(nonatomic, copy) NSString *fileName;
 @property(nonatomic, copy) NSString *mimeType;
+@property(nonatomic, copy) NSData *customThumbnailJPEG;
+@property(nonatomic, assign) int64_t customThumbnailId;
+@property(nonatomic, assign) BOOL customThumbnailUploaded;
+@property(nonatomic, assign) BOOL genericFile;
+@property(nonatomic, assign) BOOL sendAsPhoto;
 @property(nonatomic, strong) NSData *attributes;   // vector body: count + items
 @property(nonatomic, assign) int32_t attributeCount;
 @property(nonatomic, assign) int64_t fileId;
@@ -113,6 +119,44 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
     return upload;
 }
 
+
++ (instancetype)sendDocumentToSavedMessages:(NSURL *)file
+                             thumbnailJPEG:(NSData *)thumbnailJPEG
+                                  progress:(void (^)(double))progress
+                                completion:(void (^)(NSString *))completion {
+    LeadSavedMessagesUpload *upload = [LeadSavedMessagesUpload new];
+    int32_t selfPeer=kLeadTLInputPeerSelf;
+    upload.targetPeer=[NSData dataWithBytes:&selfPeer length:4];
+    upload.genericFile=YES;
+    upload.customThumbnailJPEG=(thumbnailJPEG.length && thumbnailJPEG.length < 200*1024) ? [thumbnailJPEG copy] : nil;
+    upload.progress=progress;
+    upload.completion=completion;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
+        [gActiveLeadUploads addObject:upload];
+        [upload begin:file];
+    });
+    return upload;
+}
+
++ (instancetype)sendPhotoToSavedMessages:(NSURL *)file
+                               progress:(void (^)(double))progress
+                             completion:(void (^)(NSString *))completion {
+    LeadSavedMessagesUpload *upload = [LeadSavedMessagesUpload new];
+    int32_t selfPeer=kLeadTLInputPeerSelf;
+    upload.targetPeer=[NSData dataWithBytes:&selfPeer length:4];
+    upload.genericFile=YES;
+    upload.sendAsPhoto=YES;
+    upload.progress=progress;
+    upload.completion=completion;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
+        [gActiveLeadUploads addObject:upload];
+        [upload begin:file];
+    });
+    return upload;
+}
+
 - (void)cancel {
     self.cancelled = YES;
     if (self.inFlight == 0) [self finishWithError:@"cancelled"];
@@ -132,6 +176,20 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
 
 - (void)describeFile:(NSURL *)file {
     NSString *ext = file.pathExtension.lowercaseString;
+    if (self.genericFile) {
+        // Do not classify PDFs or extracted images as call recordings/audio.
+        if ([ext isEqualToString:@"pdf"]) self.mimeType=@"application/pdf";
+        else if ([ext isEqualToString:@"png"]) self.mimeType=@"image/png";
+        else if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) self.mimeType=@"image/jpeg";
+        else self.mimeType=@"application/octet-stream";
+        self.fileName=file.lastPathComponent;
+        NSMutableData *attributes=[NSMutableData data];
+        TLInt32(attributes,kLeadTLAttrFilename);
+        TLString(attributes,self.fileName);
+        self.attributes=attributes;
+        self.attributeCount=1;
+        return;
+    }
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:file options:nil];
     double seconds = CMTimeGetSeconds(asset.duration);
     if (!isfinite(seconds) || seconds < 0) seconds = 0;
@@ -258,7 +316,39 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
     }
 }
 
+
+- (void)uploadCustomThumbnail {
+    if (self.customThumbnailUploaded || !self.customThumbnailJPEG.length || self.sendAsPhoto) {
+        [self sendMedia];
+        return;
+    }
+    int64_t thumbId=0;
+    arc4random_buf(&thumbId,sizeof(thumbId));
+    NSMutableData *payload=[NSMutableData data];
+    TLInt32(payload,kLeadTLSaveFilePart);
+    TLInt64(payload,thumbId);
+    TLInt32(payload,0);
+    TLBytes(payload,self.customThumbnailJPEG);
+    BOOL accepted=LeadSendRawRequest(payload, ^(NSData *result, NSString *error) {
+        if (self.finished) return;
+        int32_t signature=0;
+        if (result.length>=4) [result getBytes:&signature length:4];
+        if (error.length || signature!=kLeadTLBoolTrue) {
+            [self finishWithError:error.length ? error : @"تعذر رفع الصورة المصغّرة إلى تيليگرام."];
+            return;
+        }
+        self.customThumbnailId=thumbId;
+        self.customThumbnailUploaded=YES;
+        [self sendMedia];
+    });
+    if (!accepted) [self finishWithError:@"اتصال تيليگرام غير جاهز لرفع الصورة المصغّرة."];
+}
+
 - (void)sendMedia {
+    if (self.customThumbnailJPEG.length && !self.customThumbnailUploaded && !self.sendAsPhoto) {
+        [self uploadCustomThumbnail];
+        return;
+    }
     NSMutableData *p = [NSMutableData data];
     TLInt32(p, kLeadTLSendMedia);
     TLInt32(p, 0);                          // flags: no reply, silent, schedule...
@@ -268,8 +358,11 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
         return;
     }
     [p appendData:self.targetPeer];           // chosen InputPeer
-    TLInt32(p, kLeadTLUploadedDocument);
-    TLInt32(p, 0);                          // flags: no thumb / stickers / ttl
+    TLInt32(p, self.sendAsPhoto ? kLeadTLUploadedPhoto : kLeadTLUploadedDocument);
+    if (!self.sendAsPhoto) TLInt32(p, self.customThumbnailUploaded ? (1 << 2) : 0);
+    if (self.sendAsPhoto) {
+        TLInt32(p, 0); // inputMediaUploadedPhoto flags before InputFile
+    }
     if (self.big) {
         TLInt32(p, kLeadTLInputFileBig);
         TLInt64(p, self.fileId);
@@ -282,10 +375,20 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
         TLString(p, self.fileName);
         TLString(p, @"");                   // md5_checksum (optional for the server)
     }
-    TLString(p, self.mimeType);
-    TLInt32(p, kLeadTLVector);
-    TLInt32(p, self.attributeCount);
-    [p appendData:self.attributes];
+    if (!self.sendAsPhoto) {
+        if (self.customThumbnailUploaded) {
+            TLInt32(p,kLeadTLInputFile);
+            TLInt64(p,self.customThumbnailId);
+            TLInt32(p,1);
+            TLString(p,@"lead-thumb.jpg");
+            TLString(p,@"");
+        }
+        TLString(p, self.mimeType);
+        TLInt32(p, kLeadTLVector);
+        TLInt32(p, self.attributeCount);
+        [p appendData:self.attributes];
+    }
+    // UploadedPhoto also needs its own flags:# before inputFile.
     TLString(p, @"");                       // message / caption
     uint64_t random = 0;
     arc4random_buf(&random, sizeof(random));
