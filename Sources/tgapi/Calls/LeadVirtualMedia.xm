@@ -499,9 +499,11 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     video.sourceHeight=composed?outH:(NSInteger)fabs(v.naturalSize.height);
     video.sourceFPS=outRate;
     video.lastSubmittedPTS=-1.0;
-    // Prioritize the sound of the FIRST movie (transmitted through WebRTC).
-    // Normalize offline, then use bounded soft-knee compression for a strong,
-    // consistent level without wrapping or clipping the outgoing 16-bit PCM.
+    // In FULL two-movie mode, the SECOND movie (locally simulated peer)
+    // must be the loud foreground sound, while the FIRST movie sent over
+    // WebRTC is lower. Preserve the original high level in one-movie mode.
+    // Normalize offline with a bounded soft knee before applying the relative
+    // outgoing level to avoid clipping or integer wrap.
     int32_t peak=0;
     for(const int16_t sample:clipSound->samples)
         peak=std::max(peak,(int32_t)std::abs((int)sample));
@@ -510,10 +512,12 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         gain=std::min(6.0,(0.94*32767.0)/(double)peak);
         const double knee=2.25;
         const double scale=0.965/std::tanh(knee);
+        const double outgoingLevel=gFullCallMode.load(std::memory_order_relaxed)
+            ? 0.32 : 1.0;
         for(int16_t &sample:clipSound->samples) {
             const double normalized=std::max(-1.0,std::min(1.0,
                 ((double)sample/32768.0)*gain));
-            const double boosted=scale*std::tanh(knee*normalized);
+            const double boosted=outgoingLevel*scale*std::tanh(knee*normalized);
             sample=(int16_t)std::lrint(boosted*32767.0);
         }
     }
@@ -1171,9 +1175,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             initWithPixelBufferAttributes:attrs];
         [item addOutput:self.remotePixelOutput];
         self.remotePlayer=[AVPlayer playerWithPlayerItem:item];
-        // Only the local simulated counterpart movie is quieter.
-        // Outgoing movie sound remains on the high-level WebRTC path.
-        self.remotePlayer.volume=0.22f;
+        // The SECOND movie is the user's locally simulated remote speaker.
+        // Keep it at the maximum AVPlayer volume; real peer audio remains
+        // muted through the separate Telegram CoreAudio downlink hook.
+        self.remotePlayer.volume=1.0f;
         self.remotePlayer.muted=NO;
         self.remotePlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
         AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.remotePlayer];
