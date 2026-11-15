@@ -1,0 +1,625 @@
+// Lead Message Explorer — per-user search across accessible common groups
+// and the existing 1:1 chat. Tap to open the source, long press to select and
+// forward the ORIGINAL message to Saved Messages (never re-uploads media).
+#import <UIKit/UIKit.h>
+#import "LeadMenu.h"
+#import "Headers.h"
+
+extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSString *error));
+
+@interface LeadMessageDiscoveryBridge : NSObject
++ (NSData *)resolveRequestForUsername:(NSString *)username;
++ (NSDictionary *)parseResolvedUser:(NSData *)data;
++ (NSData *)commonChatsRequestForUserId:(int64_t)userId accessHash:(int64_t)accessHash maxId:(int64_t)maxId;
++ (NSDictionary *)parseCommonChats:(NSData *)data;
++ (NSData *)searchRequestForPeer:(NSData *)peer sender:(NSData *)sender category:(NSInteger)category offsetId:(int32_t)offsetId;
++ (NSDictionary *)parseSearchResult:(NSData *)data senderId:(int64_t)sender source:(NSDictionary *)source category:(NSInteger)category;
++ (NSData *)forwardRequestForPeer:(NSData *)peer messageIds:(NSArray<NSNumber *> *)ids;
+@end
+
+@interface LeadMessageDiscoveryViewController () <UITextFieldDelegate, UIGestureRecognizerDelegate>
+@property(nonatomic, strong) UITextField *usernameField;
+@property(nonatomic, strong) UILabel *statusLabel;
+@property(nonatomic, strong) UISegmentedControl *categories;
+@property(nonatomic, strong) UIButton *groupsButton;
+@property(nonatomic, strong) NSDictionary *target;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *groups;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *sources;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *results;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *scanQueue;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *olderOffsets;
+@property(nonatomic, strong) NSMutableSet<NSString *> *excluded;
+@property(nonatomic, strong) NSMutableSet<NSString *> *seen;
+@property(nonatomic, strong) NSMutableSet<NSString *> *selectedKeys;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *forwardQueue;
+@property(nonatomic, assign) NSInteger generation;
+@property(nonatomic, assign) NSInteger completedChats;
+@property(nonatomic, assign) NSInteger totalChats;
+@property(nonatomic, assign) BOOL groupsExpanded;
+@property(nonatomic, assign) BOOL scanning;
+@property(nonatomic, assign) BOOL selectionMode;
+@property(nonatomic, assign) BOOL forwarding;
+@end
+
+@implementation LeadMessageDiscoveryViewController
+
+- (instancetype)init {
+    return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"كشف الرسائل";
+    self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 68;
+    self.groups = [NSMutableArray array];
+    self.sources = [NSMutableArray array];
+    self.results = [NSMutableArray array];
+    self.scanQueue = [NSMutableArray array];
+    self.olderOffsets = [NSMutableDictionary dictionary];
+    self.excluded = [NSMutableSet set];
+    self.seen = [NSMutableSet set];
+    self.selectedKeys = [NSMutableSet set];
+    self.forwardQueue = [NSMutableArray array];
+    self.tableView.allowsMultipleSelectionDuringEditing = YES;
+    [self configureHeader];
+
+    UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(longPressed:)];
+    hold.minimumPressDuration = 0.47;
+    hold.delegate = self;
+    [self.tableView addGestureRecognizer:hold];
+}
+
+- (void)configureHeader {
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 183)];
+    header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(16, 9, 215, 42)];
+    field.borderStyle = UITextBorderStyleRoundedRect;
+    field.placeholder = @"@username";
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    field.returnKeyType = UIReturnKeySearch;
+    field.delegate = self;
+    field.accessibilityLabel = @"اسم المستخدم المطلوب البحث عن رسائله";
+    field.translatesAutoresizingMaskIntoConstraints = NO;
+    self.usernameField = field;
+    [header addSubview:field];
+
+    UIButton *search = [UIButton buttonWithType:UIButtonTypeSystem];
+    [search setTitle:@"بحث" forState:UIControlStateNormal];
+    search.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    [search addTarget:self action:@selector(searchUsername) forControlEvents:UIControlEventTouchUpInside];
+    search.translatesAutoresizingMaskIntoConstraints = NO;
+    [header addSubview:search];
+
+    UILabel *status = [UILabel new];
+    status.text = @"أدخل يوزر الشخص. البحث ضمن الرسائل المتاحة لحسابك فقط.";
+    status.font = [UIFont systemFontOfSize:12];
+    status.textColor = UIColor.secondaryLabelColor;
+    status.numberOfLines = 2;
+    status.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusLabel = status;
+    [header addSubview:status];
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.showsHorizontalScrollIndicator = NO;
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    NSArray *titles = @[ @"الصور", @"الفيديو", @"الفويسات", @"الموسيقى", @"الملفات", @"الدائري", @"الروابط" ];
+    UISegmentedControl *categories = [[UISegmentedControl alloc] initWithItems:titles];
+    categories.selectedSegmentIndex = 2; // voice notes are a useful default
+    categories.frame = CGRectMake(0, 0, 730, 36);
+    [categories addTarget:self action:@selector(categoryChanged) forControlEvents:UIControlEventValueChanged];
+    self.categories = categories;
+    [scroll addSubview:categories];
+    scroll.contentSize = CGSizeMake(730, 36);
+    [header addSubview:scroll];
+
+    UIButton *groupsButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [groupsButton setTitle:@"الكروبات المشتركة — إظهار" forState:UIControlStateNormal];
+    groupsButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    groupsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    groupsButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [groupsButton addTarget:self action:@selector(toggleGroups) forControlEvents:UIControlEventTouchUpInside];
+    groupsButton.enabled = NO;
+    self.groupsButton = groupsButton;
+    [header addSubview:groupsButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [field.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:15],
+        [field.topAnchor constraintEqualToAnchor:header.topAnchor constant:8],
+        [field.trailingAnchor constraintEqualToAnchor:search.leadingAnchor constant:-9],
+        [field.heightAnchor constraintEqualToConstant:42],
+        [search.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-15],
+        [search.widthAnchor constraintEqualToConstant:63],
+        [search.centerYAnchor constraintEqualToAnchor:field.centerYAnchor],
+        [status.leadingAnchor constraintEqualToAnchor:field.leadingAnchor],
+        [status.trailingAnchor constraintEqualToAnchor:search.trailingAnchor],
+        [status.topAnchor constraintEqualToAnchor:field.bottomAnchor constant:9],
+        [status.heightAnchor constraintEqualToConstant:37],
+        [scroll.topAnchor constraintEqualToAnchor:status.bottomAnchor constant:6],
+        [scroll.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:15],
+        [scroll.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-15],
+        [scroll.heightAnchor constraintEqualToConstant:40],
+        [groupsButton.topAnchor constraintEqualToAnchor:scroll.bottomAnchor constant:7],
+        [groupsButton.leadingAnchor constraintEqualToAnchor:field.leadingAnchor],
+        [groupsButton.trailingAnchor constraintEqualToAnchor:search.trailingAnchor],
+        [groupsButton.heightAnchor constraintEqualToConstant:27],
+    ]];
+    self.tableView.tableHeaderView = header;
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [self searchUsername];
+    return YES;
+}
+
+- (void)displayStatus:(NSString *)message {
+    self.statusLabel.text = message ?: @"";
+}
+
+- (void)showError:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"كشف الرسائل"
+                                                                   message:message ?: @"فشلت العملية."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)searchUsername {
+    if (self.forwarding) return;
+    [self.usernameField resignFirstResponder];
+    NSString *username = [self.usernameField.text
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([username hasPrefix:@"@"]) username = [username substringFromIndex:1];
+    NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"] invertedSet];
+    if (!username.length || [username rangeOfCharacterFromSet:invalid].location != NSNotFound) {
+        [self showError:@"اكتب اسم مستخدم صحيح بدون روابط أو مسافات."];
+        return;
+    }
+    [self leaveSelection];
+    self.generation++;
+    NSInteger token = self.generation;
+    self.target = nil;
+    [self.groups removeAllObjects];
+    [self.sources removeAllObjects];
+    [self.results removeAllObjects];
+    [self.excluded removeAllObjects];
+    [self.olderOffsets removeAllObjects];
+    [self.seen removeAllObjects];
+    self.scanning = YES;
+    self.groupsButton.enabled = NO;
+    [self displayStatus:@"جاري البحث عن المستخدم…"];
+    [self.tableView reloadData];
+    NSData *payload = [LeadMessageDiscoveryBridge resolveRequestForUsername:username];
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || token != self.generation) return;
+        NSDictionary *target = (!error.length && data.length)
+            ? [LeadMessageDiscoveryBridge parseResolvedUser:data] : nil;
+        if (!target) {
+            self.scanning = NO;
+            [self displayStatus:@"تعذر العثور على الحساب."];
+            [self showError:error.length ? error : @"هذا اليوزر غير متاح أو لم يرجع تيليگرام معلومات الحساب."];
+            return;
+        }
+        self.target = target;
+        [self displayStatus:[NSString stringWithFormat:@"تم العثور على %@. جاري جمع الكروبات المشتركة…",
+                             target[@"title"] ?: @"المستخدم"]];
+        [self loadCommonPage:0 page:0 token:token];
+    })) {
+        self.scanning = NO;
+        [self displayStatus:@"اتصال تيليگرام غير جاهز. افتح محادثة ثم أعد المحاولة."];
+    }
+}
+
+- (void)loadCommonPage:(int64_t)maxId page:(NSInteger)page token:(NSInteger)token {
+    NSDictionary *target = self.target;
+    if (!target || token != self.generation) return;
+    NSData *payload = [LeadMessageDiscoveryBridge
+        commonChatsRequestForUserId:[target[@"userId"] longLongValue]
+        accessHash:[target[@"accessHash"] longLongValue] maxId:maxId];
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || token != self.generation) return;
+        NSDictionary *response = error.length ? nil : [LeadMessageDiscoveryBridge parseCommonChats:data];
+        if (!response) {
+            // Private chat can still be searched if common chats are unavailable.
+            [self displayStatus:error.length ? [NSString stringWithFormat:@"تعذر جلب بعض الكروبات: %@",error] :
+             @"تعذر قراءة الكروبات المشتركة، يمكن البحث في الخاص فقط."];
+            [self commonChatsFinished];
+            return;
+        }
+        for (NSDictionary *group in response[@"items"]) {
+            BOOL already = NO;
+            for (NSDictionary *existing in self.groups)
+                if ([existing[@"key"] isEqual:group[@"key"]]) { already = YES; break; }
+            if (!already) [self.groups addObject:group];
+        }
+        int64_t nextId = [response[@"nextMaxId"] longLongValue];
+        BOOL more = [response[@"hasMore"] boolValue];
+        if (more && nextId > 0 && nextId != maxId && page < 19) {
+            [self displayStatus:[NSString stringWithFormat:@"تم العثور على %lu كروب مشترك…",
+                                 (unsigned long)self.groups.count]];
+            [self loadCommonPage:nextId page:page+1 token:token];
+        } else {
+            [self commonChatsFinished];
+        }
+    })) {
+        [self commonChatsFinished];
+    }
+}
+
+- (void)commonChatsFinished {
+    if (!self.target) return;
+    [self.sources removeAllObjects];
+    NSDictionary *target = self.target;
+    [self.sources addObject:@{
+        @"id": target[@"userId"],
+        @"key": [NSString stringWithFormat:@"u%@", target[@"userId"]],
+        @"kind": @"u", @"title": @"المحادثة الخاصة",
+        @"username": target[@"username"] ?: @"",
+        @"peer": target[@"peer"]
+    }];
+    [self.sources addObjectsFromArray:self.groups];
+    self.groupsButton.enabled = YES;
+    [self.groupsButton setTitle:[NSString stringWithFormat:@"الكروبات المشتركة (%lu) — %@",
+         (unsigned long)self.groups.count, self.groupsExpanded ? @"إخفاء" : @"إظهار"]
+                        forState:UIControlStateNormal];
+    [self startFreshScan];
+}
+
+- (void)toggleGroups {
+    self.groupsExpanded = !self.groupsExpanded;
+    [self.groupsButton setTitle:[NSString stringWithFormat:@"الكروبات المشتركة (%lu) — %@",
+         (unsigned long)self.groups.count, self.groupsExpanded ? @"إخفاء" : @"إظهار"]
+                        forState:UIControlStateNormal];
+    [self.tableView reloadData];
+}
+
+- (void)categoryChanged {
+    if (self.target && !self.forwarding) [self startFreshScan];
+}
+
+- (void)startFreshScan {
+    if (!self.target || self.forwarding) return;
+    [self leaveSelection];
+    self.generation++;
+    [self.results removeAllObjects];
+    [self.olderOffsets removeAllObjects];
+    [self.seen removeAllObjects];
+    [self.scanQueue removeAllObjects];
+    for (NSDictionary *source in self.sources) {
+        if (![self.excluded containsObject:source[@"key"]]) [self.scanQueue addObject:source];
+    }
+    self.completedChats = 0;
+    self.totalChats = self.scanQueue.count;
+    self.scanning = YES;
+    [self displayStatus:[NSString stringWithFormat:@"جاري فحص %ld محادثة…", (long)self.totalChats]];
+    [self.tableView reloadData];
+    [self scanNextWithToken:self.generation];
+}
+
+- (void)scanNextWithToken:(NSInteger)token {
+    if (token != self.generation || !self.target) return;
+    if (self.scanQueue.count == 0) {
+        self.scanning = NO;
+        [self displayStatus:[NSString stringWithFormat:@"اكتمل الفحص: %lu رسالة ضمن %ld محادثة. اضغط مرة للفتح أو مطوّلاً للتحديد.",
+            (unsigned long)self.results.count, (long)self.totalChats]];
+        [self.tableView reloadData];
+        return;
+    }
+
+    NSDictionary *source = self.scanQueue.firstObject;
+    [self.scanQueue removeObjectAtIndex:0];
+    NSString *key = source[@"key"];
+    NSNumber *offsetValue = self.olderOffsets[key];
+    int32_t offset = offsetValue ? offsetValue.intValue : 0;
+    NSData *payload = [LeadMessageDiscoveryBridge searchRequestForPeer:source[@"peer"]
+         sender:self.target[@"peer"] category:self.categories.selectedSegmentIndex offsetId:offset];
+    self.completedChats++;
+    if (!payload.length) { [self scanNextWithToken:token]; return; }
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || token != self.generation) return;
+        NSDictionary *response = !error.length ?
+            [LeadMessageDiscoveryBridge parseSearchResult:data
+                 senderId:[self.target[@"userId"] longLongValue]
+                 source:source category:self.categories.selectedSegmentIndex] : nil;
+        // Stop rather than keep issuing requests when Telegram imposes a limit.
+        if ([error hasPrefix:@"FLOOD_WAIT"]) {
+            self.scanning = NO;
+            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل البحث: %@. أعد المحاولة لاحقاً.", error]];
+            return;
+        }
+        // A failed chat is skipped; never fabricate results or retry in a flood loop.
+        if (response) {
+            for (NSDictionary *item in response[@"items"]) {
+                NSString *unique = [NSString stringWithFormat:@"%@:%@", item[@"key"], item[@"id"]];
+                if ([self.seen containsObject:unique]) continue;
+                [self.seen addObject:unique];
+                [self.results addObject:item];
+            }
+            if ([response[@"hasMore"] boolValue] && [response[@"nextOffset"] intValue] > 0
+                && (!offset || [response[@"nextOffset"] intValue] < offset))
+                self.olderOffsets[key] = response[@"nextOffset"];
+            else
+                [self.olderOffsets removeObjectForKey:key];
+        } else {
+            [self.olderOffsets removeObjectForKey:key];
+        }
+        [self.results sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [b[@"date"] compare:a[@"date"]];
+        }];
+        [self displayStatus:[NSString stringWithFormat:@"فحص %ld/%ld محادثة — %lu رسالة%@",
+             (long)self.completedChats, (long)self.totalChats,
+             (unsigned long)self.results.count, error.length ? @" (بعض المحادثات تعذّر فحصها)" : @""]];
+        [self.tableView reloadData];
+        // Keep the scan responsive while avoiding a burst across many groups.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [self scanNextWithToken:token];
+        });
+    })) {
+        [self displayStatus:@"اتصال تيليگرام توقف قبل اكتمال البحث."];
+        self.scanning = NO;
+    }
+}
+
+- (void)loadOlder {
+    if (self.scanning || !self.target || self.forwarding) return;
+    [self.scanQueue removeAllObjects];
+    for (NSDictionary *source in self.sources) {
+        if (![self.excluded containsObject:source[@"key"]] &&
+            [self.olderOffsets[source[@"key"]] intValue] > 0)
+            [self.scanQueue addObject:source];
+    }
+    self.totalChats = self.scanQueue.count;
+    self.completedChats = 0;
+    self.scanning = YES;
+    [self scanNextWithToken:self.generation];
+}
+
+#pragma mark - Selection and ordinary forwarding
+
+- (NSString *)uniqueForEntry:(NSDictionary *)entry {
+    return [NSString stringWithFormat:@"%@:%@", entry[@"key"], entry[@"id"]];
+}
+
+- (void)updateSelectionNavigation {
+    NSInteger count = self.selectedKeys.count;
+    self.navigationItem.title = count ?
+        [NSString stringWithFormat:@"محدد: %ld", (long)count] : @"تحديد الرسائل";
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:[NSString stringWithFormat:@"تحويل (%ld)",(long)count]
+                                         style:UIBarButtonItemStyleDone target:self action:@selector(forwardSelected)];
+    self.navigationItem.rightBarButtonItem.enabled = count > 0 && !self.forwarding;
+}
+
+- (void)enterSelectionAt:(NSIndexPath *)path {
+    if (self.forwarding || path.section != 1 || path.row >= (NSInteger)self.results.count) return;
+    self.selectionMode = YES;
+    self.selectedKeys = [NSMutableSet set];
+    self.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"إلغاء" style:UIBarButtonItemStylePlain
+                                       target:self action:@selector(leaveSelection)];
+    [self.tableView setEditing:YES animated:YES];
+    [self.tableView selectRowAtIndexPath:path animated:NO
+                          scrollPosition:UITableViewScrollPositionNone];
+    [self.selectedKeys addObject:[self uniqueForEntry:self.results[path.row]]];
+    [self updateSelectionNavigation];
+}
+
+- (void)leaveSelection {
+    if (!self.selectionMode || self.forwarding) return;
+    self.selectionMode = NO;
+    [self.selectedKeys removeAllObjects];
+    [self.tableView setEditing:NO animated:YES];
+    self.navigationItem.leftBarButtonItem = nil;
+    self.navigationItem.rightBarButtonItem = nil;
+    self.title = @"كشف الرسائل";
+}
+
+- (void)longPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan || self.selectionMode) return;
+    CGPoint point = [recognizer locationInView:self.tableView];
+    NSIndexPath *path = [self.tableView indexPathForRowAtPoint:point];
+    if (path && path.section == 1) [self enterSelectionAt:path];
+}
+
+- (void)forwardSelected {
+    if (!self.selectedKeys.count || self.forwarding) return;
+    NSMutableArray *selected = [NSMutableArray array];
+    for (NSDictionary *entry in self.results) {
+        if ([self.selectedKeys containsObject:[self uniqueForEntry:entry]]) {
+            if ([entry[@"protected"] boolValue]) {
+                [self showError:@"إحدى الرسائل مختومة بمنع التحويل، ولا يمكن تحويلها كرسالة عادية."];
+                return;
+            }
+            [selected addObject:entry];
+        }
+    }
+    if (!selected.count) return;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"تحويل إلى الرسائل المحفوظة"
+        message:[NSString stringWithFormat:@"تحويل %lu رسالة كما هي، مع مصدرها الأصلي؟",
+                 (unsigned long)selected.count]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"تحويل" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        [self performForward:selected];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)performForward:(NSArray<NSDictionary *> *)selected {
+    if (self.forwarding || !selected.count) return;
+    self.forwarding = YES;
+    [self.forwardQueue removeAllObjects];
+    NSMutableDictionary<NSString *, NSMutableArray<NSNumber *> *> *ids = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSData *> *peers = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *order = [NSMutableArray array];
+    for (NSDictionary *entry in selected) {
+        NSString *key = entry[@"key"];
+        if (!ids[key]) { ids[key] = [NSMutableArray array]; peers[key] = entry[@"sourcePeer"]; [order addObject:key]; }
+        [ids[key] addObject:entry[@"id"]];
+    }
+    for (NSString *key in order) {
+        NSArray *numbers = ids[key];
+        for (NSUInteger start = 0; start < numbers.count; start += 50) {
+            NSArray *chunk = [numbers subarrayWithRange:NSMakeRange(start, MIN((NSUInteger)50, numbers.count-start))];
+            NSData *payload = [LeadMessageDiscoveryBridge forwardRequestForPeer:peers[key] messageIds:chunk];
+            if (!payload.length) {
+                self.forwarding = NO;
+                [self showError:@"تعذر إعداد طلب تحويل إحدى الرسائل."];
+                return;
+            }
+            [self.forwardQueue addObject:@{@"payload":payload, @"count":@(chunk.count)}];
+        }
+    }
+    [self updateSelectionNavigation];
+    [self displayStatus:@"جاري تحويل الرسائل إلى المحفوظة…"];
+    [self forwardNextWithSent:0];
+}
+
+- (void)forwardNextWithSent:(NSUInteger)sent {
+    if (!self.forwardQueue.count) {
+        self.forwarding = NO;
+        [self leaveSelection];
+        [self displayStatus:[NSString stringWithFormat:@"تم تحويل %lu رسالة إلى الرسائل المحفوظة.", (unsigned long)sent]];
+        [LeadToast showText:@"اكتمل التحويل إلى المحفوظة" symbol:@"checkmark.circle" inView:self.view];
+        return;
+    }
+    NSDictionary *job = self.forwardQueue.firstObject;
+    [self.forwardQueue removeObjectAtIndex:0];
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(job[@"payload"], ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (error.length || data.length < 4) {
+            self.forwarding = NO;
+            [self updateSelectionNavigation];
+            [self showError:[NSString stringWithFormat:@"فشل تحويل بعض الرسائل بعد نجاح %lu: %@",
+                            (unsigned long)sent, error.length ? error : @"رد غير صالح"]];
+            return;
+        }
+        [self forwardNextWithSent:sent+[job[@"count"] unsignedIntegerValue]];
+    })) {
+        self.forwarding = NO;
+        [self updateSelectionNavigation];
+        [self showError:@"اتصال تيليگرام غير جاهز لتحويل الرسائل."];
+    }
+}
+
+#pragma mark - Table and navigation
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (section == 0) return self.groupsExpanded ? self.sources.count : 0;
+    if (section == 1) return self.results.count;
+    return !self.scanning && self.olderOffsets.count && !self.selectionMode ? 1 : 0;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (section == 0 && self.groupsExpanded) return @"المصادر (اضغط لإلغاء أو تفعيل البحث فيها)";
+    if (section == 1 && self.target) return [NSString stringWithFormat:@"رسائل %@ — %lu", self.target[@"title"], (unsigned long)self.results.count];
+    return nil;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
+    static NSString *const reuse = @"LeadExplorerRow";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuse];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuse];
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.detailTextLabel.numberOfLines = 2;
+    cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+    if (path.section == 0) {
+        NSDictionary *group = self.sources[path.row];
+        BOOL included = ![self.excluded containsObject:group[@"key"]];
+        cell.textLabel.text = group[@"title"];
+        cell.detailTextLabel.text = [group[@"kind"] isEqual:@"u"] ? @"المحادثة الخاصة" : @"كروب مشترك";
+        cell.accessoryType = included ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    } else if (path.section == 1) {
+        NSDictionary *item = self.results[path.row];
+        cell.textLabel.text = [NSString stringWithFormat:@"%@ — %@", item[@"type"], item[@"title"]];
+        NSDate *date = [NSDate dateWithTimeIntervalSince1970:[item[@"date"] doubleValue]];
+        NSDateFormatter *formatter = [NSDateFormatter new];
+        formatter.dateStyle = NSDateFormatterShortStyle;
+        formatter.timeStyle = NSDateFormatterShortStyle;
+        NSString *body = item[@"text"];
+        if (![body isKindOfClass:NSString.class] || !body.length) body = @"وسائط";
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · %@", [formatter stringFromDate:date], body];
+        if (!self.selectionMode) cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    } else {
+        cell.textLabel.text = @"تحميل رسائل أقدم";
+        cell.detailTextLabel.text = @"يبحث في الصفحات التالية من المحادثات";
+        cell.textLabel.textColor = UIColor.systemBlueColor;
+    }
+    return cell;
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)path {
+    return UITableViewCellEditingStyleNone;
+}
+
+- (BOOL)tableView:(UITableView *)tableView shouldIndentWhileEditingRowAtIndexPath:(NSIndexPath *)path {
+    return path.section == 1;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
+    if (path.section == 0) {
+        [tableView deselectRowAtIndexPath:path animated:YES];
+        if (self.selectionMode) return;
+        NSDictionary *group = self.sources[path.row];
+        NSString *key = group[@"key"];
+        if ([self.excluded containsObject:key]) [self.excluded removeObject:key];
+        else [self.excluded addObject:key];
+        [self startFreshScan];
+        return;
+    }
+    if (path.section == 2) {
+        [tableView deselectRowAtIndexPath:path animated:YES];
+        [self loadOlder];
+        return;
+    }
+    NSDictionary *entry = self.results[path.row];
+    if (self.selectionMode) {
+        [self.selectedKeys addObject:[self uniqueForEntry:entry]];
+        [self updateSelectionNavigation];
+        return;
+    }
+    [tableView deselectRowAtIndexPath:path animated:YES];
+    NSString *kind = entry[@"kind"];
+    long long identifier = [entry[@"sourceId"] longLongValue];
+    long long message = [entry[@"id"] longLongValue];
+    NSString *url = nil;
+    if ([kind isEqual:@"c"]) {
+        NSString *username = entry[@"username"];
+        url = username.length ?
+            [NSString stringWithFormat:@"tg://resolve?domain=%@&post=%lld",username,message] :
+            [NSString stringWithFormat:@"tg://privatepost?channel=%lld&post=%lld",identifier,message];
+    } else if ([kind isEqual:@"u"]) {
+        url = [NSString stringWithFormat:@"tg://openmessage?user_id=%lld&message_id=%lld",identifier,message];
+    } else if ([kind isEqual:@"g"]) {
+        url = [NSString stringWithFormat:@"tg://openmessage?chat_id=%lld&message_id=%lld",identifier,message];
+    }
+    if (url) LeadOpenTelegramURL(url);
+    else [self showError:@"تعذر إنشاء رابط لهذه الرسالة."];
+}
+
+- (void)tableView:(UITableView *)tableView didDeselectRowAtIndexPath:(NSIndexPath *)path {
+    if (self.selectionMode && path.section == 1 && path.row < (NSInteger)self.results.count) {
+        [self.selectedKeys removeObject:[self uniqueForEntry:self.results[path.row]]];
+        [self updateSelectionNavigation];
+    }
+}
+
+@end

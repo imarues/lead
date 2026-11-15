@@ -107,3 +107,7 @@ NSInteger LeadExtensionInjected(void);
 // Deleted / edited messages recorded by Anti-Revoke and Anti-Edit.
 @interface LeadMessageLogViewController : UITableViewController
 @end
+
+// Read-only cross-chat search with explicit user-selected forwarding.
+@interface LeadMessageDiscoveryViewController : UITableViewController
+@end

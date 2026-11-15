@@ -678,5 +678,11 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     [LeadSection title:nil rows:@[ fakeDevice, deviceName ]],
   ];
 
-  return @[ messages, content, media, calls, location, extras ];
+  // Direct-launch page: independent of the existing Anti-Edit / message log.
+  LeadPage *discovery = [LeadPage new];
+  discovery.titleKey = @"UI_MESSAGE_DISCOVERY_TITLE";
+  discovery.symbol = @"text.magnifyingglass";
+  discovery.sections = @[];
+
+  return @[ messages, discovery, content, media, calls, location, extras ];
 }
