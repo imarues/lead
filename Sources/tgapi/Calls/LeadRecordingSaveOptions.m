@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
+#import "LeadCallRecording.h"
 extern void LeadPresentRecordingChatPicker(NSURL *file,UIViewController *presenter);
 
 typedef NS_ENUM(NSInteger, LeadRecordingSaveTarget) {
@@ -139,7 +140,11 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
                                    url.lastPathComponent.stringByDeletingPathExtension);
     NSString *ext=url.pathExtension.lowercaseString;
     NSFileManager *fm=[NSFileManager defaultManager];
-    NSURL *folder=[url URLByDeletingLastPathComponent];
+    // Always keep the user's master in Lead's actual archive directory.
+    // Older versions derived the destination from the incoming URL, which
+    // could leave a recording outside the directory the archive UI scans.
+    NSURL *folder=[NSURL fileURLWithPath:[LeadCallRecording recordingsDirectory]
+                            isDirectory:YES];
     NSURL *chosen=nil;
     for(NSUInteger suffix=1;suffix<=10000;suffix++) {
         NSString *name=suffix==1?stem:
@@ -228,12 +233,13 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
         return;
     }
     if(self.gallerySaved) {
-        NSError *err=nil;
-        BOOL deleted=[[NSFileManager defaultManager] removeItemAtURL:self.archiveFile error:&err];
-        [self notice:@"تم الحفظ في المعرض"
-             text:deleted?@"انحفظ الفيديو بالمعرض باسم التسجيل المختار.":
-                [NSString stringWithFormat:@"الفيديو محفوظ بالمعرض، وبقيت نسخة بالأرشيف: %@",
-                    err.localizedDescription?:@"" ]];
+        // Photos receives a COPY, never remove the original Lead archive.
+        // The original used to be deleted here, causing "missing" recordings
+        // after a successful Photos save.
+        [self notice:@"تم الحفظ في المعرض والأرشيف"
+             text:[NSString stringWithFormat:
+                 @"انحفظ الفيديو بالمعرض وبقيت النسخة الأصلية بأرشيف Lead باسم %@.",
+                 self.archiveFile.lastPathComponent]];
     } else {
         [self notice:@"تعذر الحفظ في المعرض"
             text:[NSString stringWithFormat:@"%@\nاحتفظت بالتسجيل في الأرشيف باسم %@.",
