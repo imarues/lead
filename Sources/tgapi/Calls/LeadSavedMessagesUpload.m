@@ -31,7 +31,9 @@ static const NSUInteger kLeadPartSize = 512 * 1024;
 static const unsigned long long kLeadBigFileThreshold = 10ull * 1024 * 1024;
 // Keep enough requests in flight to cover connection round-trip time while
 // bounding upload buffer pressure to approximately four MiB per transfer.
-static const NSUInteger kLeadWindow = 8;
+// 12 x 512 KiB requests bound memory to ~6 MiB while allowing more network
+// round trips to overlap. Actual speed still depends on Telegram/network.
+static const NSUInteger kLeadWindow = 12;
 static const int kLeadPartRetries = 3;
 
 #pragma mark - TL writers

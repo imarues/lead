@@ -23,6 +23,7 @@ static UIWindow *LeadChatWindow(void) {
 }
 static UIView *gLeadUploadStatus;
 static UILabel *gLeadUploadStatusText;
+static UIProgressView *gLeadUploadBar;
 static NSUInteger gLeadStatusSequence;
 // A non-intercepting overlay: swipes, navigation and buttons remain usable.
 static void LeadSetUploadStatus(NSString *label, BOOL temporary) {
@@ -45,13 +46,19 @@ static void LeadSetUploadStatus(NSString *label, BOOL temporary) {
         text.font=[UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         text.numberOfLines=2;
         [banner addSubview:text];
+        UIProgressView *bar=[[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+        bar.trackTintColor=[UIColor colorWithWhite:1 alpha:0.28];
+        bar.progressTintColor=[UIColor systemBlueColor];
+        [banner addSubview:bar];
+        gLeadUploadBar=bar;
         gLeadUploadStatus=banner;gLeadUploadStatusText=text;
         [window addSubview:banner];
     }
     CGFloat width=MIN(window.bounds.size.width-32,320);
     CGFloat top=window.safeAreaInsets.top+8;
-    gLeadUploadStatus.frame=CGRectMake((window.bounds.size.width-width)/2,top,width,43);
-    gLeadUploadStatusText.frame=CGRectInset(gLeadUploadStatus.bounds,12,5);
+    gLeadUploadStatus.frame=CGRectMake((window.bounds.size.width-width)/2,top,width,54);
+    gLeadUploadStatusText.frame=CGRectMake(12,2,width-24,39);
+    gLeadUploadBar.frame=CGRectMake(14,44,width-28,5);
     gLeadUploadStatusText.text=label;
     gLeadUploadStatus.alpha=1;
     if(temporary) {
@@ -197,9 +204,14 @@ static void LeadSetUploadStatus(NSString *label, BOOL temporary) {
         NSURL *file=self.file;
         [self.navigationController dismissViewControllerAnimated:YES completion:^{
             LeadSetUploadStatus([NSString stringWithFormat:@"جارٍ إرسال التسجيل إلى %@ · 0%%",title],NO);
+            [gLeadUploadBar setProgress:0 animated:NO];
             [LeadSavedMessagesUpload startWithFile:file peerData:peer progress:^(double fraction) {
+                // Telegram confirms parts in 512-KiB chunks; the percentage
+                // therefore advances discretely. Animate visual progress
+                // between acknowledged checkpoints without over-reporting it.
                 LeadSetUploadStatus([NSString stringWithFormat:@"إرسال إلى %@ · %d%%",title,
-                    (int)(fraction*100)],NO);
+                    (int)(fraction*100.0+0.5)],NO);
+                [gLeadUploadBar setProgress:(float)fraction animated:YES];
             } completion:^(NSString *error){
                 if(error) {
                     NSLog(@"[LeadRecorder] send to %@ failed: %@",title,error);

@@ -7,46 +7,10 @@
 // video pixels. Explicitly composite its decoded frame when recording.
 extern void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot);
 
-// The iOS "return to VoidGram" call indicator is composited near the top
-// centre by the host. Remove only that small status-pill area from exported
-// recording frames, not from the visible app or the entire status bar.
-// Smoothly interpolate from its immediately adjacent pixels row-by-row, with
-// soft edges; this avoids a black rectangle and leaves the call content intact.
-static void LeadMaskCallStatusPill(void *buffer,size_t stride,size_t width,size_t height) {
-    if(!buffer || width<280 || height<500 || stride<width*4)return;
-    const size_t x0=(size_t)(width*0.305),x1=(size_t)(width*0.695);
-    const size_t y0=(size_t)(height*0.016),y1=(size_t)(height*0.066);
-    if(x0<8 || x1+8>=width || y1>=height)return;
-    uint8_t *pixels=(uint8_t *)buffer;
-    // Never paint over arbitrary call content. The VoidGram status pill is
-    // very dark relative to the visible video immediately to its sides.
-    const size_t midY=(y0+y1)/2;
-    const uint8_t *probe=pixels+midY*stride;
-    const uint8_t *centre=probe+((x0+x1)/2)*4;
-    const uint8_t *leftProbe=probe+(x0-5)*4;
-    const uint8_t *rightProbe=probe+(x1+5)*4;
-    const int central=((int)centre[0]+(int)centre[1]+(int)centre[2])/3;
-    const int surroundings=((int)leftProbe[0]+(int)leftProbe[1]+(int)leftProbe[2]
-        +(int)rightProbe[0]+(int)rightProbe[1]+(int)rightProbe[2])/6;
-    if(central>90 || surroundings-central<22)return;
-    const size_t feather=MIN((size_t)12,MAX((size_t)2,(x1-x0)/14));
-    for(size_t y=y0;y<y1;y++) {
-        uint8_t *row=pixels+y*stride;
-        const uint8_t *left=row+(x0-3)*4;
-        const uint8_t *right=row+(x1+3)*4;
-        for(size_t x=x0;x<=x1;x++) {
-            float ratio=(float)(x-x0)/(float)MAX((size_t)1,x1-x0);
-            float edge=MIN(1.0f,(float)MIN(x-x0,x1-x)/(float)feather);
-            // Keep exact boundary pixels; otherwise copy surrounding scene
-            // colours instead of preserving the recording's app-status badge.
-            for(size_t c=0;c<3;c++) {
-                float desired=(1.0f-ratio)*left[c]+ratio*right[c];
-                uint8_t *p=row+x*4+c;
-                *p=(uint8_t)lrintf(*p*(1.0f-edge)+desired*edge);
-            }
-        }
-    }
-}
+// Never alter recording pixels to cover iOS status indicators: the prior
+// interpolation created visible black/noisy rectangles in the user's video.
+extern NSArray<NSURL *> *LeadVirtualMediaFullCallAudioSources(void);
+extern double LeadVirtualMediaFullCallElapsed(void);
 
 NSString *const LeadCallRecordingEnabledKey=@"LeadCallRecordingEnabled";
 NSString *const LeadCallRecordingChangedNotification=@"LeadCallRecordingChanged";
@@ -98,7 +62,7 @@ static NSError *LeadRecorderError(NSString *detail) {
        AVVideoWidthKey:@(width),
        AVVideoHeightKey:@(height),
        AVVideoCompressionPropertiesKey:@{
-          AVVideoAverageBitRateKey:@(14000000),
+          AVVideoAverageBitRateKey:@(10000000),
           AVVideoExpectedSourceFrameRateKey:@(30),
           AVVideoMaxKeyFrameIntervalKey:@(60)
        }
@@ -240,8 +204,6 @@ static NSError *LeadRecorderError(NSString *detail) {
     LeadVirtualMediaDrawRecordingPreview(view);
     UIGraphicsPopContext();
     CGContextRelease(ctx);
-    LeadMaskCallStatusPill(buffer,stride,(size_t)self.size.width,
-                           (size_t)self.size.height);
     NSTimeInterval elapsed=MAX(0,CACurrentMediaTime()-self.startTime);
     CMTime presentationTime=CMTimeMakeWithSeconds(elapsed,600);
     if([self.adaptor appendPixelBuffer:pixel withPresentationTime:presentationTime]) {
@@ -281,6 +243,8 @@ static NSError *LeadRecorderError(NSString *detail) {
 @property(nonatomic,strong) LeadCallVideoRecorder *videoRecorder;
 @property(nonatomic,copy) NSString *temporaryFolder;
 @property(nonatomic,strong) NSDate *startDate;
+@property(nonatomic,copy) NSArray<NSURL *> *fullCallSources;
+@property(nonatomic,assign) NSTimeInterval fullCallOffset;
 @end
 
 @implementation LeadCallRecording
@@ -326,6 +290,8 @@ static NSError *LeadRecorderError(NSString *detail) {
         return;
     }
     self.startDate=[NSDate date];
+    self.fullCallSources=video?[LeadVirtualMediaFullCallAudioSources() copy]:nil;
+    self.fullCallOffset=self.fullCallSources.count==2?LeadVirtualMediaFullCallElapsed():0;
     self.videoRequested=video;
     self.audioRequested=YES;
     self.temporaryFolder=[NSTemporaryDirectory() stringByAppendingPathComponent:
@@ -377,16 +343,46 @@ static NSError *LeadRecorderError(NSString *detail) {
     [outVideo insertTimeRange:CMTimeRangeMake(kCMTimeZero,videoTrack.timeRange.duration)
                    ofTrack:videoTrack atTime:kCMTimeZero error:&err];
     if(err){if(completion)completion(nil,err);return;}
-    AVAssetTrack *audioTrack=[sound tracksWithMediaType:AVMediaTypeAudio].firstObject;
-    if(audioTrack) {
-        AVMutableCompositionTrack *outAudio=[mix addMutableTrackWithMediaType:AVMediaTypeAudio preferredTrackID:kCMPersistentTrackID_Invalid];
-        CMTime duration=CMTimeMinimum(audioTrack.timeRange.duration,videoTrack.timeRange.duration);
-        [outAudio insertTimeRange:CMTimeRangeMake(kCMTimeZero,duration)
-                        ofTrack:audioTrack atTime:kCMTimeZero error:&err];
-        if(err){if(completion)completion(nil,err);return;}
+    NSMutableArray<AVMutableAudioMixInputParameters *> *audioGains=[NSMutableArray array];
+    // Full virtual call: record the two chosen movie soundtracks rather than
+    // the live peer's microphone. The simulated remote side is 4.5x louder.
+    if(self.fullCallSources.count==2) {
+        CMTime begin=CMTimeMakeWithSeconds(MAX(0,self.fullCallOffset),600);
+        for(NSUInteger i=0;i<2;i++) {
+            AVURLAsset *asset=[AVURLAsset URLAssetWithURL:self.fullCallSources[i] options:nil];
+            AVAssetTrack *source=[asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+            if(!source)continue;
+            CMTime available=CMTimeSubtract(source.timeRange.duration,begin);
+            if(CMTIME_COMPARE_INLINE(available,<=,kCMTimeZero))continue;
+            CMTime duration=CMTimeMinimum(videoTrack.timeRange.duration,available);
+            AVMutableCompositionTrack *out=[mix addMutableTrackWithMediaType:AVMediaTypeAudio
+                                              preferredTrackID:kCMPersistentTrackID_Invalid];
+            if(![out insertTimeRange:CMTimeRangeMake(begin,duration)
+                             ofTrack:source atTime:kCMTimeZero error:&err]) {
+                if(completion)completion(nil,err);return;
+            }
+            AVMutableAudioMixInputParameters *gain=[AVMutableAudioMixInputParameters
+                audioMixInputParametersWithTrack:out];
+            [gain setVolume:(i==0?0.22f:1.0f) atTime:kCMTimeZero];
+            [audioGains addObject:gain];
+        }
+    } else {
+        AVAssetTrack *audioTrack=[sound tracksWithMediaType:AVMediaTypeAudio].firstObject;
+        if(audioTrack) {
+            AVMutableCompositionTrack *outAudio=[mix addMutableTrackWithMediaType:AVMediaTypeAudio preferredTrackID:kCMPersistentTrackID_Invalid];
+            CMTime duration=CMTimeMinimum(audioTrack.timeRange.duration,videoTrack.timeRange.duration);
+            [outAudio insertTimeRange:CMTimeRangeMake(kCMTimeZero,duration)
+                            ofTrack:audioTrack atTime:kCMTimeZero error:&err];
+            if(err){if(completion)completion(nil,err);return;}
+        }
     }
     AVAssetExportSession *exporter=[[AVAssetExportSession alloc] initWithAsset:mix
                        presetName:AVAssetExportPresetHighestQuality];
+    if(audioGains.count) {
+        AVMutableAudioMix *levels=[AVMutableAudioMix audioMix];
+        levels.inputParameters=audioGains;
+        exporter.audioMix=levels;
+    }
     exporter.outputURL=final;
     exporter.outputFileType=AVFileTypeMPEG4;
     [exporter exportAsynchronouslyWithCompletionHandler:^{
@@ -417,11 +413,12 @@ static NSError *LeadRecorderError(NSString *detail) {
                 if(videoFile && !videoError) {
                     [strongSelf finishOutputAudio:nil video:videoFile completion:^(NSURL *savedVideo,NSError *savingError) {
                         if(savedVideo && !savingError) {
-                            NSError *warning=[NSError errorWithDomain:@"Lead.CallRecorder" code:3
-                                 userInfo:@{NSLocalizedDescriptionKey:
-                                     [NSString stringWithFormat:
-                                         @"Audio capture failed (%@). The video was saved WITHOUT AUDIO. Please check call audio compatibility before your next recording.",
-                                         audioError.localizedDescription?:@"unknown reason"]}];
+                            // Chosen media soundtracks remain valid even if
+                            // the native call's CoreAudio input was unavailable.
+                            NSError *warning=strongSelf.fullCallSources.count==2?nil:
+                                [NSError errorWithDomain:@"Lead.CallRecorder" code:3
+                                    userInfo:@{NSLocalizedDescriptionKey:
+                                     @"Live call audio failed; video is saved without live call sound."}];
                             if(completion)completion(savedVideo,warning);
                         } else if(completion)completion(nil,savingError?:audioError);
                     }];

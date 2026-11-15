@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
+#import "LeadCallRecording.h"
 #import <CoreImage/CoreImage.h>
 #import <AVFoundation/AVPlayerLayer.h>
 #import <CallKit/CallKit.h>
@@ -112,6 +113,7 @@ extern "C" id objc_retain(id);
 - (void)preparePicker:(void(^)(BOOL))completion fullCall:(BOOL)fullCall;
 - (void)startRemotePreview;
 - (void)removeRemotePreview;
+- (void)releaseStaleCallAudioIfFinished;
 - (void)drawRemotePreviewIntoRecording:(UIView *)root;
 - (void)resetAll;
 - (void)nativeCapturerReady:(id)capturer;
@@ -654,7 +656,27 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         self.privateCallView=nil;
         [self.localPreviewView removeFromSuperview];
         [self.remoteVideoView removeFromSuperview];
+        // The recording upload never uses the microphone. If the call ended
+        // but Telegram left a voice-chat audio session open, release it only
+        // after CallKit confirms there is no active phone/VoIP call.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2*NSEC_PER_SEC)),
+            dispatch_get_main_queue(),^{[self releaseStaleCallAudioIfFinished];});
     }
+}
+- (void)releaseStaleCallAudioIfFinished {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self releaseStaleCallAudioIfFinished];});
+        return;
+    }
+    if([CXCallObserver new].calls.count>0 || [LeadCallRecording shared].isRecording) return;
+    if(gMode.load()!=3 && gMode.load()!=0)return;
+    AVAudioSession *session=AVAudioSession.sharedInstance;
+    if(![session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord] &&
+       ![session.category isEqualToString:AVAudioSessionCategoryRecord])return;
+    NSError *err=nil;
+    [session setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                 error:&err];
+    if(err)NSLog(@"[LeadVirtualMedia] idle microphone session release failed: %@",err);
 }
 - (UIView *)findButtonsGroup:(UIView *)root {
     if(!root)return nil;
@@ -716,6 +738,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         [button sendActionsForControlEvents:UIControlEventTouchUpInside];
         // Keep gMode=3 until the next call choice resets us; never expose
         // the real microphone if Telegram takes longer to disconnect.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)),
+            dispatch_get_main_queue(),^{[self releaseStaleCallAudioIfFinished];});
     } else {
         // CallKit fallback when Telegram's view is minimized. Only use a
         // unique, outgoing, connected call; never terminate unrelated calls
@@ -1117,6 +1141,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         overlay.userInteractionEnabled=NO; // Do not block normal call controls.
         overlay.backgroundColor=UIColor.blackColor;
         overlay.clipsToBounds=YES;
+        // PrivateCallScreen's native WebRTC/Metal renderer can be inserted
+        // ABOVE early-added UIKit subviews. Use explicit CoreAnimation depth:
+        // the local replacement must sit above the real remote picture.
+        overlay.layer.zPosition=6000;
         overlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|
                                   UIViewAutoresizingFlexibleHeight;
         [overlay.layer addSublayer:layer];
@@ -1135,18 +1163,32 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             }
         }];
     }
-    self.remoteVideoView.frame=host.bounds;
+    // Keep Telegram's native header and bottom call controls visible and
+    // touchable. The replacement occupies the remote VIDEO canvas instead of
+    // obscuring the entire private-call UI. No clipping/cropping is applied to
+    // the recorded file or to its exported status region.
+    const CGFloat h=host.bounds.size.height;
+    const CGFloat header=MIN(h*0.19,MAX(118.0,host.safeAreaInsets.top+92.0));
+    const CGFloat footer=MIN(h*0.22,MAX(146.0,host.safeAreaInsets.bottom+112.0));
+    CGRect mediaRect=CGRectMake(0,header,host.bounds.size.width,
+                          MAX(100.0,h-header-footer));
+    self.remoteVideoView.frame=mediaRect;
     self.remoteLayer.frame=self.remoteVideoView.bounds;
     if(self.remoteVideoView.superview!=host) {
         [self.remoteVideoView removeFromSuperview];
         // Telegram places its video underneath call controls. Inserting
         // near the bottom also avoids covering new overlay buttons.
-        NSUInteger index=MIN((NSUInteger)1,host.subviews.count);
-        [host insertSubview:self.remoteVideoView atIndex:index];
+        [host addSubview:self.remoteVideoView];
         UIView *group=[self findButtonsGroup:host];
-        if(group && group.superview==host) [host bringSubviewToFront:group];
+        // Elevate the button group's top-level ancestor, not just the nested
+        // group: a child's zPosition cannot escape a lower parent layer.
+        UIView *controlRoot=group;
+        while(controlRoot && controlRoot.superview &&
+              controlRoot.superview!=host)controlRoot=controlRoot.superview;
+        if(controlRoot && controlRoot.superview==host)
+            controlRoot.layer.zPosition=10000;
         if(self.localPreviewView.superview==host)
-            [host bringSubviewToFront:self.localPreviewView];
+            self.localPreviewView.layer.zPosition=90000;
     }
 }
 - (void)drawRemotePreviewIntoRecording:(UIView *)root {
@@ -1451,6 +1493,19 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
 // Draw the actual media frame over the hardware-backed preview which UIKit
 // screen capture would otherwise render as blank. Must be called while the
 // recording CG bitmap context is current on the main thread.
+// Used only by manually requested recording: expose the two original movies
+// and their shared timeline so saved audio can match the chosen, locally
+// simulated remote side rather than accidentally mixing the real peer's mic.
+extern "C" NSArray<NSURL *> *LeadVirtualMediaFullCallAudioSources(void) {
+    LeadVirtualMedia *m=[LeadVirtualMedia shared];
+    if(!gFullCallMode.load() || !m.selectedURL || !m.remoteSelectedURL)return nil;
+    return @[m.selectedURL,m.remoteSelectedURL];
+}
+extern "C" double LeadVirtualMediaFullCallElapsed(void) {
+    double start=gStartClock.load();
+    return (start>0 && gFullCallMode.load())?
+        MAX(0.0,CACurrentMediaTime()-start):0.0;
+}
 extern "C" void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot) {
     LeadVirtualMedia *m=[LeadVirtualMedia shared];
     [m drawRemotePreviewIntoRecording:captureRoot];
