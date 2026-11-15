@@ -25,6 +25,7 @@ extern "C" bool LeadVirtualMediaHighQualityEnabled(void);
 #import <algorithm>
 
 using std::memory_order_acquire;
+using std::memory_order_acq_rel;
 using std::memory_order_release;
 using std::memory_order_relaxed;
 
