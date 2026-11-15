@@ -120,37 +120,59 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
 }
 
 
+
 + (instancetype)sendDocumentToSavedMessages:(NSURL *)file
                              thumbnailJPEG:(NSData *)thumbnailJPEG
                                   progress:(void (^)(double))progress
                                 completion:(void (^)(NSString *))completion {
-    LeadSavedMessagesUpload *upload = [LeadSavedMessagesUpload new];
     int32_t selfPeer=kLeadTLInputPeerSelf;
-    upload.targetPeer=[NSData dataWithBytes:&selfPeer length:4];
+    return [self sendDocument:file
+                    peerData:[NSData dataWithBytes:&selfPeer length:4]
+               thumbnailJPEG:thumbnailJPEG
+                    progress:progress completion:completion];
+}
+
++ (instancetype)sendPhotoToSavedMessages:(NSURL *)file
+                               progress:(void (^)(double))progress
+                             completion:(void (^)(NSString *))completion {
+    int32_t selfPeer=kLeadTLInputPeerSelf;
+    return [self sendPhoto:file
+                 peerData:[NSData dataWithBytes:&selfPeer length:4]
+                 progress:progress completion:completion];
+}
+
++ (instancetype)sendDocument:(NSURL *)file
+                   peerData:(NSData *)peerData
+              thumbnailJPEG:(NSData *)thumbnailJPEG
+                   progress:(void (^)(double))progress
+                 completion:(void (^)(NSString *))completion {
+    LeadSavedMessagesUpload *upload=[LeadSavedMessagesUpload new];
+    upload.targetPeer=[peerData copy];
     upload.genericFile=YES;
-    upload.customThumbnailJPEG=(thumbnailJPEG.length && thumbnailJPEG.length < 200*1024) ? [thumbnailJPEG copy] : nil;
+    upload.customThumbnailJPEG=(thumbnailJPEG.length && thumbnailJPEG.length<200*1024)
+        ? [thumbnailJPEG copy] : nil;
     upload.progress=progress;
     upload.completion=completion;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
+        if(!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
         [gActiveLeadUploads addObject:upload];
         [upload begin:file];
     });
     return upload;
 }
 
-+ (instancetype)sendPhotoToSavedMessages:(NSURL *)file
-                               progress:(void (^)(double))progress
-                             completion:(void (^)(NSString *))completion {
-    LeadSavedMessagesUpload *upload = [LeadSavedMessagesUpload new];
-    int32_t selfPeer=kLeadTLInputPeerSelf;
-    upload.targetPeer=[NSData dataWithBytes:&selfPeer length:4];
++ (instancetype)sendPhoto:(NSURL *)file
+                peerData:(NSData *)peerData
+                progress:(void (^)(double))progress
+              completion:(void (^)(NSString *))completion {
+    LeadSavedMessagesUpload *upload=[LeadSavedMessagesUpload new];
+    upload.targetPeer=[peerData copy];
     upload.genericFile=YES;
     upload.sendAsPhoto=YES;
     upload.progress=progress;
     upload.completion=completion;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
+        if(!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
         [gActiveLeadUploads addObject:upload];
         [upload begin:file];
     });

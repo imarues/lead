@@ -72,8 +72,100 @@ static void LeadSetUploadStatus(NSString *label, BOOL temporary) {
     }
 }
 
+
+// Generic conversion sender. The shared set keeps a multi-page transfer alive
+// after the chat chooser is closed, exactly like call recording uploads.
+@interface LeadConversionChatTransfer : NSObject
+@property(nonatomic,copy) NSArray<NSURL *> *files;
+@property(nonatomic,copy) NSData *peer;
+@property(nonatomic,copy) NSData *thumbnail;
+@property(nonatomic,copy) NSString *recipient;
+@property(nonatomic,assign) BOOL sendAsPhotos;
+@property(nonatomic,assign) NSUInteger nextIndex;
++ (void)sendFiles:(NSArray<NSURL *> *)files toPeer:(NSData *)peer
+        recipient:(NSString *)recipient photos:(BOOL)photos thumbnail:(NSData *)thumbnail;
+@end
+
+static NSMutableSet<LeadConversionChatTransfer *> *gLeadConversionTransfers;
+
+@implementation LeadConversionChatTransfer
++ (void)sendFiles:(NSArray<NSURL *> *)files toPeer:(NSData *)peer
+        recipient:(NSString *)recipient photos:(BOOL)photos thumbnail:(NSData *)thumbnail {
+    if(!files.count || !peer.length)return;
+    LeadConversionChatTransfer *transfer=[LeadConversionChatTransfer new];
+    transfer.files=[files copy];
+    transfer.peer=[peer copy];
+    transfer.recipient=[recipient copy]?:@"المحادثة";
+    transfer.sendAsPhotos=photos;
+    transfer.thumbnail=[thumbnail copy];
+    if(!gLeadConversionTransfers)gLeadConversionTransfers=[NSMutableSet new];
+    [gLeadConversionTransfers addObject:transfer];
+    [transfer sendNext];
+}
+- (void)finishWithError:(NSString *)error {
+    NSUInteger sent=self.nextIndex;
+    if(error.length) {
+        LeadSetUploadStatus([NSString stringWithFormat:
+            @"فشل الإرسال إلى %@ بعد %lu/%lu ملف: %@",self.recipient,
+            (unsigned long)sent,(unsigned long)self.files.count,error],YES);
+    } else {
+        LeadSetUploadStatus([NSString stringWithFormat:
+            @"تم إرسال %lu %@ إلى %@",(unsigned long)sent,
+            self.sendAsPhotos?@"صورة":@"ملف",self.recipient],YES);
+        [gLeadUploadBar setProgress:1 animated:YES];
+    }
+    [gLeadConversionTransfers removeObject:self];
+}
+- (void)sendNext {
+    if(self.nextIndex>=self.files.count) {
+        [self finishWithError:nil];
+        return;
+    }
+    NSURL *file=self.files[self.nextIndex];
+    if(!file.isFileURL || ![[NSFileManager defaultManager] fileExistsAtPath:file.path]) {
+        [self finishWithError:@"الملف غير موجود على الجهاز."];
+        return;
+    }
+    NSUInteger position=self.nextIndex+1;
+    LeadSetUploadStatus([NSString stringWithFormat:@"إرسال %lu/%lu إلى %@ · 0%%",
+        (unsigned long)position,(unsigned long)self.files.count,self.recipient],NO);
+    [gLeadUploadBar setProgress:(float)self.nextIndex/(float)self.files.count animated:YES];
+    void (^progress)(double)=^(double fraction) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LeadSetUploadStatus([NSString stringWithFormat:@"إرسال %lu/%lu إلى %@ · %.0f%%",
+                (unsigned long)position,(unsigned long)self.files.count,
+                self.recipient,MAX(0,MIN(1,fraction))*100],NO);
+            [gLeadUploadBar setProgress:((float)self.nextIndex+(float)fraction)/
+                                        (float)self.files.count animated:YES];
+        });
+    };
+    void (^completion)(NSString *)=^(NSString *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if(error.length) { [self finishWithError:error];return; }
+            self.nextIndex++;
+            // Moderate dispatch between messages: avoid a rapid burst of sends.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.12*NSEC_PER_SEC)),
+                           dispatch_get_main_queue(),^{[self sendNext];});
+        });
+    };
+    if(self.sendAsPhotos) {
+        [LeadSavedMessagesUpload sendPhoto:file peerData:self.peer
+                                  progress:progress completion:completion];
+    } else {
+        [LeadSavedMessagesUpload sendDocument:file peerData:self.peer
+                                thumbnailJPEG:self.thumbnail
+                                     progress:progress completion:completion];
+    }
+}
+@end
+
 @interface LeadRecordingChatPicker : UITableViewController <UISearchResultsUpdating>
 @property(nonatomic,strong) NSURL *file;
+@property(nonatomic,copy) NSArray<NSURL *> *conversionFiles;
+@property(nonatomic,copy) NSData *conversionThumb;
+@property(nonatomic,assign) BOOL conversionPhotos;
+- (instancetype)initWithConversionFiles:(NSArray<NSURL *> *)files
+                                photos:(BOOL)photos thumbnail:(NSData *)thumbnail;
 @property(nonatomic,strong) NSMutableArray<NSDictionary *> *rows;
 @property(nonatomic,strong) NSArray<NSDictionary *> *visibleRows;
 @property(nonatomic,strong) NSMutableSet<NSString *> *seen;
@@ -98,9 +190,19 @@ static void LeadSetUploadStatus(NSString *label, BOOL temporary) {
     }
     return self;
 }
+- (instancetype)initWithConversionFiles:(NSArray<NSURL *> *)files
+                                 photos:(BOOL)photos thumbnail:(NSData *)thumbnail {
+    self=[self initWithFile:files.firstObject];
+    if(self) {
+        self.conversionFiles=[files copy];
+        self.conversionPhotos=photos;
+        self.conversionThumb=[thumbnail copy];
+    }
+    return self;
+}
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title=@"إرسال التسجيل";
+    self.title=self.conversionFiles.count?@"مشاركة التحويل":@"إرسال التسجيل";
     self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc]
        initWithTitle:@"إلغاء" style:UIBarButtonItemStylePlain
        target:self action:@selector(closePicker)];
@@ -195,14 +297,27 @@ static void LeadSetUploadStatus(NSString *label, BOOL temporary) {
     NSString *title=row[@"title"];
     NSData *peer=row[@"peer"];
     if(!peer.length)return;
+    NSString *description=self.conversionFiles.count?
+        (self.conversionPhotos?[NSString stringWithFormat:@"إرسال %lu صورة إلى هذه المحادثة؟",
+           (unsigned long)self.conversionFiles.count]:
+           [NSString stringWithFormat:@"إرسال %@ إلى هذه المحادثة؟",self.file.lastPathComponent]):
+        [NSString stringWithFormat:@"إرسال %@ إلى هذه المحادثة؟",self.file.lastPathComponent];
     UIAlertController *confirm=[UIAlertController alertControllerWithTitle:title
-        message:[NSString stringWithFormat:@"إرسال %@ إلى هذه المحادثة؟",self.file.lastPathComponent]
+        message:description
         preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"رجوع" style:UIAlertActionStyleCancel handler:nil]];
     [confirm addAction:[UIAlertAction actionWithTitle:@"إرسال" style:UIAlertActionStyleDefault
         handler:^(__unused UIAlertAction *action){
         NSURL *file=self.file;
+        NSArray<NSURL *> *conversionFiles=[self.conversionFiles copy];
+        BOOL conversionPhotos=self.conversionPhotos;
+        NSData *thumbnail=[self.conversionThumb copy];
         [self.navigationController dismissViewControllerAnimated:YES completion:^{
+            if(conversionFiles.count) {
+                [LeadConversionChatTransfer sendFiles:conversionFiles toPeer:peer
+                    recipient:title photos:conversionPhotos thumbnail:thumbnail];
+                return;
+            }
             LeadSetUploadStatus([NSString stringWithFormat:@"جارٍ إرسال التسجيل إلى %@ · 0%%",title],NO);
             [gLeadUploadBar setProgress:0 animated:NO];
             [LeadSavedMessagesUpload startWithFile:file peerData:peer progress:^(double fraction) {
@@ -236,6 +351,35 @@ void LeadPresentRecordingChatPicker(NSURL *file,UIViewController *presenter) {
     if(!host)return;
     while(host.presentedViewController)host=host.presentedViewController;
     LeadRecordingChatPicker *picker=[[LeadRecordingChatPicker alloc] initWithFile:file];
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:picker];
+    nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    [host presentViewController:nav animated:YES completion:nil];
+}
+
+
+// Same Telegram in-app recipient chooser used by call recordings.
+// This deliberately does NOT invoke UIActivityViewController / iOS share sheet.
+void LeadPresentConversionChatPicker(NSArray<NSURL *> *files,
+                                     BOOL sendAsPhotos,
+                                     NSData *thumbnailJPEG,
+                                     UIViewController *presenter) {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LeadPresentConversionChatPicker(files,sendAsPhotos,thumbnailJPEG,presenter);
+        });
+        return;
+    }
+    if(!files.count) return;
+    NSFileManager *fm=NSFileManager.defaultManager;
+    for(NSURL *file in files) {
+        if(!file.isFileURL || ![fm fileExistsAtPath:file.path])return;
+    }
+    UIViewController *host=presenter;
+    if(!host || !host.view.window)host=LeadChatWindow().rootViewController;
+    if(!host)return;
+    while(host.presentedViewController)host=host.presentedViewController;
+    LeadRecordingChatPicker *picker=[[LeadRecordingChatPicker alloc]
+        initWithConversionFiles:files photos:sendAsPhotos thumbnail:thumbnailJPEG];
     UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:picker];
     nav.modalPresentationStyle=UIModalPresentationFullScreen;
     [host presentViewController:nav animated:YES completion:nil];

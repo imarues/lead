@@ -23,5 +23,16 @@
 + (instancetype)sendPhotoToSavedMessages:(NSURL *)file
                                progress:(void (^)(double fraction))progress
                              completion:(void (^)(NSString *error))completion;
+// Send converted PDF or extracted image to any Telegram chat chosen in Lead's
+// in-app chat picker. Peer bytes are TL InputPeer from active account's dialogs.
++ (instancetype)sendDocument:(NSURL *)file
+                   peerData:(NSData *)peerData
+              thumbnailJPEG:(NSData *)thumbnailJPEG
+                   progress:(void (^)(double fraction))progress
+                 completion:(void (^)(NSString *error))completion;
++ (instancetype)sendPhoto:(NSURL *)file
+                peerData:(NSData *)peerData
+                progress:(void (^)(double fraction))progress
+              completion:(void (^)(NSString *error))completion;
 - (void)cancel;
 @end
