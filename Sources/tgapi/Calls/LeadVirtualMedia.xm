@@ -369,7 +369,7 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             const double duration=CMTimeGetSeconds(asset.duration);
             if(![asset tracksWithMediaType:AVMediaTypeVideo].count ||
                ![asset tracksWithMediaType:AVMediaTypeAudio].count ||
-               !std::isfinite(duration) || duration<=0 || duration>600) {
+               !isfinite(duration) || duration<=0 || duration>600) {
                 [[NSFileManager defaultManager] removeItemAtURL:second error:nil];
                 [self showError:@"الفيديو الثاني لازم يحتوي على صوت وصورة، ومدته أقل من 10 دقائق."];
                 [self finishPicker:NO];return;

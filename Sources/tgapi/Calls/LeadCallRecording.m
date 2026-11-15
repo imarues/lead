@@ -22,12 +22,12 @@ static void LeadMaskCallStatusPill(void *buffer,size_t stride,size_t width,size_
     // very dark relative to the visible video immediately to its sides.
     const size_t midY=(y0+y1)/2;
     const uint8_t *probe=pixels+midY*stride;
-    auto brightness=[&](size_t px)->int {
-        const uint8_t *c=probe+px*4;
-        return ((int)c[0]+(int)c[1]+(int)c[2])/3;
-    };
-    const int central=brightness((x0+x1)/2);
-    const int surroundings=(brightness(x0-5)+brightness(x1+5))/2;
+    const uint8_t *centre=probe+((x0+x1)/2)*4;
+    const uint8_t *leftProbe=probe+(x0-5)*4;
+    const uint8_t *rightProbe=probe+(x1+5)*4;
+    const int central=((int)centre[0]+(int)centre[1]+(int)centre[2])/3;
+    const int surroundings=((int)leftProbe[0]+(int)leftProbe[1]+(int)leftProbe[2]
+        +(int)rightProbe[0]+(int)rightProbe[1]+(int)rightProbe[2])/6;
     if(central>90 || surroundings-central<22)return;
     const size_t feather=MIN((size_t)12,MAX((size_t)2,(x1-x0)/14));
     for(size_t y=y0;y<y1;y++) {
