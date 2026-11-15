@@ -87,7 +87,8 @@ extern "C" id objc_retain(id);
 @property(nonatomic,assign) BOOL fullCallRequested;
 @property(nonatomic,strong) AVPlayer *remotePlayer;
 @property(nonatomic,strong) AVPlayerLayer *remoteLayer;
-@property(nonatomic,weak) CALayer *nativeRemoteContentsLayer;
+@property(nonatomic,strong) UIView *remoteVideoView;
+@property(nonatomic,weak) UIView *nativeVideoContainerView;
 @property(nonatomic,strong) AVPlayerItemVideoOutput *remotePixelOutput;
 @property(nonatomic,strong) CIContext *remoteRecordingContext;
 @property(nonatomic,strong) UIImage *remoteRecordingFrame;
@@ -665,8 +666,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(self.privateCallView==view) {
         self.privateCallView=nil;
         [self.localPreviewView removeFromSuperview];
-        [self.remoteLayer removeFromSuperlayer];
-        self.nativeRemoteContentsLayer=nil;
+        [self.remoteVideoView removeFromSuperview];
+        self.nativeVideoContainerView=nil;
         // The recording upload never uses the microphone. If the call ended
         // but Telegram left a voice-chat audio session open, release it only
         // after CallKit confirms there is no active phone/VoIP call.
@@ -1116,43 +1117,33 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         return;
     }
     [self.remotePlayer pause];
-    [self.remoteLayer removeFromSuperlayer];
-    self.nativeRemoteContentsLayer=nil;
+    [self.remoteVideoView removeFromSuperview];
+    self.nativeVideoContainerView=nil;
     self.remotePlayer=nil;
     self.remoteLayer=nil;
+    self.remoteVideoView=nil;
     self.remotePixelOutput=nil;
     self.remoteRecordingFrame=nil;
     self.remoteRecordingContext=nil;
 }
-// Telegram's current PrivateCallScreen constructs a full-screen
-// VideoContainerView for the native main picture. Inside it,
-// VideoContainerLayer.contentsLayer owns PrivateCallVideoLayer. Putting the
-// player beside that *native renderer layer* inherits its exact frame,
-// cropping, corner masks, transforms and main/thumbnail layout changes.
-// Unlike adding a free-floating UIView to PrivateCallScreen, this does not
-// create arbitrary header/footer gaps or cover real call controls.
-- (CALayer *)nativeVideoContentsForCallScreen:(UIView *)screen {
-    CALayer *best=nil;
-    CGFloat bestArea=0.0;
-    for(UIView *candidate in screen.subviews) {
-        if(candidate.hidden || candidate.alpha<0.01)continue;
-        NSString *name=NSStringFromClass(candidate.class);
+// Match the Telegram call screen's own *UIView* video layout, not a manually
+// computed "header/footer" rectangle. On forks whose native video container
+// isn't present yet (for example a remote avatar or disabled camera), retain a
+// fallback attached to PrivateCallScreen itself. Never omit the selected movie.
+- (UIView *)nativeMainVideoContainerInCallScreen:(UIView *)screen {
+    UIView *chosen=nil;
+    CGFloat largest=0;
+    for(UIView *view in screen.subviews) {
+        if(view.hidden || view.alpha<0.01)continue;
+        NSString *name=NSStringFromClass(view.class);
         if([name rangeOfString:@"VideoContainerView"].location==NSNotFound)continue;
-        for(CALayer *outer in candidate.layer.sublayers) {
-            NSString *type=NSStringFromClass(outer.class);
-            if([type rangeOfString:@"VideoContainerLayer"].location==NSNotFound)continue;
-            for(CALayer *contents in outer.sublayers) {
-                const CGFloat area=contents.bounds.size.width*contents.bounds.size.height;
-                if(area>bestArea && contents.bounds.size.width>100 &&
-                   contents.bounds.size.height>100) {
-                    best=contents;
-                    bestArea=area;
-                }
-                break; // VideoContainerLayer.contentsLayer is first.
-            }
+        CGRect bounds=view.bounds;
+        CGFloat area=bounds.size.width*bounds.size.height;
+        if(area>largest && bounds.size.width>100 && bounds.size.height>100) {
+            chosen=view;largest=area;
         }
     }
-    return best;
+    return chosen;
 }
 - (void)startRemotePreview {
     if(!NSThread.isMainThread) {
@@ -1162,12 +1153,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     if(gMode.load()!=2 || !gFullCallMode.load() || !self.remoteSelectedURL)return;
     UIView *host=self.privateCallView;
     if(!host || !host.window || CGRectIsEmpty(host.bounds))return;
-    CALayer *nativeContents=[self nativeVideoContentsForCallScreen:host];
-    if(!nativeContents) {
-        // The screen's video containers can arrive after the WebRTC
-        // connection; the playback timer retries attachment every 0.5 sec.
-        return;
-    }
+    // A private call with video off has no VideoContainerView at all. That is
+    // precisely when the previous build displayed only the contact avatar.
+    UIView *native=[self nativeMainVideoContainerInCallScreen:host];
+    UIView *target=native?:host;
     if(!self.remotePlayer) {
         AVPlayerItem *item=[AVPlayerItem playerItemWithURL:self.remoteSelectedURL];
         NSDictionary *attrs=@{
@@ -1182,17 +1171,21 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         self.remotePlayer.muted=NO;
         self.remotePlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
         AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.remotePlayer];
-        // Identical aspect-fill policy as the native full-size call renderer:
-        // preserve source proportions, crop excess edges; NEVER stretch.
         layer.videoGravity=AVLayerVideoGravityResizeAspectFill;
-        layer.masksToBounds=YES;
-        layer.zPosition=100.0; // After native PrivateCallVideoLayer, within its container.
         self.remoteLayer=layer;
-        const double elapsed=MAX(0.0,CACurrentMediaTime()-gStartClock.load());
+        UIView *overlay=[[UIView alloc] initWithFrame:target.bounds];
+        overlay.userInteractionEnabled=NO;
+        overlay.backgroundColor=UIColor.blackColor;
+        overlay.clipsToBounds=YES;
+        overlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|
+                                  UIViewAutoresizingFlexibleHeight;
+        [overlay.layer addSublayer:layer];
+        self.remoteVideoView=overlay;
+        double elapsed=MAX(0.0,CACurrentMediaTime()-gStartClock.load());
         [self.remotePlayer seekToTime:CMTimeMakeWithSeconds(elapsed,600)
              toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
-             completionHandler:^(BOOL ready) {
-            if(ready && gMode.load()==2 && gFullCallMode.load())
+             completionHandler:^(BOOL ok) {
+            if(ok && gMode.load()==2 && gFullCallMode.load())
                 dispatch_async(dispatch_get_main_queue(),^{
                     if(gMode.load()==2 && self.remotePlayer)[self.remotePlayer play];
                 });
@@ -1200,13 +1193,28 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    if(self.remoteLayer.superlayer!=nativeContents) {
-        [self.remoteLayer removeFromSuperlayer];
-        [nativeContents addSublayer:self.remoteLayer];
-        self.nativeRemoteContentsLayer=nativeContents;
-        NSLog(@"[LeadVirtualMedia] second video attached to Telegram native VideoContainerView");
+    if(self.remoteVideoView.superview!=target) {
+        [self.remoteVideoView removeFromSuperview];
+        if(target==host) {
+            // Telegram's PrivateCallScreen subviews normally start with
+            // background, overlayContents, then controls/title/status.
+            // Insert the picture between background and native UI so the
+            // controls stay natural and tappable across different forks.
+            [host insertSubview:self.remoteVideoView
+                        atIndex:MIN((NSUInteger)1,host.subviews.count)];
+            self.nativeVideoContainerView=nil;
+            NSLog(@"[LeadVirtualMedia] using full-screen remote movie fallback");
+        } else {
+            // A native VideoContainerView already clips/rotates the picture.
+            // Its own movie layer is behind UIKit subviews, so this AVPlayer
+            // behaves like the native feed, without a fake visible border.
+            [target addSubview:self.remoteVideoView];
+            self.nativeVideoContainerView=target;
+            NSLog(@"[LeadVirtualMedia] attached remote movie to native video view");
+        }
     }
-    self.remoteLayer.frame=nativeContents.bounds;
+    self.remoteVideoView.frame=target.bounds;
+    self.remoteLayer.frame=self.remoteVideoView.bounds;
     [CATransaction commit];
 }
 - (void)drawRemotePreviewIntoRecording:(UIView *)root {
@@ -1214,16 +1222,13 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     // blank video view. Draw the actual decoded pixels in the recording.
     if(!NSThread.isMainThread || gMode.load()!=2 || !gFullCallMode.load() ||
        !UIGraphicsGetCurrentContext() || !root)return;
-    AVPlayerLayer *visible=self.remoteLayer;
+    UIView *visible=self.remoteVideoView;
     AVPlayerItemVideoOutput *output=self.remotePixelOutput;
-    if(!visible || !visible.superlayer || !output || !self.remotePlayer ||
-       !root.window)return;
-    // Match the native on-screen video container, including all of its
-    // actual CoreAnimation transforms, in the exported video.
-    CALayer *ancestor=visible;
-    while(ancestor && ancestor!=root.layer)ancestor=ancestor.superlayer;
-    if(!ancestor)return;
-    CGRect rect=[visible convertRect:visible.bounds toLayer:root.layer];
+    if(!visible || !visible.window || !output || !self.remotePlayer ||
+       !root.window || ![visible isDescendantOfView:root])return;
+    // Use exactly the visible player view's transformed on-screen bounds;
+    // no fabricated header/footer crop in either preview or exported MP4.
+    CGRect rect=[visible convertRect:visible.bounds toView:root];
     rect=CGRectIntersection(rect,root.bounds);
     if(CGRectIsNull(rect) || rect.size.width<8 || rect.size.height<8)return;
     CVPixelBufferRef buffer=[output copyPixelBufferForItemTime:self.remotePlayer.currentTime
@@ -1258,9 +1263,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     CGContextClipToRect(context,rect);
     [frame drawInRect:full];
     CGContextRestoreGState(context);
-    // Hardware AVPlayerLayer snapshots are often blank. Once its pixels
-    // have been drawn, restore Telegram's native foreground call controls
-    // instead of painting over them with the replacement video.
+    // The hardware player can be missing from UIKit snapshots. Restore
+    // foreground call controls over this manually composited video frame.
     UIView *call=self.privateCallView;
     if(call && call.window && (call==root || [call isDescendantOfView:root])) {
         for(UIView *child in call.subviews) {
