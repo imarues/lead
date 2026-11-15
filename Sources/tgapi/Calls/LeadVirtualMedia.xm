@@ -19,6 +19,7 @@
 #include <memory>
 #include <vector>
 #include <algorithm>
+#include <cmath>  // std::tanh used by virtual movie loudness compressor
 #include <cstring>
 
 namespace {
