@@ -1528,10 +1528,11 @@ static void LeadInstallProfileItems(UIViewController *controller) {
 }
 %end
 
-// Intercept the actual activation event, before initiating any Telegram video
-// call. Older builds accidentally listened for UIControlEventTouchDragEnter
-// (1<<4), rather than TouchUpInside (1<<6), so ordinary taps bypassed the
-// source selector and dialed immediately.
+// Intercept ASControlNode's native touch-up event before Telegram dials.
+// CRITICAL: Texture/AsyncDisplayKit has its OWN event enumeration:
+// ASControlNodeEventTouchUpInside = 1 << 4 (16).
+// UIKit's UIControlEventTouchUpInside = 1 << 6 (64) is ONLY for UIControl.
+// Mixing these enums is exactly why the menu didn't appear on profile taps.
 extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL));
 extern "C" void LeadVirtualMediaPrepareFullVideoCall(void (^completion)(BOOL));
 extern "C" void LeadVirtualMediaReset(void);
@@ -1731,7 +1732,9 @@ static void LeadInstallPeerInfoCallHooks(void) {
     if(!gLeadPeerInfoHookInstalled || !gLeadPeerInfoActionHookInstalled)
         LeadInstallPeerInfoCallHooks();
     if(gLeadCallPromptBypass){%orig(controlEvents,event);return;}
-    if((controlEvents & UIControlEventTouchUpInside)!=0) {
+    // These are ASControlNodeEvent flags, NOT UIKit's UIControlEvent flags.
+    static const NSUInteger kLeadASControlTouchUpInside=(1u << 4);
+    if((controlEvents & kLeadASControlTouchUpInside)!=0) {
         // Hold the original control throughout the picker so it cannot be
         // deallocated while the user's movie assets are loading.
         id control=self;
