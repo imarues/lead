@@ -344,8 +344,9 @@ static NSError *LeadRecorderError(NSString *detail) {
                    ofTrack:videoTrack atTime:kCMTimeZero error:&err];
     if(err){if(completion)completion(nil,err);return;}
     NSMutableArray<AVMutableAudioMixInputParameters *> *audioGains=[NSMutableArray array];
-    // Full virtual call: record the two chosen movie soundtracks rather than
-    // the live peer's microphone. The simulated remote side is 4.5x louder.
+    // Full virtual call: archive only the two selected movie soundtracks,
+    // not the original peer voice. Prioritize the outgoing first movie's
+    // sound over the locally simulated counterpart's movie.
     if(self.fullCallSources.count==2) {
         CMTime begin=CMTimeMakeWithSeconds(MAX(0,self.fullCallOffset),600);
         for(NSUInteger i=0;i<2;i++) {
@@ -363,7 +364,7 @@ static NSError *LeadRecorderError(NSString *detail) {
             }
             AVMutableAudioMixInputParameters *gain=[AVMutableAudioMixInputParameters
                 audioMixInputParametersWithTrack:out];
-            [gain setVolume:(i==0?0.22f:1.0f) atTime:kCMTimeZero];
+            [gain setVolume:(i==0?1.0f:0.22f) atTime:kCMTimeZero];
             [audioGains addObject:gain];
         }
     } else {

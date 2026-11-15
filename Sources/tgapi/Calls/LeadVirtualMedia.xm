@@ -499,19 +499,23 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     video.sourceHeight=composed?outH:(NSInteger)fabs(v.naturalSize.height);
     video.sourceFPS=outRate;
     video.lastSubmittedPTS=-1.0;
-    // Loudness: raise the whole clip so its loudest sample sits just under full
-    // scale (-1 dBFS), at most +12 dB. A pure gain (no compressor, no limiter), so
-    // nothing clips and the sound isn't coloured; clips that are already loud are
-    // left untouched.
+    // Prioritize the sound of the FIRST movie (transmitted through WebRTC).
+    // Normalize offline, then use bounded soft-knee compression for a strong,
+    // consistent level without wrapping or clipping the outgoing 16-bit PCM.
     int32_t peak=0;
-    for(const int16_t sample:clipSound->samples)peak=std::max(peak,(int32_t)std::abs((int)sample));
+    for(const int16_t sample:clipSound->samples)
+        peak=std::max(peak,(int32_t)std::abs((int)sample));
     double gain=1.0;
     if(peak>0) {
-        gain=std::min(4.0,(0.891*32767.0)/(double)peak);
-        if(gain>1.05)
-            for(int16_t &sample:clipSound->samples)
-                sample=(int16_t)std::max(-32768L,std::min(32767L,lrint((double)sample*gain)));
-        else gain=1.0;
+        gain=std::min(6.0,(0.94*32767.0)/(double)peak);
+        const double knee=2.25;
+        const double scale=0.965/std::tanh(knee);
+        for(int16_t &sample:clipSound->samples) {
+            const double normalized=std::max(-1.0,std::min(1.0,
+                ((double)sample/32768.0)*gain));
+            const double boosted=scale*std::tanh(knee*normalized);
+            sample=(int16_t)std::lrint(boosted*32767.0);
+        }
     }
     NSLog(@"[LeadVirtualMedia] video %ldx%ld ~%.1ffps (composed=%d); audio samples=%lu, peak=%d, gain=%.2f",
           (long)video.sourceWidth,(long)video.sourceHeight,video.sourceFPS,(int)composed,
@@ -1167,7 +1171,9 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             initWithPixelBufferAttributes:attrs];
         [item addOutput:self.remotePixelOutput];
         self.remotePlayer=[AVPlayer playerWithPlayerItem:item];
-        self.remotePlayer.volume=1.0f;
+        // Only the local simulated counterpart movie is quieter.
+        // Outgoing movie sound remains on the high-level WebRTC path.
+        self.remotePlayer.volume=0.22f;
         self.remotePlayer.muted=NO;
         self.remotePlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
         AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.remotePlayer];
@@ -1352,6 +1358,12 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 extern "C" bool LeadVirtualMediaHighQualityEnabled(void) {
     const int mode=gMode.load(std::memory_order_relaxed);
     return mode==1 || mode==2;
+}
+
+// Silence the original peer voice while sending gallery media. Never
+// touch ordinary calls, and reset automatically when virtual playback ends.
+extern "C" bool LeadVirtualMediaMuteRemoteVoice(void) {
+    return gMode.load(std::memory_order_relaxed)==2;
 }
 
 // Direct 48k PCM injection at CoreAudio's outgoing mic boundary.

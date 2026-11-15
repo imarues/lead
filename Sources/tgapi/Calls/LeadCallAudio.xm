@@ -8,6 +8,7 @@
 extern "C" bool LeadVirtualMediaReplaceMic(AudioBufferList *buffers,
     const AudioStreamBasicDescription *format, UInt32 frames);
 extern "C" bool LeadVirtualMediaHighQualityEnabled(void);
+extern "C" bool LeadVirtualMediaMuteRemoteVoice(void);
 
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -130,22 +131,34 @@ static void capture(Ring &ring, const AudioBufferList *abl,
     ring.writeIndex.store(w+n, memory_order_release);
 }
 
-// Render notify is a second CoreAudio tap for clients that don't expose
-// their playback PCM in the wrapped SetRenderCallback path. Never replace
-// playback buffers; capturing a post-render copy cannot change call audio.
+// Only silence the WebRTC decoded speaker buffer, not the virtual microphone.
+// CoreAudio's callback thread must never allocate or acquire locks.
+static inline void leadSilenceRemotePlayback(AudioBufferList *data) {
+    if(!data || !LeadVirtualMediaMuteRemoteVoice())return;
+    for(UInt32 i=0;i<data->mNumberBuffers;i++) {
+        AudioBuffer &b=data->mBuffers[i];
+        if(b.mData && b.mDataByteSize)memset(b.mData,0,b.mDataByteSize);
+    }
+}
+// Render notify handles versions of Telegram that bypass SetRenderCallback.
+// The mute is active only while a user-selected gallery video is being sent.
 static OSStatus leadAudioRenderNotify(void *opaque, AudioUnitRenderActionFlags *flags,
        const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *data) {
-    if(!flags || !(*flags & kAudioUnitRenderAction_PostRender) ||
-       !gActive.load(memory_order_relaxed) || !data)return noErr;
+    if(!flags || !(*flags & kAudioUnitRenderAction_PostRender) || !data)
+        return noErr;
     AudioUnit unit=(AudioUnit)opaque;
-    gRenderNotifyHits.fetch_add(1,memory_order_relaxed);
-    if(bus==0 && gRemote.writeIndex.load(memory_order_acquire)==0) {
-        AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Input,0);
-        capture(gRemote,data,frames,f);
-    } else if(bus==1 && gMic.writeIndex.load(memory_order_acquire)==0) {
-        AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Output,1);
-        capture(gMic,data,frames,f);
+    if(gActive.load(memory_order_relaxed)) {
+        gRenderNotifyHits.fetch_add(1,memory_order_relaxed);
+        if(bus==0 && gRemote.writeIndex.load(memory_order_acquire)==0) {
+            AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Input,0);
+            capture(gRemote,data,frames,f);
+        } else if(bus==1 && gMic.writeIndex.load(memory_order_acquire)==0) {
+            AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Output,1);
+            capture(gMic,data,frames,f);
+        }
     }
+    // VoiceProcessingIO/RemoteIO: bus 0 is speaker output; bus 1 is mic input.
+    if(bus==0)leadSilenceRemotePlayback(data);
     return noErr;
 }
 static void leadEnsureAudioRenderNotify(AudioUnit unit) {
@@ -182,11 +195,15 @@ static OSStatus leadOutputCallback(void *opaque, AudioUnitRenderActionFlags *fla
     OutputCallback *binding = static_cast<OutputCallback *>(opaque);
     if (!binding || !binding->original) return -1;
     OSStatus status = binding->original(binding->context, flags, time, bus, frames, data);
-    if (status == noErr && gActive.load(memory_order_relaxed)) {
-        gOutputCallbackHits.fetch_add(1,memory_order_relaxed);
-        if (!binding->format.mSampleRate)
-            binding->format = formatFor(binding->unit,kAudioUnitScope_Input,0);
-        capture(gRemote,data,frames,binding->format);
+    if(status==noErr) {
+        if(gActive.load(memory_order_relaxed)) {
+            gOutputCallbackHits.fetch_add(1,memory_order_relaxed);
+            if(!binding->format.mSampleRate)
+                binding->format = formatFor(binding->unit,kAudioUnitScope_Input,0);
+            capture(gRemote,data,frames,binding->format);
+        }
+        // Silent speaker downlink even when recording is stopped.
+        leadSilenceRemotePlayback(data);
     }
     return status;
 }
