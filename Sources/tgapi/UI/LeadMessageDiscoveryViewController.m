@@ -5,6 +5,38 @@
 #import "LeadMenu.h"
 #import "Headers.h"
 
+#import <zlib.h>
+
+// Local gzip decoder: the gzip function in Hooks.xm is static to that file.
+// Limit expanded MTProto responses to avoid decompression bombs.
+static NSData *LeadDiscoveryInflate(const uint8_t *bytes, NSUInteger length) {
+    const NSUInteger maximum = 32 * 1024 * 1024;
+    if (!bytes || !length || length > maximum) return nil;
+    z_stream stream = {0};
+    stream.next_in = (Bytef *)bytes;
+    stream.avail_in = (uInt)length;
+    if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK) return nil;
+
+    NSUInteger capacity = MIN(maximum, MAX((NSUInteger)65536, length * 2));
+    NSMutableData *output = [NSMutableData dataWithLength:capacity];
+    int result = Z_OK;
+    while (result == Z_OK) {
+        if (stream.total_out >= output.length) {
+            if (output.length >= maximum) break;
+            output.length = MIN(maximum, output.length * 2);
+        }
+        stream.next_out = (Bytef *)output.mutableBytes + stream.total_out;
+        stream.avail_out = (uInt)(output.length - stream.total_out);
+        result = inflate(&stream, Z_NO_FLUSH);
+    }
+    NSUInteger actual = stream.total_out;
+    inflateEnd(&stream);
+    if (result != Z_STREAM_END || !actual) return nil;
+    output.length = actual;
+    return output;
+}
+
+
 extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSString *error));
 
 static NSData *LeadDiscoveryUnpack(NSData *data) {
@@ -23,7 +55,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         position = 8;
     }
     if (!length || length > data.length - position) return data;
-    NSData *inflated = decompressGzip(bytes + position, length);
+    NSData *inflated = LeadDiscoveryInflate(bytes + position, length);
     return inflated ?: data;
 }
 
