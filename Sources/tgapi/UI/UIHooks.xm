@@ -1645,9 +1645,91 @@ static BOOL LeadPresentCallChoice(NSString *label,BOOL allowShortVideo,
     return YES;
 }
 
+// The peer profile's "video call" button is NOT dispatched by UIControl.
+// Telegram creates PeerInfoHeaderButtonNode (a HighlightableButtonNode) and
+// registers the Swift @objc selector buttonPressed. That selector invokes
+// PeerInfoScreenNode.performButtonAction(.videoCall), which calls requestCall
+// directly. Hook the precise selector before the real call can start.
+//
+// Keep its original IMP so selecting "normal" / completing media selection
+// performs the same app action exactly once. Neither call recording nor the
+// generic camera/microphone controls are affected.
+static IMP gLeadOriginalPeerInfoButtonPressed=NULL;
+static IMP gLeadOriginalPeerInfoActionPressed=NULL;
+static BOOL gLeadPeerInfoHookInstalled=NO;
+static BOOL gLeadPeerInfoActionHookInstalled=NO;
+
+static void LeadInterceptPeerInfoPress(id node,SEL selector,IMP original) {
+    if(!original)return;
+    if(gLeadCallPromptBypass) {
+        ((void(*)(id,SEL))original)(node,selector);
+        return;
+    }
+    NSString *title=[node respondsToSelector:@selector(accessibilityLabel)]?
+        [(id)node accessibilityLabel]:nil;
+    // The original button's accessibility label is taken from the exact
+    // localized PeerInfo_ButtonVideoCall string (including "مكالمة مرئية").
+    // Avoid touching unrelated profile buttons like search or message.
+    void (^dial)(void)=^{
+        gLeadCallPromptBypass=YES;
+        @try {
+            ((void(*)(id,SEL))original)(node,selector);
+        } @finally {
+            gLeadCallPromptBypass=NO;
+        }
+    };
+    if(LeadPresentCallChoice(title,YES,dial)) {
+        NSLog(@"[Lead] intercepted Telegram profile video call button: %@",title);
+        return;
+    }
+    ((void(*)(id,SEL))original)(node,selector);
+}
+static void LeadPeerInfoHeaderButtonPressed(id node,SEL selector) {
+    LeadInterceptPeerInfoPress(node,selector,gLeadOriginalPeerInfoButtonPressed);
+}
+static void LeadPeerInfoHeaderActionPressed(id node,SEL selector) {
+    LeadInterceptPeerInfoPress(node,selector,gLeadOriginalPeerInfoActionPressed);
+}
+static BOOL LeadInstallOneProfileButtonHook(const char *swiftClassName,
+                                            IMP replacement,IMP *original) {
+    Class cls=objc_getClass(swiftClassName);
+    if(!cls)return NO;
+    SEL selector=NSSelectorFromString(@"buttonPressed");
+    Method method=class_getInstanceMethod(cls,selector);
+    if(!method) {
+        NSLog(@"[Lead] profile call button class has no buttonPressed: %s",swiftClassName);
+        return NO;
+    }
+    IMP current=method_getImplementation(method);
+    if(current==replacement)return YES;
+    // It is an instance method implemented by this exact Swift class, not
+    // an inherited generic UIKit sendAction method.
+    *original=method_setImplementation(method,replacement);
+    NSLog(@"[Lead] intercepted Swift profile button selector: %s",swiftClassName);
+    return *original!=NULL;
+}
+static void LeadInstallPeerInfoCallHooks(void) {
+    if(!gLeadPeerInfoHookInstalled) {
+        gLeadPeerInfoHookInstalled=LeadInstallOneProfileButtonHook(
+            "_TtC10TelegramUI24PeerInfoHeaderButtonNode",
+            (IMP)LeadPeerInfoHeaderButtonPressed,
+            &gLeadOriginalPeerInfoButtonPressed);
+    }
+    if(!gLeadPeerInfoActionHookInstalled) {
+        gLeadPeerInfoActionHookInstalled=LeadInstallOneProfileButtonHook(
+            "_TtC10TelegramUI30PeerInfoHeaderActionButtonNode",
+            (IMP)LeadPeerInfoHeaderActionPressed,
+            &gLeadOriginalPeerInfoActionPressed);
+    }
+}
+
 %group CallConfirmHooks
 %hook ASControlNode
 - (void)sendActionsForControlEvents:(NSUInteger)controlEvents withEvent:(UIEvent *)event {
+    // Covers Swift modules that only load when the profile screen is opened.
+    // The call node is already instantiated before it receives this event.
+    if(!gLeadPeerInfoHookInstalled || !gLeadPeerInfoActionHookInstalled)
+        LeadInstallPeerInfoCallHooks();
     if(gLeadCallPromptBypass){%orig(controlEvents,event);return;}
     if((controlEvents & UIControlEventTouchUpInside)!=0) {
         // Hold the original control throughout the picker so it cannot be
@@ -1833,7 +1915,15 @@ static void hook() {
             Class asControlNodeClass = objc_getClass("ASControlNode");
             if (asControlNodeClass) {
                 %init(CallConfirmHooks, ASControlNode = asControlNodeClass);
-                NSLog(@"[Lead] CallConfirmHooks initialized");
+                LeadInstallPeerInfoCallHooks();
+                // Some app forks lazily register their Swift profile screen
+                // after Theos installs the generic ASControlNode hooks.
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),
+                    dispatch_get_main_queue(),^{LeadInstallPeerInfoCallHooks();});
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(7*NSEC_PER_SEC)),
+                    dispatch_get_main_queue(),^{LeadInstallPeerInfoCallHooks();});
+                NSLog(@"[Lead] CallConfirmHooks initialized, profile=%d action=%d",
+                      gLeadPeerInfoHookInstalled,gLeadPeerInfoActionHookInstalled);
             }
         } @catch (NSException *e) {
             NSLog(@"[Lead] CallConfirmHooks init failed: %@", e);
