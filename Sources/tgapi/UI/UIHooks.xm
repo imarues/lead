@@ -56,6 +56,7 @@ static TGLocalization *getActiveTGLocalization(void) {
     return nil;
 }
 
+extern "C" void LeadInstallFileSendOptions(void);
 void showUI();
 static BOOL LeadIsUsableGhostTitle(NSString *title);
 static BOOL LeadIsCurrentUserPeer(long long peerId);
@@ -1843,6 +1844,7 @@ static void hook() {
     
     [LeadAntiRevokeUpdater shared];
     [LeadDeletionBanner install];
+    LeadInstallFileSendOptions();
     
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
         kDisableAllAds: @YES,
@@ -1850,6 +1852,7 @@ static void hook() {
         kDisableScreenshotNotification: @YES,
         kHideProxyPromo: @YES,
         FILE_PICKER_FIX_KEY: @YES,
+        kCustomFileSend: @YES,
         kSendAsVoice: @YES,
         kVideoToVoice: @NO,
         kVideoToNote: @NO,

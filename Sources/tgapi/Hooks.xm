@@ -284,7 +284,9 @@ static __weak id sLeadRequestService;
   case kMessagesSendMultiMedia:
   case kMessagesUploadMedia: {
     NSData *converted = [TLParser rewriteVoiceUpload:payload];
-    if (converted) self.fakePayload = converted;
+    NSData *intermediate = converted ?: payload;
+    NSData *custom = [TLParser rewriteCustomFileSend:intermediate];
+    if (custom || converted) self.fakePayload = custom ?: intermediate;
     break;
   }
   default:
