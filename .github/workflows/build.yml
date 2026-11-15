@@ -9,6 +9,7 @@ on:
     push:
         branches:
             - main
+            - feature/virtual-media-call-test
     workflow_dispatch:
 
 # Avoid accumulating duplicate builds of the same public main branch.
