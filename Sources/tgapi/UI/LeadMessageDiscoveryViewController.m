@@ -7,6 +7,26 @@
 
 extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSString *error));
 
+static NSData *LeadDiscoveryUnpack(NSData *data) {
+    if (!data || data.length < 8) return data;
+    int32_t constructor = 0;
+    [data getBytes:&constructor length:4];
+    if (constructor != (int32_t)0x3072cfa1) return data; // gzip_packed
+    const uint8_t *bytes = data.bytes;
+    NSUInteger position = 4;
+    NSUInteger length = 0;
+    if (bytes[position] < 254) {
+        length = bytes[position++];
+    } else if (bytes[position] == 254 && data.length >= 8) {
+        length = (NSUInteger)bytes[5] | ((NSUInteger)bytes[6] << 8) |
+                 ((NSUInteger)bytes[7] << 16);
+        position = 8;
+    }
+    if (!length || length > data.length - position) return data;
+    NSData *inflated = decompressGzip(bytes + position, length);
+    return inflated ?: data;
+}
+
 @interface LeadMessageDiscoveryBridge : NSObject
 + (NSData *)resolveRequestForUsername:(NSString *)username;
 + (NSDictionary *)parseResolvedUser:(NSData *)data;
@@ -200,7 +220,7 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
         __strong typeof(weakSelf) self = weakSelf;
         if (!self || token != self.generation) return;
         NSDictionary *target = (!error.length && data.length)
-            ? [LeadMessageDiscoveryBridge parseResolvedUser:data] : nil;
+            ? [LeadMessageDiscoveryBridge parseResolvedUser:LeadDiscoveryUnpack(data)] : nil;
         if (!target) {
             self.scanning = NO;
             [self displayStatus:@"تعذر العثور على الحساب."];
@@ -227,7 +247,7 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
     if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self || token != self.generation) return;
-        NSDictionary *response = error.length ? nil : [LeadMessageDiscoveryBridge parseCommonChats:data];
+        NSDictionary *response = (error.length || !data.length) ? nil : [LeadMessageDiscoveryBridge parseCommonChats:LeadDiscoveryUnpack(data)];
         if (!response) {
             // Private chat can still be searched if common chats are unavailable.
             [self displayStatus:error.length ? [NSString stringWithFormat:@"تعذر جلب بعض الكروبات: %@",error] :
@@ -328,8 +348,8 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
     if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self || token != self.generation) return;
-        NSDictionary *response = !error.length ?
-            [LeadMessageDiscoveryBridge parseSearchResult:data
+        NSDictionary *response = (!error.length && data.length) ?
+            [LeadMessageDiscoveryBridge parseSearchResult:LeadDiscoveryUnpack(data)
                  senderId:[self.target[@"userId"] longLongValue]
                  source:source category:self.categories.selectedSegmentIndex] : nil;
         // Stop rather than keep issuing requests when Telegram imposes a limit.
@@ -537,6 +557,7 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuse];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuse];
     cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.textLabel.textColor = UIColor.labelColor;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.detailTextLabel.numberOfLines = 2;
     cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
