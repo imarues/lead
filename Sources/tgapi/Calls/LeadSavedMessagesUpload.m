@@ -25,10 +25,14 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
 #define kLeadTLAttrAudio           ((int32_t)-1739392570) // documentAttributeAudio
 #define kLeadTLBoolTrue            ((int32_t)0x997275b5)  // boolTrue
 
-static const NSUInteger kLeadPartSize = 256 * 1024;       // 1024-multiple, divides 512 KB
+// Telegram's maximum supported individual upload part is 512 KiB; using full
+// parts halves per-part RPC overhead without changing/compressing file bytes.
+static const NSUInteger kLeadPartSize = 512 * 1024;
 static const unsigned long long kLeadBigFileThreshold = 10ull * 1024 * 1024;
-static const NSUInteger kLeadWindow = 3;                   // parts in flight
-static const int kLeadPartRetries = 2;
+// Keep enough requests in flight to cover connection round-trip time while
+// bounding upload buffer pressure to approximately four MiB per transfer.
+static const NSUInteger kLeadWindow = 8;
+static const int kLeadPartRetries = 3;
 
 #pragma mark - TL writers
 

@@ -41,6 +41,8 @@ static std::atomic<bool> gExternalAudio{false};
 static std::atomic<uint64_t> gMicInjectedFrames{0};
 static std::atomic<uint64_t> gExternalAudioBytes{0};
 static std::atomic<uint64_t> gFramesSubmitted{0};
+static std::atomic<bool> gFullCallMode{false};
+static std::atomic<double> gFullRemoteDuration{0};
 static bool gNativeHooksReady=false;
 static id (*gNativeInit)(id,SEL,NSString *,bool)=nullptr;
 typedef void (^LeadStateBlock)(int32_t,int32_t,int32_t,int32_t,int32_t,float);
@@ -79,6 +81,14 @@ extern "C" id objc_retain(id);
 @property(nonatomic,weak) id incomingNativeContext;
 @property(nonatomic,weak) UIView *privateCallView;
 @property(nonatomic,strong) NSURL *selectedURL;
+@property(nonatomic,strong) NSURL *remoteSelectedURL;
+@property(nonatomic,assign) BOOL fullCallRequested;
+@property(nonatomic,strong) AVPlayer *remotePlayer;
+@property(nonatomic,strong) AVPlayerLayer *remoteLayer;
+@property(nonatomic,strong) UIView *remoteVideoView;
+@property(nonatomic,strong) AVPlayerItemVideoOutput *remotePixelOutput;
+@property(nonatomic,strong) CIContext *remoteRecordingContext;
+@property(nonatomic,strong) UIImage *remoteRecordingFrame;
 @property(nonatomic,assign) uint64_t nextAudioSample;
 @property(nonatomic,strong) dispatch_source_t playbackTimer;
 @property(nonatomic,assign) BOOL incomingMenuPresented;
@@ -99,6 +109,10 @@ extern "C" id objc_retain(id);
 @property(nonatomic,assign) BOOL localPreviewHasSavedCenter;
 + (instancetype)shared;
 - (void)preparePicker:(void(^)(BOOL))completion;
+- (void)preparePicker:(void(^)(BOOL))completion fullCall:(BOOL)fullCall;
+- (void)startRemotePreview;
+- (void)removeRemotePreview;
+- (void)drawRemotePreviewIntoRecording:(UIView *)root;
 - (void)resetAll;
 - (void)nativeCapturerReady:(id)capturer;
 - (void)nativeContextReady:(id)context;
@@ -242,13 +256,18 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     gExternalAudioBytes.store(0);
     gMicInjectedFrames.store(0);
     gFramesSubmitted.store(0);
+    gFullCallMode.store(false);
+    gFullRemoteDuration.store(0);
     std::atomic_store(&gPCM,std::shared_ptr<AudioClip>());
     [self stopTimer];
     [self removeLocalPreview];
+    [self removeRemotePreview];
     @synchronized(self) {
         self.clip=nil;self.externalCapturer=nil;self.nativeCallContext=nil;self.nextAudioSample=0;
         if(self.selectedURL)[[NSFileManager defaultManager] removeItemAtURL:self.selectedURL error:nil];
-        self.selectedURL=nil;
+        if(self.remoteSelectedURL)[[NSFileManager defaultManager] removeItemAtURL:self.remoteSelectedURL error:nil];
+        self.selectedURL=nil;self.remoteSelectedURL=nil;
+        self.fullCallRequested=NO;
     }
 }
 - (void)finishPicker:(BOOL)success {
@@ -276,8 +295,12 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     });
 }
 - (void)preparePicker:(void(^)(BOOL))completion {
+    [self preparePicker:completion fullCall:NO];
+}
+- (void)preparePicker:(void(^)(BOOL))completion fullCall:(BOOL)fullCall {
     BOOL incoming=gIncomingChoice.load();
     [self resetAll];
+    self.fullCallRequested=fullCall;
     // Keep the real mic suppressed while Photos is open on a live incoming call.
     if(incoming)gMode.store(4);
     self.pendingCall=[completion copy];
@@ -289,7 +312,9 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     UIViewController *host=[self host];
     if(!host){[self finishPicker:NO];return;}
     PHPickerConfiguration *conf=[[PHPickerConfiguration alloc] init];
-    conf.filter=[PHPickerFilter videosFilter];conf.selectionLimit=1;
+    conf.filter=[PHPickerFilter videosFilter];
+    conf.selectionLimit=fullCall?2:1;
+    if(@available(iOS 15.0,*)) conf.selection=PHPickerConfigurationSelectionOrdered;
     // Prefer the untouched original video asset instead of a Photos export.
     conf.preferredAssetRepresentationMode=PHPickerConfigurationAssetRepresentationModeCurrent;
     PHPickerViewController *picker=[[PHPickerViewController alloc] initWithConfiguration:conf];
@@ -298,27 +323,62 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 }
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
-    if(!results.count){[self finishPicker:NO];return;}
-    NSItemProvider *item=results.firstObject.itemProvider;
-    if(![item hasItemConformingToTypeIdentifier:@"public.movie"]) {
-        [self showError:@"اختَر ملف فيديو من المعرض."];
+    const BOOL full=self.fullCallRequested;
+    if(results.count!=(full?2:1)) {
+        if(full && results.count) [self showError:@"بوضع اتصال كامل لازم تختار مقطعين بالترتيب: الأول من عندك والثاني بدل كاميرا المقابل."];
         [self finishPicker:NO];return;
     }
-    [item loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url,NSError *error) {
+    NSItemProvider *outgoing=results.firstObject.itemProvider;
+    NSItemProvider *remote=full?results[1].itemProvider:nil;
+    if(![outgoing hasItemConformingToTypeIdentifier:@"public.movie"] ||
+       (full && ![remote hasItemConformingToTypeIdentifier:@"public.movie"])) {
+        [self showError:@"اختَر مقطعين فيديو صحيحين من المعرض."];
+        [self finishPicker:NO];return;
+    }
+    // NSItemProvider's temporary file must be copied before returning from
+    // its callback. The ordered second item is never sent to the peer.
+    [outgoing loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url,NSError *error) {
         if(error || !url) {
-            [self showError:error.localizedDescription?:@"فشل قراءة الفيديو."];
+            [self showError:error.localizedDescription?:@"فشل قراءة الفيديو الأول."];
             [self finishPicker:NO];return;
         }
-        NSURL *copy=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
-            [NSString stringWithFormat:@"lead-call-%@.mov",NSUUID.UUID.UUIDString]]];
+        NSURL *first=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"lead-outgoing-%@.mov",NSUUID.UUID.UUIDString]]];
         NSError *copyError=nil;
-        [[NSFileManager defaultManager] copyItemAtURL:url toURL:copy error:&copyError];
+        [[NSFileManager defaultManager] copyItemAtURL:url toURL:first error:&copyError];
         if(copyError) {
             [self showError:copyError.localizedDescription];
             [self finishPicker:NO];return;
         }
-        self.selectedURL=copy;
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{[self decodeMovie:copy];});
+        self.selectedURL=first;
+        if(!full) {
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{[self decodeMovie:first];});
+            return;
+        }
+        [remote loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *remoteURL,NSError *remoteError) {
+            if(remoteError || !remoteURL) {
+                [self showError:remoteError.localizedDescription?:@"فشل قراءة الفيديو الثاني."];
+                [self finishPicker:NO];return;
+            }
+            NSURL *second=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
+                 [NSString stringWithFormat:@"lead-remote-%@.mov",NSUUID.UUID.UUIDString]]];
+            NSError *e=nil;
+            [[NSFileManager defaultManager] copyItemAtURL:remoteURL toURL:second error:&e];
+            if(e){[self showError:e.localizedDescription];[self finishPicker:NO];return;}
+            AVURLAsset *asset=[AVURLAsset URLAssetWithURL:second options:nil];
+            const double duration=CMTimeGetSeconds(asset.duration);
+            if(![asset tracksWithMediaType:AVMediaTypeVideo].count ||
+               ![asset tracksWithMediaType:AVMediaTypeAudio].count ||
+               !std::isfinite(duration) || duration<=0 || duration>600) {
+                [[NSFileManager defaultManager] removeItemAtURL:second error:nil];
+                [self showError:@"الفيديو الثاني لازم يحتوي على صوت وصورة، ومدته أقل من 10 دقائق."];
+                [self finishPicker:NO];return;
+            }
+            self.remoteSelectedURL=second;
+            gFullRemoteDuration.store(duration,std::memory_order_release);
+            gFullCallMode.store(true,std::memory_order_release);
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{[self decodeMovie:first];});
+        }];
     }];
 }
 - (void)decodeMovie:(NSURL *)url {
@@ -522,7 +582,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         step,(uint64_t)(0.002*NSEC_PER_SEC));
     dispatch_source_set_event_handler(self.playbackTimer,^{[self playbackTick];});
     dispatch_resume(self.playbackTimer);
-    dispatch_async(dispatch_get_main_queue(),^{[self startLocalPreview];});
+    dispatch_async(dispatch_get_main_queue(),^{
+        [self startLocalPreview];
+        if(gFullCallMode.load()) [self startRemotePreview];
+    });
 }
 - (void)playbackTick {
     if(gMode.load()!=2)return;
@@ -530,10 +593,17 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     @synchronized(self) {video=self.clip;capturer=self.externalCapturer;}
     if(!video || !capturer)return;
     double elapsed=CACurrentMediaTime()-gStartClock.load();
-    if(elapsed>=video.duration) {
+    const double other=gFullCallMode.load(std::memory_order_acquire)?
+        gFullRemoteDuration.load(std::memory_order_acquire):0;
+    // End the actual call at whichever of the two chosen movie lengths
+    // is shorter; this is independent of view minimization.
+    if(elapsed>=video.duration || (other>0 && elapsed>=other)) {
         gMode.store(3);
         [self stopTimer];
-        dispatch_async(dispatch_get_main_queue(),^{[self removeLocalPreview];});
+        dispatch_async(dispatch_get_main_queue(),^{
+            [self removeLocalPreview];
+            [self removeRemotePreview];
+        });
         NSLog(@"[LeadVirtualMedia] EOF: video=%llu, microphone-replaced=%llu, external bytes=%llu",
              (unsigned long long)gFramesSubmitted.load(),
              (unsigned long long)gMicInjectedFrames.load(),
@@ -573,13 +643,17 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 - (void)rememberCallView:(UIView *)view {
     if(view && [NSStringFromClass(view.class) containsString:@"PrivateCallScreen"]) {
         self.privateCallView=view;
-        if(gMode.load()==2)[self startLocalPreview];
+        if(gMode.load()==2) {
+            [self startLocalPreview];
+            if(gFullCallMode.load()) [self startRemotePreview];
+        }
     }
 }
 - (void)forgetCallView:(UIView *)view {
     if(self.privateCallView==view) {
         self.privateCallView=nil;
         [self.localPreviewView removeFromSuperview];
+        [self.remoteVideoView removeFromSuperview];
     }
 }
 - (UIView *)findButtonsGroup:(UIView *)root {
@@ -998,6 +1072,139 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 }
 
 
+// Full-call mode has a second local video, rendered where the remote camera
+// normally appears. It never replaces/transmits the peer's actual incoming
+// video; the outward Telegram stream remains the first selected movie.
+- (void)removeRemotePreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self removeRemotePreview];});
+        return;
+    }
+    [self.remotePlayer pause];
+    [self.remoteVideoView removeFromSuperview];
+    self.remotePlayer=nil;
+    self.remoteLayer=nil;
+    self.remoteVideoView=nil;
+    self.remotePixelOutput=nil;
+    self.remoteRecordingFrame=nil;
+    self.remoteRecordingContext=nil;
+}
+- (void)startRemotePreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self startRemotePreview];});
+        return;
+    }
+    if(gMode.load()!=2 || !gFullCallMode.load() || !self.remoteSelectedURL)return;
+    UIView *host=self.privateCallView;
+    if(!host || !host.window || CGRectIsEmpty(host.bounds))return;
+    if(!self.remotePlayer) {
+        AVPlayerItem *item=[AVPlayerItem playerItemWithURL:self.remoteSelectedURL];
+        NSDictionary *attrs=@{
+            (id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferIOSurfacePropertiesKey:@{}
+        };
+        self.remotePixelOutput=[[AVPlayerItemVideoOutput alloc]
+            initWithPixelBufferAttributes:attrs];
+        [item addOutput:self.remotePixelOutput];
+        self.remotePlayer=[AVPlayer playerWithPlayerItem:item];
+        self.remotePlayer.volume=1.0f;
+        self.remotePlayer.muted=NO; // Plays the selected second movie locally.
+        self.remotePlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
+        AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.remotePlayer];
+        layer.videoGravity=AVLayerVideoGravityResizeAspectFill;
+        self.remoteLayer=layer;
+        UIView *overlay=[[UIView alloc] initWithFrame:host.bounds];
+        overlay.userInteractionEnabled=NO; // Do not block normal call controls.
+        overlay.backgroundColor=UIColor.blackColor;
+        overlay.clipsToBounds=YES;
+        overlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|
+                                  UIViewAutoresizingFlexibleHeight;
+        [overlay.layer addSublayer:layer];
+        self.remoteVideoView=overlay;
+        // Both videos use the same monotonic call start; seek to the
+        // current position rather than starting the second at picker time.
+        const double elapsed=MAX(0.0,CACurrentMediaTime()-gStartClock.load());
+        [self.remotePlayer seekToTime:CMTimeMakeWithSeconds(elapsed,600)
+               toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
+               completionHandler:^(BOOL ok){
+            if(ok && gMode.load()==2 && gFullCallMode.load()) {
+                dispatch_async(dispatch_get_main_queue(),^{
+                    if(gMode.load()==2 && self.remotePlayer)
+                        [self.remotePlayer play];
+                });
+            }
+        }];
+    }
+    self.remoteVideoView.frame=host.bounds;
+    self.remoteLayer.frame=self.remoteVideoView.bounds;
+    if(self.remoteVideoView.superview!=host) {
+        [self.remoteVideoView removeFromSuperview];
+        // Telegram places its video underneath call controls. Inserting
+        // near the bottom also avoids covering new overlay buttons.
+        NSUInteger index=MIN((NSUInteger)1,host.subviews.count);
+        [host insertSubview:self.remoteVideoView atIndex:index];
+        UIView *group=[self findButtonsGroup:host];
+        if(group && group.superview==host) [host bringSubviewToFront:group];
+        if(self.localPreviewView.superview==host)
+            [host bringSubviewToFront:self.localPreviewView];
+    }
+}
+- (void)drawRemotePreviewIntoRecording:(UIView *)root {
+    // AVPlayerLayer is hardware-backed: UIKit screenshot alone captures a
+    // blank video view. Draw the actual decoded pixels in the recording.
+    if(!NSThread.isMainThread || gMode.load()!=2 || !gFullCallMode.load() ||
+       !UIGraphicsGetCurrentContext() || !root)return;
+    UIView *view=self.remoteVideoView;
+    AVPlayerItemVideoOutput *output=self.remotePixelOutput;
+    if(!view || !view.window || !output || !self.remotePlayer ||
+       ![view isDescendantOfView:root])return;
+    CGRect rect=[view convertRect:view.bounds toView:root];
+    rect=CGRectIntersection(rect,root.bounds);
+    if(CGRectIsNull(rect) || rect.size.width<8 || rect.size.height<8)return;
+    CVPixelBufferRef buffer=[output copyPixelBufferForItemTime:self.remotePlayer.currentTime
+                                      itemTimeForDisplay:NULL];
+    if(buffer) {
+        if(!self.remoteRecordingContext)
+            self.remoteRecordingContext=[CIContext contextWithOptions:
+                @{kCIContextUseSoftwareRenderer:@NO}];
+        CIImage *image=[CIImage imageWithCVPixelBuffer:buffer];
+        CGFloat size=MAX(image.extent.size.width,image.extent.size.height);
+        CGFloat factor=MIN(1.0,1920.0/MAX(1.0,size));
+        if(factor<1.0)image=[image imageByApplyingTransform:
+            CGAffineTransformMakeScale(factor,factor)];
+        CGImageRef picture=[self.remoteRecordingContext
+            createCGImage:image fromRect:image.extent];
+        if(picture) {
+            self.remoteRecordingFrame=[UIImage imageWithCGImage:picture];
+            CGImageRelease(picture);
+        }
+        CVPixelBufferRelease(buffer);
+    }
+    UIImage *frame=self.remoteRecordingFrame;
+    if(!frame)return;
+    CGSize native=frame.size;
+    CGFloat scale=MAX(rect.size.width/MAX(native.width,1),
+                      rect.size.height/MAX(native.height,1));
+    CGRect full=CGRectMake(CGRectGetMidX(rect)-native.width*scale/2.0,
+                           CGRectGetMidY(rect)-native.height*scale/2.0,
+                           native.width*scale,native.height*scale);
+    CGContextRef context=UIGraphicsGetCurrentContext();
+    CGContextSaveGState(context);
+    CGContextClipToRect(context,rect);
+    [frame drawInRect:full];
+    CGContextRestoreGState(context);
+    // Redraw the call's physical control buttons on top of the simulated
+    // remote background where Telegram's layered controls are available.
+    UIView *group=[self findButtonsGroup:root];
+    if(group && group.window && [group isDescendantOfView:root]) {
+        CGRect controls=[group convertRect:group.bounds toView:root];
+        CGContextSaveGState(context);
+        CGContextTranslateCTM(context,controls.origin.x,controls.origin.y);
+        [group.layer renderInContext:context];
+        CGContextRestoreGState(context);
+    }
+}
+
 - (void)drawGalleryPreviewIntoRecording:(UIView *)root {
     // Called on the main-thread CADisplayLink while UIGraphics holds the
     // recorder's pixel-buffer context (already scaled to the capture root).
@@ -1137,10 +1344,15 @@ extern "C" void LeadVirtualMediaInstallEarlyHooks(void) {
 extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL)) {
     dispatch_async(dispatch_get_main_queue(),^{
         LeadVirtualMedia *m=[LeadVirtualMedia shared];
-        // An outgoing gallery call must never inherit the previous incoming
-        // call's video selector or finished/muted microphone state.
         [m normalIncomingAnswer];
-        [m preparePicker:completion];
+        [m preparePicker:completion fullCall:NO];
+    });
+}
+extern "C" void LeadVirtualMediaPrepareFullVideoCall(void (^completion)(BOOL)) {
+    dispatch_async(dispatch_get_main_queue(),^{
+        LeadVirtualMedia *m=[LeadVirtualMedia shared];
+        [m normalIncomingAnswer];
+        [m preparePicker:completion fullCall:YES];
     });
 }
 extern "C" void LeadVirtualMediaReset(void) {
@@ -1240,5 +1452,7 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
 // screen capture would otherwise render as blank. Must be called while the
 // recording CG bitmap context is current on the main thread.
 extern "C" void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot) {
-    [[LeadVirtualMedia shared] drawGalleryPreviewIntoRecording:captureRoot];
+    LeadVirtualMedia *m=[LeadVirtualMedia shared];
+    [m drawRemotePreviewIntoRecording:captureRoot];
+    [m drawGalleryPreviewIntoRecording:captureRoot];
 }

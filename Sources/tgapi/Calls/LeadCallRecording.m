@@ -7,6 +7,47 @@
 // video pixels. Explicitly composite its decoded frame when recording.
 extern void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot);
 
+// The iOS "return to VoidGram" call indicator is composited near the top
+// centre by the host. Remove only that small status-pill area from exported
+// recording frames, not from the visible app or the entire status bar.
+// Smoothly interpolate from its immediately adjacent pixels row-by-row, with
+// soft edges; this avoids a black rectangle and leaves the call content intact.
+static void LeadMaskCallStatusPill(void *buffer,size_t stride,size_t width,size_t height) {
+    if(!buffer || width<280 || height<500 || stride<width*4)return;
+    const size_t x0=(size_t)(width*0.305),x1=(size_t)(width*0.695);
+    const size_t y0=(size_t)(height*0.016),y1=(size_t)(height*0.066);
+    if(x0<8 || x1+8>=width || y1>=height)return;
+    uint8_t *pixels=(uint8_t *)buffer;
+    // Never paint over arbitrary call content. The VoidGram status pill is
+    // very dark relative to the visible video immediately to its sides.
+    const size_t midY=(y0+y1)/2;
+    const uint8_t *probe=pixels+midY*stride;
+    auto brightness=[&](size_t px)->int {
+        const uint8_t *c=probe+px*4;
+        return ((int)c[0]+(int)c[1]+(int)c[2])/3;
+    };
+    const int central=brightness((x0+x1)/2);
+    const int surroundings=(brightness(x0-5)+brightness(x1+5))/2;
+    if(central>90 || surroundings-central<22)return;
+    const size_t feather=MIN((size_t)12,MAX((size_t)2,(x1-x0)/14));
+    for(size_t y=y0;y<y1;y++) {
+        uint8_t *row=pixels+y*stride;
+        const uint8_t *left=row+(x0-3)*4;
+        const uint8_t *right=row+(x1+3)*4;
+        for(size_t x=x0;x<=x1;x++) {
+            float ratio=(float)(x-x0)/(float)MAX((size_t)1,x1-x0);
+            float edge=MIN(1.0f,(float)MIN(x-x0,x1-x)/(float)feather);
+            // Keep exact boundary pixels; otherwise copy surrounding scene
+            // colours instead of preserving the recording's app-status badge.
+            for(size_t c=0;c<3;c++) {
+                float desired=(1.0f-ratio)*left[c]+ratio*right[c];
+                uint8_t *p=row+x*4+c;
+                *p=(uint8_t)lrintf(*p*(1.0f-edge)+desired*edge);
+            }
+        }
+    }
+}
+
 NSString *const LeadCallRecordingEnabledKey=@"LeadCallRecordingEnabled";
 NSString *const LeadCallRecordingChangedNotification=@"LeadCallRecordingChanged";
 
@@ -199,6 +240,8 @@ static NSError *LeadRecorderError(NSString *detail) {
     LeadVirtualMediaDrawRecordingPreview(view);
     UIGraphicsPopContext();
     CGContextRelease(ctx);
+    LeadMaskCallStatusPill(buffer,stride,(size_t)self.size.width,
+                           (size_t)self.size.height);
     NSTimeInterval elapsed=MAX(0,CACurrentMediaTime()-self.startTime);
     CMTime presentationTime=CMTimeMakeWithSeconds(elapsed,600);
     if([self.adaptor appendPixelBuffer:pixel withPresentationTime:presentationTime]) {

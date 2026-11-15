@@ -1530,6 +1530,7 @@ static void LeadInstallProfileItems(UIViewController *controller) {
 
 // Video call source is chosen before Telegram sends the outgoing call.
 extern "C" void LeadVirtualMediaPrepareVideoCall(void (^completion)(BOOL));
+extern "C" void LeadVirtualMediaPrepareFullVideoCall(void (^completion)(BOOL));
 extern "C" void LeadVirtualMediaReset(void);
 static BOOL gLeadCallPromptOpen=NO;
 static __thread BOOL gLeadCallPromptBypass=NO;
@@ -1591,6 +1592,17 @@ static __thread BOOL gLeadCallPromptBypass=NO;
                         [select addAction:[UIAlertAction actionWithTitle:@"رفع فيديو من المعرض"
                             style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
                                 LeadVirtualMediaPrepareVideoCall(^(BOOL ready){
+                                    gLeadCallPromptOpen=NO;
+                                    if(!ready)return;
+                                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                        (int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                                        dial();
+                                    });
+                                });
+                            }]];
+                        [select addAction:[UIAlertAction actionWithTitle:@"اتصال كامل — مقطعين"
+                            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a){
+                                LeadVirtualMediaPrepareFullVideoCall(^(BOOL ready){
                                     gLeadCallPromptOpen=NO;
                                     if(!ready)return;
                                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
