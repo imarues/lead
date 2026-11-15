@@ -1180,13 +1180,12 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         // near the bottom also avoids covering new overlay buttons.
         [host addSubview:self.remoteVideoView];
         UIView *group=[self findButtonsGroup:host];
-        // Elevate the button group's top-level ancestor, not just the nested
-        // group: a child's zPosition cannot escape a lower parent layer.
-        UIView *controlRoot=group;
-        while(controlRoot && controlRoot.superview &&
-              controlRoot.superview!=host)controlRoot=controlRoot.superview;
-        if(controlRoot && controlRoot.superview==host)
-            controlRoot.layer.zPosition=10000;
+        // Do NOT raise an arbitrary ancestor of the button group. Telegram
+        // may place both buttons and its REAL remote video in that ancestor;
+        // elevating it would put the real camera over this replacement again.
+        // The media canvas intentionally ends above the button row.
+        if(group && group.superview==host)
+            group.layer.zPosition=10000;
         if(self.localPreviewView.superview==host)
             self.localPreviewView.layer.zPosition=90000;
     }
