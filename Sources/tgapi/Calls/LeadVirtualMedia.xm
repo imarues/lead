@@ -499,11 +499,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     video.sourceHeight=composed?outH:(NSInteger)fabs(v.naturalSize.height);
     video.sourceFPS=outRate;
     video.lastSubmittedPTS=-1.0;
-    // In FULL two-movie mode, the SECOND movie (locally simulated peer)
-    // must be the loud foreground sound, while the FIRST movie sent over
-    // WebRTC is lower. Preserve the original high level in one-movie mode.
-    // Normalize offline with a bounded soft knee before applying the relative
-    // outgoing level to avoid clipping or integer wrap.
+    // The FIRST movie is transmitted to the other participant at high,
+    // safely compressed/normalized WebRTC loudness. Its LOCAL preview has a
+    // separate, quiet AVPlayer volume; do not attenuate this outgoing PCM.
+    // The SECOND simulated-peer movie is heard loudly only on this device.
     int32_t peak=0;
     for(const int16_t sample:clipSound->samples)
         peak=std::max(peak,(int32_t)std::abs((int)sample));
@@ -512,12 +511,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         gain=std::min(6.0,(0.94*32767.0)/(double)peak);
         const double knee=2.25;
         const double scale=0.965/std::tanh(knee);
-        const double outgoingLevel=gFullCallMode.load(std::memory_order_relaxed)
-            ? 0.32 : 1.0;
         for(int16_t &sample:clipSound->samples) {
             const double normalized=std::max(-1.0,std::min(1.0,
                 ((double)sample/32768.0)*gain));
-            const double boosted=outgoingLevel*scale*std::tanh(knee*normalized);
+            const double boosted=scale*std::tanh(knee*normalized);
             sample=(int16_t)std::lrint(boosted*32767.0);
         }
     }
@@ -1071,7 +1068,13 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             initWithPixelBufferAttributes:pixelAttributes];
         [item addOutput:self.localPreviewPixelOutput];
         self.localPreviewPlayer=[AVPlayer playerWithPlayerItem:item];
-        self.localPreviewPlayer.muted=YES;
+        // LOCAL playback ONLY: first preview is low volume when two movies
+        // are selected. Telegram sends the original decoded PCM independently
+        // through the virtual microphone at the FULL outgoing level.
+        // In one-movie mode keep local playback muted to prevent doubled sound.
+        self.localPreviewPlayer.volume=gFullCallMode.load(std::memory_order_relaxed)
+            ? 0.12f : 0.0f;
+        self.localPreviewPlayer.muted=!gFullCallMode.load(std::memory_order_relaxed);
         self.localPreviewPlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
         AVPlayerLayer *layer=[AVPlayerLayer playerLayerWithPlayer:self.localPreviewPlayer];
         layer.videoGravity=AVLayerVideoGravityResizeAspectFill;
@@ -1096,8 +1099,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         preview.layer.zPosition=90000;
         [preview.layer addSublayer:layer];
         self.localPreviewView=preview;
-        // The gallery file is shown locally ONLY as preview; its audio is
-        // muted here because the uplink already injects the original PCM.
+        // Playback and uplink volumes are independent: this little preview
+        // is quiet locally, but its WebRTC track is sent at full loudness.
         double elapsed=std::max(0.0,CACurrentMediaTime()-gStartClock.load());
         CMTime time=CMTimeMakeWithSeconds(elapsed,600);
         [self.localPreviewPlayer seekToTime:time toleranceBefore:kCMTimeZero

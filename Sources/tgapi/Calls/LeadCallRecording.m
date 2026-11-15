@@ -345,7 +345,9 @@ static NSError *LeadRecorderError(NSString *detail) {
     if(err){if(completion)completion(nil,err);return;}
     NSMutableArray<AVMutableAudioMixInputParameters *> *audioGains=[NSMutableArray array];
     // Full virtual call: archive the two chosen movie tracks only.
-    // FIRST (sent through WebRTC) is quiet; SECOND (simulated peer) is loud.
+    // In the LOCAL archive, FIRST (quiet local preview) is quiet and
+    // SECOND (simulated peer) is loud. The FIRST movie is still transmitted
+    // to the other participant at a separate, high WebRTC level.
     // Never mix the real peer's microphone into the simulated recording.
     if(self.fullCallSources.count==2) {
         CMTime begin=CMTimeMakeWithSeconds(MAX(0,self.fullCallOffset),600);
@@ -364,7 +366,7 @@ static NSError *LeadRecorderError(NSString *detail) {
             }
             AVMutableAudioMixInputParameters *gain=[AVMutableAudioMixInputParameters
                 audioMixInputParametersWithTrack:out];
-            [gain setVolume:(i==0?0.32f:1.0f) atTime:kCMTimeZero];
+            [gain setVolume:(i==0?0.12f:1.0f) atTime:kCMTimeZero];
             [audioGains addObject:gain];
         }
     } else {
