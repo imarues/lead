@@ -1,11 +1,9 @@
-// Direct "send to Saved Messages" for Lead call recordings.
+// Nonblocking MTProto file sending for Lead call recordings.
 //
-// Telegram's own ShareController is Swift-only and its recipient picker can't be
-// opened from here, so the recording is sent the way Telegram itself sends a
-// file: upload.saveFilePart / upload.saveBigFilePart for the bytes, then one
-// messages.sendMedia to inputPeerSelf (= Saved Messages). Requests go through the
-// connection Telegram already has (LeadSendRawRequest), so no login or API id is
-// needed and the account is the one currently in use.
+// The destination is explicitly selected by the user in the in-app chat list.
+// File parts and messages.sendMedia use Telegram's existing active connection,
+// never a separate account login. A shared manager retains transfers while
+// the picker is dismissed and the user navigates other chats.
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -64,6 +62,7 @@ static void TLString(NSMutableData *d, NSString *s) {
 
 @interface LeadSavedMessagesUpload ()
 @property(nonatomic, strong) NSFileHandle *handle;
+@property(nonatomic, copy) NSData *targetPeer;
 @property(nonatomic, copy) NSString *fileName;
 @property(nonatomic, copy) NSString *mimeType;
 @property(nonatomic, strong) NSData *attributes;   // vector body: count + items
@@ -80,15 +79,31 @@ static void TLString(NSMutableData *d, NSString *s) {
 @property(nonatomic, copy) void (^completion)(NSString *);
 @end
 
+// Required: keep an upload alive even when there is no modal holding it.
+static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
 @implementation LeadSavedMessagesUpload
 
 + (instancetype)startWithFile:(NSURL *)file
                      progress:(void (^)(double))progress
                    completion:(void (^)(NSString *))completion {
+    int32_t selfConstructor=kLeadTLInputPeerSelf;
+    NSData *selfPeer=[NSData dataWithBytes:&selfConstructor length:4];
+    return [self startWithFile:file peerData:selfPeer progress:progress completion:completion];
+}
+
++ (instancetype)startWithFile:(NSURL *)file
+                    peerData:(NSData *)peerData
+                    progress:(void (^)(double))progress
+                  completion:(void (^)(NSString *))completion {
     LeadSavedMessagesUpload *upload = [LeadSavedMessagesUpload new];
+    upload.targetPeer = [peerData copy];
     upload.progress = progress;
     upload.completion = completion;
-    dispatch_async(dispatch_get_main_queue(), ^{ [upload begin:file]; });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!gActiveLeadUploads) gActiveLeadUploads=[NSMutableSet new];
+        [gActiveLeadUploads addObject:upload];
+        [upload begin:file];
+    });
     return upload;
 }
 
@@ -106,6 +121,7 @@ static void TLString(NSMutableData *d, NSString *s) {
     self.completion = nil;
     self.progress = nil;
     if (done) done(error);
+    [gActiveLeadUploads removeObject:self];
 }
 
 - (void)describeFile:(NSURL *)file {
@@ -240,7 +256,12 @@ static void TLString(NSMutableData *d, NSString *s) {
     NSMutableData *p = [NSMutableData data];
     TLInt32(p, kLeadTLSendMedia);
     TLInt32(p, 0);                          // flags: no reply, silent, schedule...
-    TLInt32(p, kLeadTLInputPeerSelf);       // Saved Messages
+    if(self.targetPeer.length < 4 || self.targetPeer.length > 64 ||
+       (self.targetPeer.length % 4) != 0) {
+        [self finishWithError:@"وجهة الإرسال غير صالحة."];
+        return;
+    }
+    [p appendData:self.targetPeer];           // chosen InputPeer
     TLInt32(p, kLeadTLUploadedDocument);
     TLInt32(p, 0);                          // flags: no thumb / stickers / ttl
     if (self.big) {

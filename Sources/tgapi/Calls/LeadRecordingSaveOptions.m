@@ -1,12 +1,10 @@
 // Lead manual call recording: name and save destination prompt after STOP.
-// iOS Photos saving is real. "Saved Messages" uploads the file straight into the
-// account's own Saved Messages over Telegram's MTProto connection (no iOS share
-// sheet, no chat picker). Success is reported only once the server accepted the
-// message.
+// iOS Photos saving is real. The Telegram destination opens an in-app chat
+// picker. Upload then continues without a blocking progress dialog.
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
-#import "LeadSavedMessagesUpload.h"
+extern void LeadPresentRecordingChatPicker(NSURL *file,UIViewController *presenter);
 
 typedef NS_ENUM(NSInteger, LeadRecordingSaveTarget) {
     LeadRecordingSaveTargetArchive=0,
@@ -94,7 +92,7 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     }
     NSString *extension=file.pathExtension.uppercaseString;
     NSString *message=[NSString stringWithFormat:
-        @"اكتب اسم التسجيل فقط، وصيغة %@ تنضاف تلقائياً.\nاختيار الرسائل المحفوظة يرفع التسجيل مباشرة إلى رسائلك المحفوظة بحساب Telegram الحالي.",extension];
+        @"اكتب اسم التسجيل فقط، وصيغة %@ تنضاف تلقائياً.\nاختيار الرسائل المحفوظة يفتح قائمة محادثات حسابك حتى تختار وين ترسل التسجيل.",extension];
     if(warning)message=[message stringByAppendingFormat:@"\nملاحظة: %@",warning.localizedDescription];
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"اسم تسجيل المكالمة"
         message:message preferredStyle:UIAlertControllerStyleAlert];
@@ -243,45 +241,9 @@ static NSString *LeadRecordingSafeBaseName(NSString *raw,NSString *fallback) {
     }
 }
 - (void)openSavedMessagesShare {
-    // Direct upload to Saved Messages. The local archive copy is always kept.
-    NSURL *file=self.archiveFile;
-    UIViewController *host=[self presenter];
-    if(!host) {
-        NSLog(@"[LeadCallSave] no presenter, recording stays archived: %@",file.path);
-        return;
-    }
-    UIAlertController *progress=[UIAlertController
-        alertControllerWithTitle:@"رفع إلى الرسائل المحفوظة"
-        message:@"0%" preferredStyle:UIAlertControllerStyleAlert];
-    __block LeadSavedMessagesUpload *upload=nil;
-    __weak UIAlertController *weakProgress=progress;
-    [progress addAction:[UIAlertAction actionWithTitle:@"إلغاء"
-        style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
-            [upload cancel];
-        }]];
-    NSString *name=file.lastPathComponent;
-    [host presentViewController:progress animated:YES completion:^{
-        upload=[LeadSavedMessagesUpload startWithFile:file progress:^(double fraction) {
-            weakProgress.message=[NSString stringWithFormat:@"%d%%",(int)(fraction*100.0)];
-        } completion:^(NSString *error) {
-            void (^report)(void)=^{
-                if([error isEqualToString:@"cancelled"]) {
-                    [self notice:@"انلغى الرفع" text:
-                        [NSString stringWithFormat:@"ما انرسل شي. التسجيل باقي بالأرشيف باسم %@.",name]];
-                } else if(error) {
-                    [self notice:@"تعذّر الرفع للرسائل المحفوظة" text:
-                        [NSString stringWithFormat:@"%@\n\nالتسجيل باقي بالأرشيف باسم %@.",error,name]];
-                } else {
-                    [self notice:@"انرسل للرسائل المحفوظة" text:
-                        [NSString stringWithFormat:@"انرفع %@ لرسائلك المحفوظة. إذا ما ظهر مباشرة، اسحب القائمة أو ادخل المحادثة وارجع. نسخة التسجيل باقية بالأرشيف.",name]];
-                }
-            };
-            UIAlertController *strong=weakProgress;
-            if(strong.presentingViewController)
-                [strong dismissViewControllerAnimated:YES completion:report];
-            else report();
-        }];
-    }];
+    // No blocking upload alert: let the person choose Saved Messages or any
+    // chat, then dismiss the picker before starting the async transfer.
+    LeadPresentRecordingChatPicker(self.archiveFile,[self presenter]);
 }
 @end
 
