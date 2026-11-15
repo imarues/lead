@@ -53,7 +53,7 @@ extern "C" id objc_retain(id);
 
 @interface LeadVirtualClip : NSObject
 @property(nonatomic,strong) AVAssetReader *reader;
-@property(nonatomic,strong) AVAssetReaderTrackOutput *frames;
+@property(nonatomic,strong) AVAssetReaderOutput *frames;
 @property(nonatomic,assign) CMSampleBufferRef current;
 @property(nonatomic,assign) CMSampleBufferRef next;
 @property(nonatomic,assign) BOOL exhausted;
@@ -360,49 +360,97 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     auto clipSound=std::make_shared<AudioClip>();
     clipSound->samples.resize(pcmData.length/2);
     memcpy(clipSound->samples.data(),pcmData.bytes,pcmData.length);
-    AVAssetReader *vr=[[AVAssetReader alloc] initWithAsset:asset error:&error];
-    if(!vr){[self showError:@"فشل فتح مسار الفيديو."];[self finishPicker:NO];return;}
-    // Hardware video-range NV12 avoids costly BGRA->YUV conversions before
-    // Telegram's native I420/WebRTC encoder. Keep the original frame size.
-    AVAssetReaderTrackOutput *vo=[[AVAssetReaderTrackOutput alloc] initWithTrack:v
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
-            @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)}];
-    vo.alwaysCopiesSampleData=NO;[vr addOutput:vo];
-    if(![vr startReading]) {
-        NSLog(@"[LeadVirtualMedia] NV12 decode unsupported; falling back to BGRA");
-        vr=[[AVAssetReader alloc] initWithAsset:asset error:&error];
-        if(!vr){[self showError:@"فشل فك إطارات الفيديو."];[self finishPicker:NO];return;}
-        vo=[[AVAssetReaderTrackOutput alloc] initWithTrack:v
-            outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
-                @(kCVPixelFormatType_32BGRA)}];
-        vo.alwaysCopiesSampleData=NO;
-        [vr addOutput:vo];
-        if(![vr startReading]) {
-            [self showError:@"فشل فك إطارات الفيديو."];
-            [self finishPicker:NO];return;
-        }
-    }
-    LeadVirtualClip *video=[LeadVirtualClip new];
-    video.reader=vr;video.frames=vo;video.duration=duration;
-    // Preserve every original-resolution frame; do not pre-downscale.
-    CGSize native=v.naturalSize;
-    video.sourceWidth=(NSInteger)fabs(native.width);
-    video.sourceHeight=(NSInteger)fabs(native.height);
-    // High-detail calls: spending the same negotiated bandwidth on fewer
-    // frames usually preserves more detail per frame. Never upscale source.
-    // The actual encoder bitrate remains controlled by Telegram/WebRTC.
+    // Video source: hardware NV12 straight into Telegram's encoder, which avoids
+    // BGRA->YUV conversions. Two cases get an AVFoundation composition pass
+    // (hardware accelerated) instead of the raw track:
+    //  - rotation: portrait phone videos are stored sideways and flagged with
+    //    preferredTransform, which the raw track ignores (sideways picture);
+    //  - more than 1920x1080: WebRTC downsizes anything it can't send, in software,
+    //    and 4K frames at 30 fps cost enough CPU to drop frames, which the other
+    //    side sees as stutter. Everything up to 1080p keeps its exact resolution.
+    const CGSize oriented=CGSizeApplyAffineTransform(v.naturalSize,v.preferredTransform);
+    const CGFloat srcW=std::max((CGFloat)1,(CGFloat)fabs(oriented.width));
+    const CGFloat srcH=std::max((CGFloat)1,(CGFloat)fabs(oriented.height));
+    const CGFloat scale=std::min((CGFloat)1,std::min((CGFloat)1920/std::max(srcW,srcH),
+                                                   (CGFloat)1080/std::min(srcW,srcH)));
+    const bool rotated=!CGAffineTransformIsIdentity(v.preferredTransform);
+    const bool wantComposition=rotated || scale<1;
+    const NSInteger outW=std::max((NSInteger)2,(NSInteger)(floor(srcW*scale/2.0)*2.0));
+    const NSInteger outH=std::max((NSInteger)2,(NSInteger)(floor(srcH*scale/2.0)*2.0));
     const double sourceRate=(v.nominalFrameRate>0 && isfinite(v.nominalFrameRate))
                              ? (double)v.nominalFrameRate : 30.0;
-    const bool highPixels=(video.sourceWidth*video.sourceHeight>1280*720);
-    video.sourceFPS=std::max(12.0,std::min(highPixels?24.0:30.0,sourceRate));
+    // WebRTC doesn't send more than 30 fps; 60 fps sources are thinned evenly.
+    const double outRate=std::max(12.0,std::min(30.0,sourceRate));
+    __block AVAssetReader *vr=nil;
+    __block AVAssetReaderOutput *vo=nil;
+    __block BOOL composed=NO;
+    BOOL (^openVideo)(BOOL,OSType)=^BOOL(BOOL useComposition,OSType format) {
+        AVAssetReader *reader=[[AVAssetReader alloc] initWithAsset:asset error:nil];
+        if(!reader)return NO;
+        NSDictionary *settings=@{(id)kCVPixelBufferPixelFormatTypeKey:@(format)};
+        AVAssetReaderOutput *output=nil;
+        if(useComposition) {
+            AVMutableVideoComposition *comp=[AVMutableVideoComposition videoComposition];
+            comp.renderSize=CGSizeMake(outW,outH);
+            comp.frameDuration=CMTimeMake(1,(int32_t)llround(outRate));
+            AVMutableVideoCompositionInstruction *instruction=
+                [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+            instruction.timeRange=CMTimeRangeMake(kCMTimeZero,asset.duration);
+            AVMutableVideoCompositionLayerInstruction *layer=
+                [AVMutableVideoCompositionLayerInstruction
+                    videoCompositionLayerInstructionWithAssetTrack:v];
+            [layer setTransform:CGAffineTransformConcat(v.preferredTransform,
+                CGAffineTransformMakeScale(scale,scale)) atTime:kCMTimeZero];
+            instruction.layerInstructions=@[layer];
+            comp.instructions=@[instruction];
+            AVAssetReaderVideoCompositionOutput *co=[AVAssetReaderVideoCompositionOutput
+                assetReaderVideoCompositionOutputWithVideoTracks:@[v] videoSettings:settings];
+            co.videoComposition=comp;
+            output=co;
+        } else {
+            output=[[AVAssetReaderTrackOutput alloc] initWithTrack:v outputSettings:settings];
+        }
+        output.alwaysCopiesSampleData=NO;
+        if(![reader canAddOutput:output])return NO;
+        [reader addOutput:output];
+        if(![reader startReading])return NO;
+        vr=reader;vo=output;composed=useComposition;
+        return YES;
+    };
+    BOOL opened=NO;
+    if(wantComposition)opened=openVideo(YES,kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    if(!opened) {
+        if(wantComposition)NSLog(@"[LeadVirtualMedia] composition unavailable; using raw frames");
+        opened=openVideo(NO,kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    }
+    if(!opened) {
+        NSLog(@"[LeadVirtualMedia] NV12 decode unsupported; falling back to BGRA");
+        opened=openVideo(NO,kCVPixelFormatType_32BGRA);
+    }
+    if(!opened){[self showError:@"فشل فك إطارات الفيديو."];[self finishPicker:NO];return;}
+    LeadVirtualClip *video=[LeadVirtualClip new];
+    video.reader=vr;video.frames=vo;video.duration=duration;
+    video.sourceWidth=composed?outW:(NSInteger)fabs(v.naturalSize.width);
+    video.sourceHeight=composed?outH:(NSInteger)fabs(v.naturalSize.height);
+    video.sourceFPS=outRate;
     video.lastSubmittedPTS=-1.0;
-    size_t inspected=std::min((size_t)48000,clipSound->samples.size());
-    uint16_t peak=0;
-    for(size_t n=0;n<inspected;n++)
-        peak=std::max((uint16_t)abs((int)clipSound->samples[n]),peak);
-    NSLog(@"[LeadVirtualMedia] source %ldx%ld ~%.1ffps; audio samples=%lu, peak=%u",
-          (long)video.sourceWidth,(long)video.sourceHeight,video.sourceFPS,
-          (unsigned long)clipSound->samples.size(),(unsigned)peak);
+    // Loudness: raise the whole clip so its loudest sample sits just under full
+    // scale (-1 dBFS), at most +12 dB. A pure gain (no compressor, no limiter), so
+    // nothing clips and the sound isn't coloured; clips that are already loud are
+    // left untouched.
+    int32_t peak=0;
+    for(const int16_t sample:clipSound->samples)peak=std::max(peak,(int32_t)std::abs((int)sample));
+    double gain=1.0;
+    if(peak>0) {
+        gain=std::min(4.0,(0.891*32767.0)/(double)peak);
+        if(gain>1.05)
+            for(int16_t &sample:clipSound->samples)
+                sample=(int16_t)std::max(-32768L,std::min(32767L,lrint((double)sample*gain)));
+        else gain=1.0;
+    }
+    NSLog(@"[LeadVirtualMedia] video %ldx%ld ~%.1ffps (composed=%d); audio samples=%lu, peak=%d, gain=%.2f",
+          (long)video.sourceWidth,(long)video.sourceHeight,video.sourceFPS,(int)composed,
+          (unsigned long)clipSound->samples.size(),(int)peak,gain);
     @synchronized(self) {
         self.clip=video;self.nextAudioSample=0;
         std::atomic_store(&gPCM,clipSound);
@@ -465,9 +513,11 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     self.playbackTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
     LeadVirtualClip *clip=nil;
     @synchronized(self){clip=self.clip;}
-    double fps=clip ? clip.sourceFPS : 30.0;
-    fps=std::max(12.0,std::min(60.0,fps));
-    uint64_t step=(uint64_t)(NSEC_PER_SEC/fps);
+    // Tick at 60 Hz whatever the clip's rate: a frame goes out the moment it is due
+    // (see playbackTick), so 24/25/30 fps sources keep an even cadence instead of
+    // being resampled by a timer that doesn't match them (visible as judder).
+    (void)clip;
+    uint64_t step=(uint64_t)(NSEC_PER_SEC/60.0);
     dispatch_source_set_timer(self.playbackTimer,dispatch_time(DISPATCH_TIME_NOW,0),
         step,(uint64_t)(0.002*NSEC_PER_SEC));
     dispatch_source_set_event_handler(self.playbackTimer,^{[self playbackTick];});
@@ -510,6 +560,8 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
         if(!video.current)return;
         double pts=CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(video.current));
         if(isfinite(pts) && pts<=video.lastSubmittedPTS)return;
+        // 60 fps sources: send every second frame (an even 30 fps).
+        if(isfinite(pts) && video.lastSubmittedPTS>=0 && pts-video.lastSubmittedPTS<(1.0/30.0)-0.004)return;
         if(isfinite(pts))video.lastSubmittedPTS=pts;
         gFramesSubmitted.fetch_add(1);
         // Full original-resolution source frames; WebRTC controls network resolution.
