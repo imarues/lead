@@ -26,15 +26,20 @@ extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSS
 #define kLeadTLAttrAudio           ((int32_t)-1739392570) // documentAttributeAudio
 #define kLeadTLBoolTrue            ((int32_t)0x997275b5)  // boolTrue
 
-// Telegram's maximum supported individual upload part is 512 KiB; using full
-// parts halves per-part RPC overhead without changing/compressing file bytes.
-static const NSUInteger kLeadPartSize = 512 * 1024;
+// Part size is adaptive. Telegram allows 128 KiB..512 KiB parts (the size must
+// divide 512 KiB). Small/medium files use 256 KiB parts so the FIRST server
+// acknowledgement arrives quickly (the old 12 x 512 KiB burst meant nothing was
+// acknowledged until ~6 MB had left the phone, so the bar sat on 0%).
+// Very large files keep 512 KiB parts to stay under Telegram's part-count limit.
+static const NSUInteger kLeadPartSizeSmall = 256 * 1024;
+static const NSUInteger kLeadPartSizeLarge = 512 * 1024;
+static const unsigned long long kLeadLargePartThreshold = 96ull * 1024 * 1024;
 static const unsigned long long kLeadBigFileThreshold = 10ull * 1024 * 1024;
-// Keep enough requests in flight to cover connection round-trip time while
-// bounding upload buffer pressure to approximately four MiB per transfer.
-// 12 x 512 KiB requests bound memory to ~6 MiB while allowing more network
-// round trips to overlap. Actual speed still depends on Telegram/network.
-static const NSUInteger kLeadWindow = 12;
+// Slow-start window: begin with a few requests so the first acks (and the
+// progress bar) arrive almost immediately, then grow one request per ack up
+// to the maximum. Memory stays bounded to kLeadMaxWindow x part size.
+static const NSUInteger kLeadStartWindow = 3;
+static const NSUInteger kLeadMaxWindow = 10;
 static const int kLeadPartRetries = 3;
 
 #pragma mark - TL writers
@@ -82,6 +87,8 @@ static void TLString(NSMutableData *d, NSString *s) {
 @property(nonatomic, assign) int64_t fileId;
 @property(nonatomic, assign) BOOL big;
 @property(nonatomic, assign) NSUInteger totalParts;
+@property(nonatomic, assign) NSUInteger partSize;
+@property(nonatomic, assign) NSUInteger window;
 @property(nonatomic, assign) NSUInteger nextPart;
 @property(nonatomic, assign) NSUInteger finishedParts;
 @property(nonatomic, assign) NSUInteger inFlight;
@@ -273,7 +280,11 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
     arc4random_buf(&random, sizeof(random));
     self.fileId = (int64_t)random;
     self.big = size >= kLeadBigFileThreshold;
-    self.totalParts = (NSUInteger)((size + kLeadPartSize - 1) / kLeadPartSize);
+    self.partSize = size >= kLeadLargePartThreshold ? kLeadPartSizeLarge : kLeadPartSizeSmall;
+    self.window = kLeadStartWindow;
+    self.totalParts = (NSUInteger)((size + self.partSize - 1) / self.partSize);
+    // Show immediate movement; the real percentage follows server acks.
+    if (self.progress) self.progress(0.01);
     [self pump];
 }
 
@@ -283,7 +294,7 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
         if (self.inFlight == 0) [self finishWithError:@"cancelled"];
         return;
     }
-    while (!self.finished && !self.cancelled && self.inFlight < kLeadWindow &&
+    while (!self.finished && !self.cancelled && self.inFlight < self.window &&
            self.nextPart < self.totalParts) {
         [self sendPart:self.nextPart++ attempt:0];
     }
@@ -292,8 +303,8 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
 - (void)sendPart:(NSUInteger)index attempt:(int)attempt {
     NSError *error = nil;
     NSData *chunk = nil;
-    if ([self.handle seekToOffset:(unsigned long long)index * kLeadPartSize error:&error])
-        chunk = [self.handle readDataUpToLength:kLeadPartSize error:&error];
+    if ([self.handle seekToOffset:(unsigned long long)index * self.partSize error:&error])
+        chunk = [self.handle readDataUpToLength:self.partSize error:&error];
     if (!chunk.length) {
         [self finishWithError:error.localizedDescription ?: @"تعذرت قراءة ملف التسجيل."];
         return;
@@ -324,7 +335,8 @@ static NSMutableSet<LeadSavedMessagesUpload *> *gActiveLeadUploads;
             return;
         }
         self.finishedParts++;
-        if (self.progress) self.progress((double)self.finishedParts / (double)self.totalParts);
+        if (self.window < kLeadMaxWindow) self.window++;
+        if (self.progress) self.progress(MAX(0.01, (double)self.finishedParts / (double)self.totalParts));
         if (self.cancelled) {
             if (self.inFlight == 0) [self finishWithError:@"cancelled"];
             return;

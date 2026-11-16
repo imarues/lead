@@ -3532,6 +3532,7 @@ extension TLParser {
     private struct CustomFileOptions {
         let displayName: String
         let thumbnailId: Int64?
+        let caption: String?
         let registeredAt: TimeInterval
     }
     private static let customFileQueue = DispatchQueue(label: "com.lead.custom.files")
@@ -3539,6 +3540,13 @@ extension TLParser {
 
     @objc(registerCustomFileSendForOriginalName:displayName:thumbnailFileId:)
     static func registerCustomFileSend(originalName: String, displayName: String, thumbnailFileId: NSNumber?) {
+        registerCustomFileSend(originalName: originalName, displayName: displayName,
+                               thumbnailFileId: thumbnailFileId, caption: nil)
+    }
+
+    @objc(registerCustomFileSendForOriginalName:displayName:thumbnailFileId:caption:)
+    static func registerCustomFileSend(originalName: String, displayName: String,
+                                       thumbnailFileId: NSNumber?, caption: String?) {
         let key = originalName.lowercased()
         guard !key.isEmpty, !displayName.isEmpty else { return }
         customFileQueue.sync {
@@ -3548,6 +3556,7 @@ extension TLParser {
             var queue = customFilePending[key] ?? []
             queue.append(CustomFileOptions(displayName: displayName,
                                           thumbnailId: thumbnailFileId?.int64Value,
+                                          caption: caption,
                                           registeredAt: now))
             customFilePending[key] = Array(queue.suffix(6))
         }
@@ -3624,10 +3633,29 @@ extension TLParser {
 
         let mediaBuffer = Buffer()
         media.serialize(mediaBuffer, true)
+
+        // Description: for messages.sendMedia the caption (message:string) sits
+        // right after the media. Replace it only when Telegram sent it empty.
+        var tail = payload.subdata(in: mediaEnd ..< payload.count)
+        var captionData = Data()
+        if functionId == 53536639, let caption = options.caption, !caption.isEmpty {
+            let tailReader = BufferReader(Buffer(data: tail))
+            if let original = parseString(tailReader), original.isEmpty {
+                let consumed = Int(tailReader.offset)
+                if consumed > 0 && consumed <= tail.count {
+                    let captionBuffer = Buffer()
+                    serializeString(String(caption.prefix(1024)), buffer: captionBuffer, boxed: false)
+                    captionData = captionBuffer.makeData()
+                    tail = tail.subdata(in: consumed ..< tail.count)
+                }
+            }
+        }
+
         var result = Data()
         result.append(payload.subdata(in: 0 ..< mediaStart))
         result.append(mediaBuffer.makeData())
-        result.append(payload.subdata(in: mediaEnd ..< payload.count))
+        result.append(captionData)
+        result.append(tail)
         return result as NSData
     }
 }

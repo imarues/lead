@@ -169,17 +169,54 @@ final class LeadMessageDiscoveryBridge: NSObject {
         return buffer.makeData() as NSData
     }
 
+    // The generated vector parser throws away the WHOLE page when a single
+    // message uses a constructor it does not know (new media/flags). A page of
+    // search results is mostly media, so that made every category look empty.
+    // Read the header ourselves and keep every message that does parse.
+    private static func tolerantMessages(_ bytes: NSData) -> (messages: [Api.Message], failed: Bool)? {
+        let reader = BufferReader(Buffer(data: bytes as Data))
+        guard let signature = reader.readInt32() else { return nil }
+        switch signature {
+        case 494135274:            // messages.messages
+            break
+        case 1595959062:           // messages.messagesSlice
+            guard let flags = reader.readInt32(), reader.readInt32() != nil else { return nil }
+            if flags & (1 << 0) != 0 { guard reader.readInt32() != nil else { return nil } }
+            if flags & (1 << 2) != 0 { guard reader.readInt32() != nil else { return nil } }
+            if flags & (1 << 3) != 0 {
+                guard let flood = reader.readInt32(),
+                      Api.parse(reader, signature: flood) != nil else { return nil }
+            }
+        case -948520370:           // messages.channelMessages
+            guard let flags = reader.readInt32(),
+                  reader.readInt32() != nil, reader.readInt32() != nil else { return nil }
+            if flags & (1 << 2) != 0 { guard reader.readInt32() != nil else { return nil } }
+        default:
+            return nil
+        }
+        guard reader.readInt32() != nil,                     // vector constructor
+              let count = reader.readInt32(), count >= 0, count <= 1000 else { return nil }
+        var result = [Api.Message]()
+        var failed = false
+        var index: Int32 = 0
+        while index < count {
+            guard let elementSignature = reader.readInt32(),
+                  let message = Api.parse(reader, signature: elementSignature) as? Api.Message else {
+                failed = true
+                break
+            }
+            result.append(message)
+            index += 1
+        }
+        return (result, failed)
+    }
+
     @objc(parseSearchResult:senderId:source:category:)
     static func parseSearchResult(_ bytes: NSData, senderId: Int64,
                                   source: NSDictionary, category: Int) -> NSDictionary? {
-        guard let response = payload(bytes) as? Api.messages.Messages else { return nil }
-        let messages: [Api.Message]
-        switch response {
-        case .messages(let value): messages = value.messages
-        case .messagesSlice(let value): messages = value.messages
-        case .channelMessages(let value): messages = value.messages
-        case .messagesNotModified: return nil
-        }
+        guard let parsed = tolerantMessages(bytes) else { return nil }
+        let messages = parsed.messages
+        let partial = parsed.failed
         let key = source["key"] as? String ?? ""
         let title = source["title"] as? String ?? "Telegram"
         let sourcePeer = source["peer"] as? NSData ?? NSData()
@@ -220,6 +257,7 @@ final class LeadMessageDiscoveryBridge: NSObject {
         // page has no more results; later pages are fetched only on demand.
         return [
             "items": rows,
+            "partial": NSNumber(value: partial),
             "nextOffset": NSNumber(value: lowestId == Int32.max ? 0 : lowestId),
             "hasMore": messages.count >= 30 && lowestId > 1
         ] as NSDictionary

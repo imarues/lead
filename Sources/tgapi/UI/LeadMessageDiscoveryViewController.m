@@ -69,10 +69,25 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
 + (NSData *)forwardRequestForPeer:(NSData *)peer messageIds:(NSArray<NSNumber *> *)ids;
 @end
 
+// Category strip. UIScrollView normally refuses to start scrolling when a drag
+// begins on a UIControl, which is why the old segmented control could not be
+// moved. Allow the scroll to take over from any chip.
+@interface LeadChipScrollView : UIScrollView
+@end
+@implementation LeadChipScrollView
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view { return YES; }
+@end
+
 @interface LeadMessageDiscoveryViewController () <UITextFieldDelegate, UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UITextField *usernameField;
 @property(nonatomic, strong) UILabel *statusLabel;
-@property(nonatomic, strong) UISegmentedControl *categories;
+@property(nonatomic, strong) UIScrollView *chipScroll;
+@property(nonatomic, strong) NSMutableArray<UIButton *> *chips;
+@property(nonatomic, assign) NSInteger category;
+@property(nonatomic, assign) CGFloat chipsLaidOutWidth;
+@property(nonatomic, copy) NSString *firstScanError;
+@property(nonatomic, assign) NSInteger failedChats;
+@property(nonatomic, assign) NSInteger partialChats;
 @property(nonatomic, strong) UIButton *groupsButton;
 @property(nonatomic, strong) NSDictionary *target;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *groups;
@@ -121,11 +136,12 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         initWithTarget:self action:@selector(longPressed:)];
     hold.minimumPressDuration = 0.47;
     hold.delegate = self;
+    hold.cancelsTouchesInView = NO;
     [self.tableView addGestureRecognizer:hold];
 }
 
 - (void)configureHeader {
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 183)];
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 204)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(16, 9, 215, 42)];
     field.borderStyle = UITextBorderStyleRoundedRect;
@@ -151,22 +167,37 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     status.text = @"أدخل يوزر الشخص. البحث ضمن الرسائل المتاحة لحسابك فقط.";
     status.font = [UIFont systemFontOfSize:12];
     status.textColor = UIColor.secondaryLabelColor;
-    status.numberOfLines = 2;
+    status.numberOfLines = 3;
     status.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusLabel = status;
     [header addSubview:status];
 
-    UIScrollView *scroll = [UIScrollView new];
+    LeadChipScrollView *scroll = [LeadChipScrollView new];
     scroll.showsHorizontalScrollIndicator = NO;
+    scroll.alwaysBounceHorizontal = YES;
+    scroll.delaysContentTouches = NO;
+    scroll.canCancelContentTouches = YES;
+    // Positions are computed by hand (first chip on the right for Arabic), so the
+    // scroll view must not be mirrored by the system.
+    scroll.semanticContentAttribute = UISemanticContentAttributeForceLeftToRight;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     NSArray *titles = @[ @"الصور", @"الفيديو", @"الفويسات", @"الموسيقى", @"الملفات", @"الدائري", @"الروابط" ];
-    UISegmentedControl *categories = [[UISegmentedControl alloc] initWithItems:titles];
-    categories.selectedSegmentIndex = 2; // voice notes are a useful default
-    categories.frame = CGRectMake(0, 0, 730, 36);
-    [categories addTarget:self action:@selector(categoryChanged) forControlEvents:UIControlEventValueChanged];
-    self.categories = categories;
-    [scroll addSubview:categories];
-    scroll.contentSize = CGSizeMake(730, 36);
+    self.category = 2; // voice notes are a useful default
+    self.chips = [NSMutableArray array];
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        UIButton *chip = [UIButton buttonWithType:UIButtonTypeCustom];
+        chip.tag = (NSInteger)i;
+        [chip setTitle:titles[i] forState:UIControlStateNormal];
+        chip.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        chip.contentEdgeInsets = UIEdgeInsetsMake(0, 16, 0, 16);
+        chip.layer.cornerRadius = 18;
+        chip.layer.masksToBounds = YES;
+        [chip addTarget:self action:@selector(chipTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [scroll addSubview:chip];
+        [self.chips addObject:chip];
+    }
+    self.chipScroll = scroll;
+    [self styleChips];
     [header addSubview:scroll];
 
     UIButton *groupsButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -190,7 +221,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         [status.leadingAnchor constraintEqualToAnchor:field.leadingAnchor],
         [status.trailingAnchor constraintEqualToAnchor:search.trailingAnchor],
         [status.topAnchor constraintEqualToAnchor:field.bottomAnchor constant:9],
-        [status.heightAnchor constraintEqualToConstant:37],
+        [status.heightAnchor constraintEqualToConstant:50],
         [scroll.topAnchor constraintEqualToAnchor:status.bottomAnchor constant:6],
         [scroll.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:15],
         [scroll.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-15],
@@ -334,8 +365,66 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     [self.tableView reloadData];
 }
 
-- (void)categoryChanged {
-    if (self.target && !self.forwarding) [self startFreshScan];
+- (void)styleChips {
+    for (UIButton *chip in self.chips) {
+        BOOL on = chip.tag == self.category;
+        chip.backgroundColor = on ? UIColor.systemBlueColor : UIColor.secondarySystemFillColor;
+        [chip setTitleColor:on ? UIColor.whiteColor : UIColor.labelColor forState:UIControlStateNormal];
+    }
+}
+
+// First chip sits at the right edge (reading order of Arabic); the strip scrolls
+// freely in both directions when the chips are wider than the screen.
+- (void)layoutChipsForce:(BOOL)force {
+    CGFloat width = self.chipScroll.bounds.size.width;
+    if (width < 1 || !self.chips.count) return;
+    if (!force && fabs(width - self.chipsLaidOutWidth) < 0.5) return;
+    BOOL first = self.chipsLaidOutWidth < 1;
+    self.chipsLaidOutWidth = width;
+    const CGFloat gap = 8, height = 36;
+    NSMutableArray<NSNumber *> *widths = [NSMutableArray array];
+    CGFloat total = 0;
+    for (UIButton *chip in self.chips) {
+        CGFloat w = ceil([chip sizeThatFits:CGSizeMake(CGFLOAT_MAX, height)].width);
+        w = MAX(w, 64);
+        [widths addObject:@(w)];
+        total += w;
+    }
+    total += gap * (self.chips.count - 1);
+    CGFloat content = MAX(total, width);
+    CGFloat x = content;
+    for (NSUInteger i = 0; i < self.chips.count; i++) {
+        CGFloat w = widths[i].doubleValue;
+        x -= w;
+        self.chips[i].frame = CGRectMake(x, 2, w, height);
+        x -= gap;
+    }
+    self.chipScroll.contentSize = CGSizeMake(content, 40);
+    if (first) [self.chipScroll setContentOffset:CGPointMake(MAX(0, content - width), 0) animated:NO];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UIView *header = self.tableView.tableHeaderView;
+    CGFloat tableWidth = self.tableView.bounds.size.width;
+    if (header && tableWidth > 1 && fabs(header.frame.size.width - tableWidth) > 0.5) {
+        CGRect frame = header.frame;
+        frame.size.width = tableWidth;
+        header.frame = frame;
+        self.tableView.tableHeaderView = header;
+        [header layoutIfNeeded];
+    }
+    [self layoutChipsForce:NO];
+}
+
+- (void)chipTapped:(UIButton *)chip {
+    if (chip.tag == self.category) return;
+    if (self.forwarding) return;
+    self.category = chip.tag;
+    [self styleChips];
+    [self.chipScroll scrollRectToVisible:CGRectInset(chip.frame, -24, 0) animated:YES];
+    LeadSelectionHaptic();
+    if (self.target) [self startFreshScan];
 }
 
 - (void)startFreshScan {
@@ -351,6 +440,9 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     }
     self.completedChats = 0;
     self.totalChats = self.scanQueue.count;
+    self.firstScanError = nil;
+    self.failedChats = 0;
+    self.partialChats = 0;
     self.scanning = YES;
     [self displayStatus:[NSString stringWithFormat:@"جاري فحص %ld محادثة…", (long)self.totalChats]];
     [self.tableView reloadData];
@@ -361,8 +453,16 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     if (token != self.generation || !self.target) return;
     if (self.scanQueue.count == 0) {
         self.scanning = NO;
-        [self displayStatus:[NSString stringWithFormat:@"اكتمل الفحص: %lu رسالة ضمن %ld محادثة. اضغط مرة للفتح أو مطوّلاً للتحديد.",
-            (unsigned long)self.results.count, (long)self.totalChats]];
+        NSString *summary = self.results.count ?
+            [NSString stringWithFormat:@"اكتمل الفحص: %lu رسالة ضمن %ld محادثة. اضغط مرة للفتح أو مطوّلاً للتحديد.",
+             (unsigned long)self.results.count, (long)self.totalChats] :
+            [NSString stringWithFormat:@"اكتمل الفحص ضمن %ld محادثة: لا توجد رسائل من هذا النوع.", (long)self.totalChats];
+        if (self.failedChats > 0)
+            summary = [summary stringByAppendingFormat:@"\nتعذّر فحص %ld محادثة%@.", (long)self.failedChats,
+                       self.firstScanError.length ? [NSString stringWithFormat:@" (%@)", self.firstScanError] : @""];
+        else if (self.partialChats > 0)
+            summary = [summary stringByAppendingFormat:@"\nبعض الرسائل في %ld محادثة لم تُقرأ (نوع غير مدعوم).", (long)self.partialChats];
+        [self displayStatus:summary];
         [self.tableView reloadData];
         return;
     }
@@ -373,7 +473,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     NSNumber *offsetValue = self.olderOffsets[key];
     int32_t offset = offsetValue ? offsetValue.intValue : 0;
     NSData *payload = [LeadMessageDiscoveryBridge searchRequestForPeer:source[@"peer"]
-         sender:self.target[@"peer"] category:self.categories.selectedSegmentIndex offsetId:offset];
+         sender:self.target[@"peer"] category:self.category offsetId:offset];
     self.completedChats++;
     if (!payload.length) { [self scanNextWithToken:token]; return; }
     __weak typeof(self) weakSelf = self;
@@ -383,7 +483,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         NSDictionary *response = (!error.length && data.length) ?
             [LeadMessageDiscoveryBridge parseSearchResult:LeadDiscoveryUnpack(data)
                  senderId:[self.target[@"userId"] longLongValue]
-                 source:source category:self.categories.selectedSegmentIndex] : nil;
+                 source:source category:self.category] : nil;
         // Stop rather than keep issuing requests when Telegram imposes a limit.
         if ([error hasPrefix:@"FLOOD_WAIT"]) {
             self.scanning = NO;
@@ -391,6 +491,13 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
             return;
         }
         // A failed chat is skipped; never fabricate results or retry in a flood loop.
+        if (!response) {
+            self.failedChats++;
+            if (!self.firstScanError.length)
+                self.firstScanError = error.length ? error : @"تعذّر قراءة رد تيليگرام";
+        } else if ([response[@"partial"] boolValue]) {
+            self.partialChats++;
+        }
         if (response) {
             for (NSDictionary *item in response[@"items"]) {
                 NSString *unique = [NSString stringWithFormat:@"%@:%@", item[@"key"], item[@"id"]];

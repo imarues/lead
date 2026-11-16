@@ -82,10 +82,29 @@ extern void LeadPresentConversionChatPicker(NSArray<NSURL *> *files,
                                             BOOL sendAsPhotos,
                                             NSData *thumbnailJPEG,
                                             UIViewController *presenter);
+// Telegram chat chooser (in-app list of the user's chats).
 static void LeadConversionShare(UIViewController *host, NSArray<NSURL *> *files,
                                 BOOL photos, NSData *thumbnailJPEG) {
     if(!host || !files.count)return;
     LeadPresentConversionChatPicker(files,photos,thumbnailJPEG,host);
+}
+
+// Official iOS share sheet: the user picks the destination app.
+static void LeadConversionIOSShare(UIViewController *host, NSArray<NSURL *> *files, UIView *anchor) {
+    if(!host || !files.count)return;
+    UIActivityViewController *sheet=[[UIActivityViewController alloc]
+        initWithActivityItems:files applicationActivities:nil];
+    UIPopoverPresentationController *popover=sheet.popoverPresentationController;
+    if(popover) {
+        UIView *source=anchor?:host.view;
+        popover.sourceView=source;
+        popover.sourceRect=anchor?anchor.bounds:CGRectMake(CGRectGetMidX(host.view.bounds),
+                                                           CGRectGetMidY(host.view.bounds),1,1);
+    }
+    UIViewController *top=host;
+    while(top.presentedViewController && !top.presentedViewController.isBeingDismissed)
+        top=top.presentedViewController;
+    [top presentViewController:sheet animated:YES completion:nil];
 }
 
 static void LeadConversionAlert(UIViewController *host, NSString *title, NSString *message) {
@@ -143,7 +162,21 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
                                                      target:self action:@selector(share)]
     ];
 }
-- (void)share { LeadConversionShare(self,@[_url],YES,nil); }
+- (void)share {
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:nil message:nil
+                                                         preferredStyle:UIAlertControllerStyleActionSheet];
+    [menu addAction:[UIAlertAction actionWithTitle:@"مشاركة (قائمة iOS)" style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction *a) {
+        LeadConversionIOSShare(self,@[self->_url],nil);
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"إرسال لمحادثة تيليگرام" style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction *a) {
+        LeadConversionShare(self,@[self->_url],YES,nil);
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+    menu.popoverPresentationController.barButtonItem=self.navigationItem.rightBarButtonItems.lastObject;
+    [self presentViewController:menu animated:YES completion:nil];
+}
 - (void)sendSaved {
     if (_sending) return;
     _sending=YES;
@@ -190,7 +223,7 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return section==0?1:(section==1?3:(self.outputURL?3:1));
+    return section==0?1:(section==1?3:(self.outputURL?4:1));
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     return @[@"الخطوة 1 — اختيار الصور", @"الخطوة 2 — خيارات الملف", @"الخطوة 3 — إنشاء وتصدير"][section];
@@ -216,8 +249,9 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
         else { cell.textLabel.text=@"الصورة المصغّرة";cell.detailTextLabel.text=self.customThumbnail?@"صورة مخصصة":@"أول صورة تلقائياً"; }
     } else {
         if(index.row==0) { cell.textLabel.text=self.working?@"جاري إنشاء الملف…":@"إنشاء PDF";cell.detailTextLabel.text=@"التالي"; }
-        else if(index.row==1) { cell.textLabel.text=@"مشاركة ملف PDF";cell.detailTextLabel.text=@"محادثات تيليگرام"; }
-        else { cell.textLabel.text=@"إرسال إلى الرسائل المحفوظة";cell.detailTextLabel.text=@"تيليگرام"; }
+        else if(index.row==1) { cell.textLabel.text=@"المشاركة";cell.detailTextLabel.text=@"قائمة iOS"; }
+        else if(index.row==2) { cell.textLabel.text=@"مشاركة للمحادثات";cell.detailTextLabel.text=@"اختر محادثة تيليگرام"; }
+        else { cell.textLabel.text=@"إرسال إلى الرسائل المحفوظة";cell.detailTextLabel.text=@"مباشرة"; }
     }
     cell.selectionStyle=(self.working||self.uploading)?UITableViewCellSelectionStyleNone:UITableViewCellSelectionStyleDefault;
     return cell;
@@ -234,9 +268,11 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     }
     if(index.row==0) [self createPDF];
     else if(index.row==1 && self.outputURL)
+        LeadConversionIOSShare(self,@[self.outputURL],[tableView cellForRowAtIndexPath:index]);
+    else if(index.row==2 && self.outputURL)
         LeadConversionShare(self,@[self.outputURL],NO,
            self.customThumbnail?:LeadPDFThumbJPEG(self.imageFiles.firstObject));
-    else if(index.row==2 && self.outputURL) [self sendToSaved];
+    else if(index.row==3 && self.outputURL) [self sendToSaved];
 }
 - (void)editName {
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"اسم الملف"
@@ -484,7 +520,7 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     return self.imageFiles.count?3:1;
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return section==0?1:(section==1?self.imageFiles.count:2);
+    return section==0?1:(section==1?self.imageFiles.count:3);
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if(section==0) return @"اختيار ملف PDF";
@@ -509,8 +545,9 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
         cell.imageView.image=LeadConversionPreview(url,96);
         cell.imageView.contentMode=UIViewContentModeScaleAspectFit;
     } else {
-        cell.textLabel.text=index.row==0?@"مشاركة جميع الصور":@"إرسال جميع الصور للمحفوظة";
-        cell.detailTextLabel.text=index.row==0?@"محادثات تيليگرام":@"تيليگرام — كصور وليس ملف PDF";
+        if(index.row==0) { cell.textLabel.text=@"المشاركة";cell.detailTextLabel.text=@"قائمة iOS"; }
+        else if(index.row==1) { cell.textLabel.text=@"مشاركة للمحادثات";cell.detailTextLabel.text=@"اختر محادثة تيليگرام — كصور"; }
+        else { cell.textLabel.text=@"إرسال جميع الصور للمحفوظة";cell.detailTextLabel.text=@"مباشرة — كصور وليس ملف PDF"; }
     }
     return cell;
 }
@@ -521,7 +558,8 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     else if(index.section==1)
         [self.navigationController pushViewController:[[LeadConversionPreviewController alloc]
                initWithImageURL:self.imageFiles[index.row]] animated:YES];
-    else if(index.row==0) LeadConversionShare(self,self.imageFiles,YES,nil);
+    else if(index.row==0) LeadConversionIOSShare(self,self.imageFiles,[tableView cellForRowAtIndexPath:index]);
+    else if(index.row==1) LeadConversionShare(self,self.imageFiles,YES,nil);
     else [self sendAllToSaved];
 }
 - (void)choosePDF {

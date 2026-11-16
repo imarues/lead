@@ -8,6 +8,7 @@
 + (void)registerRoundVideoUploadWithFileName:(NSString *)fileName duration:(NSInteger)duration;
 + (NSData *)rewriteVoiceUpload:(NSData *)data;
 + (void)registerCustomFileSendForOriginalName:(NSString *)original displayName:(NSString *)display thumbnailFileId:(NSNumber *)thumbId;
++ (void)registerCustomFileSendForOriginalName:(NSString *)original displayName:(NSString *)display thumbnailFileId:(NSNumber *)thumbId caption:(NSString *)caption;
 + (NSData *)rewriteCustomFileSend:(NSData *)data;
 + (NSData *)handleResponse:(NSData *)data functionID:(NSNumber *)ios;
 + (void)addDeletedId:(int32_t)msgId;
