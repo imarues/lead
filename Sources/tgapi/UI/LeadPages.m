@@ -93,6 +93,44 @@ UIImage *LeadLogoImage(CGFloat side) {
   }];
 }
 
+// Deliver navigation to this process, not LaunchServices (which may choose
+// another installed Telegram client registered for the same tg:// scheme).
+// Scene-based Telegram uses the browsing activity callback to enter its same
+// internal URL router. Override the URL getter because this is an internal
+// activity carrying a tg:// message link, not an OS universal-link request.
+@interface LeadTelegramNavigationActivity : NSUserActivity
+@property(nonatomic, copy) NSURL *leadURL;
+@end
+@implementation LeadTelegramNavigationActivity
+- (NSURL *)webpageURL { return self.leadURL; }
+@end
+
+static BOOL LeadRouteTelegramURLInCurrentApp(NSURL *url) {
+  UIApplication *app = UIApplication.sharedApplication;
+  id<UIApplicationDelegate> delegate = app.delegate;
+  if ([delegate respondsToSelector:@selector(application:openURL:options:)]) {
+    if ([delegate application:app openURL:url options:@{}]) return YES;
+  }
+  if ([delegate respondsToSelector:@selector(application:openURL:sourceApplication:annotation:)]) {
+    if ([delegate application:app openURL:url sourceApplication:NSBundle.mainBundle.bundleIdentifier annotation:nil]) return YES;
+  }
+
+  LeadTelegramNavigationActivity *activity = [[LeadTelegramNavigationActivity alloc]
+      initWithActivityType:NSUserActivityTypeBrowsingWeb];
+  activity.leadURL = url;
+  UIWindowScene *scene = LeadMainWindow().windowScene;
+  id<UISceneDelegate> sceneDelegate = scene.delegate;
+  if (scene && [sceneDelegate respondsToSelector:@selector(scene:continueUserActivity:)]) {
+    [sceneDelegate scene:scene continueUserActivity:activity];
+    return YES;
+  }
+  if ([delegate respondsToSelector:@selector(application:continueUserActivity:restorationHandler:)]) {
+    return [delegate application:app continueUserActivity:activity
+              restorationHandler:^(__unused NSArray<id<UIUserActivityRestoring>> *objects) {}];
+  }
+  return NO;
+}
+
 void LeadOpenTelegramURL(NSString *urlString) {
   if (urlString.length == 0) return;
   NSURL *finalURL = nil;
@@ -113,8 +151,21 @@ void LeadOpenTelegramURL(NSString *urlString) {
   if (!finalURL) finalURL = [NSURL URLWithString:urlString];
   if (!finalURL) return;
 
+  BOOL internalTelegram = [finalURL.scheme.lowercaseString isEqualToString:@"tg"];
   void (^open)(void) = ^{
-    [[UIApplication sharedApplication] openURL:finalURL options:@{} completionHandler:nil];
+    if (internalTelegram) {
+      if (!LeadRouteTelegramURLInCurrentApp(finalURL)) {
+        UIViewController *host = LeadMainWindow().rootViewController;
+        while (host.presentedViewController) host = host.presentedViewController;
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تعذر فتح الرسالة"
+            message:@"نسخة تيليگرام الحالية لا تدعم معالج الروابط الداخلي. لم يتم فتح أي تطبيق آخر."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
+        [host presentViewController:alert animated:YES completion:nil];
+      }
+      return;
+    }
+    [UIApplication.sharedApplication openURL:finalURL options:@{} completionHandler:nil];
   };
   // Telegram routes tg:// links under the menu; close the menu first so the result is visible.
   UIViewController *presenter = LeadMainWindow().rootViewController;
@@ -122,7 +173,7 @@ void LeadOpenTelegramURL(NSString *urlString) {
   while (top.presentedViewController && ![top.presentedViewController isKindOfClass:[LeadNavigationController class]]) {
     top = top.presentedViewController;
   }
-  if ([finalURL.scheme isEqualToString:@"tg"] && [top.presentedViewController isKindOfClass:[LeadNavigationController class]]) {
+  if (internalTelegram && [top.presentedViewController isKindOfClass:[LeadNavigationController class]]) {
     [top dismissViewControllerAnimated:YES completion:open];
   } else {
     open();
