@@ -570,7 +570,7 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
             NSMutableArray<NSURL *> *output=[NSMutableArray array];
             CGPDFDocumentRef pdfDocument=CGPDFDocumentCreateWithURL((__bridge CFURLRef)pdf);
             size_t total=pdfDocument?CGPDFDocumentGetNumberOfPages(pdfDocument):0;
-            if (!pdfDocument || CGPDFDocumentIsEncrypted(pdfDocument) && !CGPDFDocumentIsUnlocked(pdfDocument))
+            if (!pdfDocument || (CGPDFDocumentIsEncrypted(pdfDocument) && !CGPDFDocumentIsUnlocked(pdfDocument)))
                 errorMessage=@"الملف محمي بكلمة مرور أو غير صالح.";
             else if(total==0) errorMessage=@"الملف ما يحتوي صفحات قابلة للتحويل.";
             else if(total>300) errorMessage=@"الملف يحتوي أكثر من 300 صفحة؛ لتجنب نفاد ذاكرة الجهاز قسّمه أولاً.";
