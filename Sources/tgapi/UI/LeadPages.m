@@ -112,7 +112,7 @@ static BOOL LeadRouteTelegramURLInCurrentApp(NSURL *url) {
     if ([delegate application:app openURL:url options:@{}]) return YES;
   }
   if ([delegate respondsToSelector:@selector(application:openURL:sourceApplication:annotation:)]) {
-    if ([delegate application:app openURL:url sourceApplication:NSBundle.mainBundle.bundleIdentifier annotation:nil]) return YES;
+    if ([delegate application:app openURL:url sourceApplication:NSBundle.mainBundle.bundleIdentifier annotation:@{}]) return YES;
   }
 
   LeadTelegramNavigationActivity *activity = [[LeadTelegramNavigationActivity alloc]
