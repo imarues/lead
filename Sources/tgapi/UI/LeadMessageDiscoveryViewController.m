@@ -181,8 +181,8 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     // scroll view must not be mirrored by the system.
     scroll.semanticContentAttribute = UISemanticContentAttributeForceLeftToRight;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    NSArray *titles = @[ @"الصور", @"الفيديو", @"الفويسات", @"الموسيقى", @"الملفات", @"الدائري", @"الروابط" ];
-    self.category = 2; // voice notes are a useful default
+    NSArray *titles = @[ @"الصور", @"الفيديو", @"الفويسات", @"الموسيقى", @"الملفات", @"الدائري", @"الروابط", @"الكل" ];
+    self.category = 7; // include text and every media type by default
     self.chips = [NSMutableArray array];
     for (NSUInteger i = 0; i < titles.count; i++) {
         UIButton *chip = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -474,7 +474,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     int32_t offset = offsetValue ? offsetValue.intValue : 0;
     NSData *payload = [LeadMessageDiscoveryBridge searchRequestForPeer:source[@"peer"]
          sender:self.target[@"peer"] category:self.category offsetId:offset];
-    self.completedChats++;
+    if (offset == 0) self.completedChats++;
     if (!payload.length) { [self scanNextWithToken:token]; return; }
     __weak typeof(self) weakSelf = self;
     if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
@@ -507,7 +507,12 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
             }
             if ([response[@"hasMore"] boolValue] && [response[@"nextOffset"] intValue] > 0
                 && (!offset || [response[@"nextOffset"] intValue] < offset))
+            {
                 self.olderOffsets[key] = response[@"nextOffset"];
+                // Continue even when this page contains no matching media.
+                // Queue at the end so a large chat cannot starve other chats.
+                [self.scanQueue addObject:source];
+            }
             else
                 [self.olderOffsets removeObjectForKey:key];
         } else {

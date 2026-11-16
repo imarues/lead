@@ -667,45 +667,34 @@ static NSString *LeadCleanFileStem(NSString *input, NSString *extension, NSStrin
                  files:(NSArray<LeadPendingFile *> *)files
                    ids:(NSDictionary<NSNumber *, NSNumber *> *)ids {
     UIViewController *presenting = composer.navigationController.presentingViewController;
-    void (^start)(void) = ^{ [self deliverIndex:0 files:files ids:ids retries:0]; };
+    void (^start)(void) = ^{ [self deliverFiles:files ids:ids]; };
     if (presenting) [presenting dismissViewControllerAnimated:YES completion:start];
     else start();
 }
 
-// One file per hand-over: each becomes its own message with its own name, cover
-// and description (Telegram would otherwise merge several files into an album).
-- (void)deliverIndex:(NSUInteger)index
-               files:(NSArray<LeadPendingFile *> *)files
-                 ids:(NSDictionary<NSNumber *, NSNumber *> *)ids
-             retries:(NSUInteger)retries {
-    if (index >= files.count) { [self releasePicker]; return; }
-    // Telegram can raise its own dialog (for example the audio send choice);
-    // wait for it instead of handing over the next file on top of it.
-    UIViewController *top = LeadTopPresenter();
-    if ([top isKindOfClass:UIAlertController.class] && retries < 120) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self deliverIndex:index files:files ids:ids retries:retries + 1];
-        });
-        return;
+// A picker selection is a one-shot callback. The audio picker hook and
+// Telegram's completion both consume it; repeated callbacks drop later files.
+- (void)deliverFiles:(NSArray<LeadPendingFile *> *)files
+                 ids:(NSDictionary<NSNumber *, NSNumber *> *)ids {
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:files.count];
+    for (NSUInteger index = 0; index < files.count; index++) {
+        LeadPendingFile *file = files[index];
+        NSString *fallback = file.extension.length ? [file.originalName stringByDeletingPathExtension] : file.originalName;
+        NSString *stem = LeadCleanFileStem(file.stem, file.extension, fallback);
+        NSString *newName = file.extension.length ? [NSString stringWithFormat:@"%@.%@", stem, file.extension] : stem;
+        NSString *caption = [file.caption stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (caption.length > kLeadCaptionLimit) caption = [caption substringToIndex:kLeadCaptionLimit];
+        NSNumber *coverId = ids[@(index)];
+        if (![newName isEqualToString:file.originalName] || coverId || caption.length) {
+            [TLParser registerCustomFileSendForOriginalName:file.originalName
+                                               displayName:newName
+                                           thumbnailFileId:coverId
+                                                   caption:caption.length ? caption : nil];
+        }
+        [urls addObject:file.url];
     }
-    LeadPendingFile *file = files[index];
-    NSString *fallback = file.extension.length ? [file.originalName stringByDeletingPathExtension] : file.originalName;
-    NSString *stem = LeadCleanFileStem(file.stem, file.extension, fallback);
-    NSString *newName = file.extension.length ? [NSString stringWithFormat:@"%@.%@", stem, file.extension] : stem;
-    NSString *caption = [file.caption stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (caption.length > kLeadCaptionLimit) caption = [caption substringToIndex:kLeadCaptionLimit];
-    NSNumber *coverId = ids[@(index)];
-    BOOL changed = ![newName isEqualToString:file.originalName] || coverId || caption.length;
-    if (changed) {
-        [TLParser registerCustomFileSendForOriginalName:file.originalName
-                                            displayName:newName
-                                        thumbnailFileId:coverId
-                                                caption:caption.length ? caption : nil];
-    }
-    [self deliverURLs:@[file.url]];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self deliverIndex:index + 1 files:files ids:ids retries:0];
-    });
+    [self deliverURLs:urls];
+    [self releasePicker];
 }
 
 @end

@@ -128,21 +128,6 @@ final class LeadMessageDiscoveryBridge: NSObject {
         ] as NSDictionary
     }
 
-    // The filter constructors are part of Telegram layer 233, but this
-    // project's compact generated Api.functions subset omits search methods.
-    private static func filterForCategory(_ category: Int) -> Int32 {
-        switch category {
-        case 0: return Int32(bitPattern: 0x9609a51c) // photos
-        case 1: return Int32(bitPattern: 0x9fc00e65) // videos
-        case 2: return Int32(bitPattern: 0x50f5c392) // voice notes
-        case 3: return Int32(bitPattern: 0x3751b49e) // music
-        case 4: return Int32(bitPattern: 0x9eddf188) // files
-        case 5: return Int32(bitPattern: 0xb549da53) // round videos
-        case 6: return Int32(bitPattern: 0x7ef0dd87) // links
-        default: return Int32(bitPattern: 0x9609a51c) // photos
-        }
-    }
-
     // messages.search#29ee847a flags:# peer:InputPeer q:string
     // from_id:flags.0?InputPeer ... filter:MessagesFilter min_date:int
     // max_date:int offset_id:int add_offset:int limit:int max_id:int min_id:int hash:long
@@ -157,12 +142,12 @@ final class LeadMessageDiscoveryBridge: NSObject {
         inputPeer.serialize(buffer, true)
         serializeString("", buffer: buffer, boxed: false)
         fromPeer.serialize(buffer, true)
-        buffer.appendInt32(filterForCategory(category))
+        buffer.appendInt32(Int32(bitPattern: 0x57e2f66c)) // empty filter; classify locally
         buffer.appendInt32(0) // min_date
         buffer.appendInt32(0) // max_date
         buffer.appendInt32(offsetId)
         buffer.appendInt32(0) // add_offset
-        buffer.appendInt32(30) // results per chat/page
+        buffer.appendInt32(100) // sender messages per page
         buffer.appendInt32(0) // max_id
         buffer.appendInt32(0) // min_id
         buffer.appendInt64(0) // hash: do not use cache-only responses
@@ -194,7 +179,7 @@ final class LeadMessageDiscoveryBridge: NSObject {
         default:
             return nil
         }
-        guard reader.readInt32() != nil,                     // vector constructor
+        guard reader.readInt32() == 481674261,               // vector constructor
               let count = reader.readInt32(), count >= 0, count <= 1000 else { return nil }
         var result = [Api.Message]()
         var failed = false
@@ -234,14 +219,37 @@ final class LeadMessageDiscoveryBridge: NSObject {
             } else if kind != "u" || value.flags & (1 << 1) != 0 {
                 continue
             }
-            let type: String
-            if category == 0 { type = "صورة" }
-            else if category == 1 { type = "فيديو" }
-            else if category == 2 { type = "فويس" }
-            else if category == 3 { type = "موسيقى" }
-            else if category == 4 { type = "ملف" }
-            else if category == 5 { type = "فيديو دائري" }
-            else { type = "رابط" }
+            // Combining from_id with a media filter is rejected by some peers.
+            // Search by sender only, then classify the actual message content.
+            var mediaCategory = -1
+            if let media = value.media {
+                switch media {
+                case .messageMediaPhoto: mediaCategory = 0
+                case let .messageMediaDocument(item):
+                    mediaCategory = 4
+                    if case let .document(document)? = item.document {
+                        for attribute in document.attributes {
+                            switch attribute {
+                            case let .documentAttributeAudio(audio):
+                                mediaCategory = audio.flags & (1 << 10) != 0 ? 2 : 3
+                            case let .documentAttributeVideo(video):
+                                mediaCategory = video.flags & 1 != 0 ? 5 : 1
+                            default: break
+                            }
+                        }
+                    }
+                default: break
+                }
+            }
+            let hasLink = (value.entities ?? []).contains { entity in
+                switch entity {
+                case .messageEntityUrl, .messageEntityTextUrl: return true
+                default: return false
+                }
+            }
+            if category != 7 && !(category == 6 ? hasLink : mediaCategory == category) { continue }
+            let labels = ["صورة", "فيديو", "فويس", "موسيقى", "ملف", "فيديو دائري"]
+            let type = category == 6 ? "رابط" : (mediaCategory >= 0 ? labels[mediaCategory] : "رسالة")
             rows.append([
                 "id": NSNumber(value: value.id),
                 "date": NSNumber(value: value.date),
@@ -259,7 +267,7 @@ final class LeadMessageDiscoveryBridge: NSObject {
             "items": rows,
             "partial": NSNumber(value: partial),
             "nextOffset": NSNumber(value: lowestId == Int32.max ? 0 : lowestId),
-            "hasMore": messages.count >= 30 && lowestId > 1
+            "hasMore": (messages.count >= 100 || partial) && lowestId > 1
         ] as NSDictionary
     }
 

@@ -436,7 +436,13 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
             });
             for(NSURL *url in images) {
                 @autoreleasepool {
-                    UIImage *image=[UIImage imageWithContentsOfFile:url.path];
+                    // Bound embedded raster resolution to 200 dpi of the selected page.
+                    // Drawing a full camera image into a small PDF page otherwise
+                    // embeds excess pixels and makes even five pages expensive to upload.
+                    NSInteger pixels=(NSInteger)ceil(MAX(page.size.width,page.size.height)*200.0/72.0);
+                    UIImage *image=LeadConversionPreview(url,MIN(3300,pixels));
+                    NSData *jpeg=image?UIImageJPEGRepresentation(image,0.85):nil;
+                    if(jpeg.length) image=[UIImage imageWithData:jpeg];
                     if(!image || image.size.width<=0 || image.size.height<=0) {
                         failed=@"صورة مختارة غير قابلة للقراءة.";
                         break;
