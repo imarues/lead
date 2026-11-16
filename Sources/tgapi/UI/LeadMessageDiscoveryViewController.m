@@ -64,6 +64,12 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
 + (NSDictionary *)parseResolvedUser:(NSData *)data;
 + (NSData *)commonChatsRequestForUserId:(int64_t)userId accessHash:(int64_t)accessHash maxId:(int64_t)maxId;
 + (NSDictionary *)parseCommonChats:(NSData *)data;
++ (NSData *)dialogsRequestWithOffsetDate:(int32_t)date offsetId:(int32_t)messageId
+                               offsetPeer:(NSData *)peer folderId:(int32_t)folderId;
++ (NSDictionary *)parseDiscoveryDialogs:(NSData *)data;
++ (NSData *)legacySenderGroupsRequest:(NSData *)sender;
++ (NSData *)publicGroupCandidatesRequestForUsername:(NSString *)username;
++ (NSDictionary *)parseDiscoveredGroups:(NSData *)data scope:(NSString *)scope;
 + (NSData *)searchRequestForPeer:(NSData *)peer sender:(NSData *)sender category:(NSInteger)category offsetId:(int32_t)offsetId;
 + (NSDictionary *)parseSearchResult:(NSData *)data senderId:(int64_t)sender source:(NSDictionary *)source category:(NSInteger)category;
 + (NSData *)forwardRequestForPeer:(NSData *)peer messageIds:(NSArray<NSNumber *> *)ids;
@@ -99,6 +105,11 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
 @property(nonatomic, strong) NSMutableSet<NSString *> *seen;
 @property(nonatomic, strong) NSMutableSet<NSString *> *selectedKeys;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *forwardQueue;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *pagesThisPass;
+@property(nonatomic, assign) BOOL gatheringSources;
+@property(nonatomic, assign) BOOL discoveryWasLimited;
+@property(nonatomic, assign) NSInteger exploredDialogPages;
+@property(nonatomic, assign) NSInteger publicCandidateCount;
 @property(nonatomic, assign) NSInteger generation;
 @property(nonatomic, assign) NSInteger completedChats;
 @property(nonatomic, assign) NSInteger totalChats;
@@ -129,6 +140,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     self.seen = [NSMutableSet set];
     self.selectedKeys = [NSMutableSet set];
     self.forwardQueue = [NSMutableArray array];
+    self.pagesThisPass = [NSMutableDictionary dictionary];
     self.tableView.allowsMultipleSelectionDuringEditing = YES;
     [self configureHeader];
 
@@ -141,7 +153,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
 }
 
 - (void)configureHeader {
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 204)];
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 238)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(16, 9, 215, 42)];
     field.borderStyle = UITextBorderStyleRoundedRect;
@@ -164,10 +176,10 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     [header addSubview:search];
 
     UILabel *status = [UILabel new];
-    status.text = @"أدخل يوزر الشخص. البحث ضمن الرسائل المتاحة لحسابك فقط.";
+    status.text = @"اكتب اليوزر: نفحص كروبات حسابك حتى لو الشخص غادرها، ونحاول اكتشاف كروبات عامة. النتائج مو شاملة كل تيليگرام.";
     status.font = [UIFont systemFontOfSize:12];
     status.textColor = UIColor.secondaryLabelColor;
-    status.numberOfLines = 3;
+    status.numberOfLines = 5;
     status.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusLabel = status;
     [header addSubview:status];
@@ -201,7 +213,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     [header addSubview:scroll];
 
     UIButton *groupsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [groupsButton setTitle:@"الكروبات المشتركة — إظهار" forState:UIControlStateNormal];
+    [groupsButton setTitle:@"مصادر البحث — إظهار" forState:UIControlStateNormal];
     groupsButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     groupsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
     groupsButton.translatesAutoresizingMaskIntoConstraints = NO;
@@ -221,7 +233,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         [status.leadingAnchor constraintEqualToAnchor:field.leadingAnchor],
         [status.trailingAnchor constraintEqualToAnchor:search.trailingAnchor],
         [status.topAnchor constraintEqualToAnchor:field.bottomAnchor constant:9],
-        [status.heightAnchor constraintEqualToConstant:50],
+        [status.heightAnchor constraintEqualToConstant:84],
         [scroll.topAnchor constraintEqualToAnchor:status.bottomAnchor constant:6],
         [scroll.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:15],
         [scroll.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-15],
@@ -267,6 +279,10 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     self.generation++;
     NSInteger token = self.generation;
     self.target = nil;
+    self.gatheringSources = YES;
+    self.discoveryWasLimited = NO;
+    self.exploredDialogPages = 0;
+    self.publicCandidateCount = 0;
     [self.groups removeAllObjects];
     [self.sources removeAllObjects];
     [self.results removeAllObjects];
@@ -286,16 +302,18 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
             ? [LeadMessageDiscoveryBridge parseResolvedUser:LeadDiscoveryUnpack(data)] : nil;
         if (!target) {
             self.scanning = NO;
+            self.gatheringSources = NO;
             [self displayStatus:@"تعذر العثور على الحساب."];
             [self showError:error.length ? error : @"هذا اليوزر غير متاح أو لم يرجع تيليگرام معلومات الحساب."];
             return;
         }
         self.target = target;
-        [self displayStatus:[NSString stringWithFormat:@"تم العثور على %@. جاري جمع الكروبات المشتركة…",
+        [self displayStatus:[NSString stringWithFormat:@"تم العثور على %@. جاري جمع الكروبات المشتركة وبقية محادثات حسابك…",
                              target[@"title"] ?: @"المستخدم"]];
         [self loadCommonPage:0 page:0 token:token];
     })) {
         self.scanning = NO;
+        self.gatheringSources = NO;
         [self displayStatus:@"اتصال تيليگرام غير جاهز. افتح محادثة ثم أعد المحاولة."];
     }
 }
@@ -338,6 +356,20 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     }
 }
 
+
+// The old version relied on getCommonChats alone and therefore missed messages
+// in groups where the target sender has already left. We now combine it with
+// all group dialogs in this account and limited public discovery candidates.
+- (BOOL)addDiscoveredSource:(NSDictionary *)source {
+    NSString *key = source[@"key"];
+    if (!key.length || ![source[@"peer"] isKindOfClass:NSData.class]) return NO;
+    for (NSDictionary *existing in self.sources) {
+        if ([existing[@"key"] isEqual:key]) return NO;
+    }
+    [self.sources addObject:source];
+    return YES;
+}
+
 - (void)commonChatsFinished {
     if (!self.target) return;
     [self.sources removeAllObjects];
@@ -346,21 +378,158 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         @"id": target[@"userId"],
         @"key": [NSString stringWithFormat:@"u%@", target[@"userId"]],
         @"kind": @"u", @"title": @"المحادثة الخاصة",
+        @"scope": @"المحادثة الخاصة",
         @"username": target[@"username"] ?: @"",
         @"peer": target[@"peer"]
     }];
-    [self.sources addObjectsFromArray:self.groups];
+    for (NSDictionary *group in self.groups) [self addDiscoveredSource:group];
+    self.groupsButton.enabled = NO;
+    [self displayStatus:@"جاري فحص كروبات حسابك، حتى الكروبات التي غادرها صاحب اليوزر…"];
+    [self loadDialogPage:nil page:0 folderId:0 token:self.generation];
+}
+
+- (void)loadDialogPage:(NSDictionary *)offset page:(NSInteger)page
+               folderId:(int32_t)folderId token:(NSInteger)token {
+    if (token != self.generation || !self.target) return;
+    NSData *peer = [offset[@"peer"] isKindOfClass:NSData.class] ? offset[@"peer"] : nil;
+    NSData *payload = [LeadMessageDiscoveryBridge
+        dialogsRequestWithOffsetDate:[offset[@"date"] intValue]
+        offsetId:[offset[@"id"] intValue] offsetPeer:peer folderId:folderId];
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || token != self.generation) return;
+        if ([error hasPrefix:@"FLOOD_WAIT"]) {
+            self.gatheringSources = NO;
+            self.scanning = NO;
+            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل الطلبات: %@. جرّب بعد انتهاء المدة.",error]];
+            return;
+        }
+        NSDictionary *parsed = (!error.length && data.length) ?
+            [LeadMessageDiscoveryBridge parseDiscoveryDialogs:LeadDiscoveryUnpack(data)] : nil;
+        if (!parsed) {
+            self.discoveryWasLimited = YES;
+            [self finishDialogFolder:folderId token:token];
+            return;
+        }
+        self.exploredDialogPages++;
+        for (NSDictionary *group in parsed[@"items"]) [self addDiscoveredSource:group];
+        NSDictionary *next = parsed[@"next"];
+        BOOL more = [parsed[@"hasMore"] boolValue] && [next isKindOfClass:NSDictionary.class] &&
+                    [next[@"peer"] isKindOfClass:NSData.class];
+        // Hard limit avoids unbounded request bursts on accounts with thousands of dialogs.
+        if (more && page < 29 && ![offset isEqual:next]) {
+            [self displayStatus:[NSString stringWithFormat:@"تفحّص %ld صفحة من محادثاتك؛ عثر على %lu مصدر…",
+                (long)self.exploredDialogPages,(unsigned long)self.sources.count-1]];
+            [self loadDialogPage:next page:page+1 folderId:folderId token:token];
+        } else {
+            if (more) self.discoveryWasLimited = YES;
+            [self finishDialogFolder:folderId token:token];
+        }
+    })) {
+        self.discoveryWasLimited = YES;
+        [self finishDialogFolder:folderId token:token];
+    }
+}
+
+- (void)finishDialogFolder:(int32_t)folderId token:(NSInteger)token {
+    if (token != self.generation || !self.target) return;
+    if (folderId == 0) {
+        [self displayStatus:@"جاري تفحّص الكروبات المؤرشفة أيضاً…"];
+        [self loadDialogPage:nil page:0 folderId:1 token:token];
+    } else {
+        [self discoverLegacySenderGroupsWithToken:token];
+    }
+}
+
+- (void)discoverLegacySenderGroupsWithToken:(NSInteger)token {
+    if (token != self.generation || !self.target) return;
+    [self displayStatus:@"جاري تجربة البحث الشامل في الكروبات العادية غير المشمولة بالقائمة…"];
+    NSData *payload = [LeadMessageDiscoveryBridge legacySenderGroupsRequest:self.target[@"peer"]];
+    if (!payload.length) {
+        self.discoveryWasLimited = YES;
+        [self discoverPublicCandidatesWithToken:token];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || token != self.generation) return;
+        if ([error hasPrefix:@"FLOOD_WAIT"]) {
+            self.gatheringSources = NO;
+            self.scanning = NO;
+            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل البحث: %@. جرّب لاحقاً.",error]];
+            return;
+        }
+        NSDictionary *parsed = (!error.length && data.length) ?
+          [LeadMessageDiscoveryBridge parseDiscoveredGroups:LeadDiscoveryUnpack(data)
+               scope:@"بحث بالكروبات العادية"] : nil;
+        if (parsed) {
+            for (NSDictionary *group in parsed[@"items"]) [self addDiscoveredSource:group];
+        } else self.discoveryWasLimited = YES;
+        [self discoverPublicCandidatesWithToken:token];
+    })) {
+        self.discoveryWasLimited = YES;
+        [self discoverPublicCandidatesWithToken:token];
+    }
+}
+
+- (void)discoverPublicCandidatesWithToken:(NSInteger)token {
+    if (token != self.generation || !self.target) return;
+    [self displayStatus:@"جاري تجربة البحث العام عن كروبات يظهر فيها اليوزر… النتائج المرشّحة تُفحص باسم المرسل للتأكد."];
+    NSString *username = self.target[@"username"];
+    if (![username isKindOfClass:NSString.class] || !username.length)
+        username = [self.usernameField.text stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([username hasPrefix:@"@"]) username = [username substringFromIndex:1];
+    if (!username.length) {
+        [self finishSourceDiscoveryWithToken:token];
+        return;
+    }
+    NSData *payload = [LeadMessageDiscoveryBridge publicGroupCandidatesRequestForUsername:username];
+    __weak typeof(self) weakSelf = self;
+    if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || token != self.generation) return;
+        if ([error hasPrefix:@"FLOOD_WAIT"]) {
+            self.gatheringSources = NO;
+            self.scanning = NO;
+            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل البحث: %@. جرّب لاحقاً.",error]];
+            return;
+        }
+        NSDictionary *parsed = (!error.length && data.length) ?
+          [LeadMessageDiscoveryBridge parseDiscoveredGroups:LeadDiscoveryUnpack(data)
+               scope:@"مرشّح من البحث العام"] : nil;
+        if (parsed) {
+            for (NSDictionary *group in parsed[@"items"]) {
+                if (self.publicCandidateCount >= 60) {
+                    self.discoveryWasLimited = YES;
+                    break;
+                }
+                if ([self addDiscoveredSource:group]) self.publicCandidateCount++;
+            }
+        } else self.discoveryWasLimited = YES;
+        [self finishSourceDiscoveryWithToken:token];
+    })) {
+        self.discoveryWasLimited = YES;
+        [self finishSourceDiscoveryWithToken:token];
+    }
+}
+
+- (void)finishSourceDiscoveryWithToken:(NSInteger)token {
+    if (token != self.generation || !self.target) return;
+    self.gatheringSources = NO;
     self.groupsButton.enabled = YES;
-    [self.groupsButton setTitle:[NSString stringWithFormat:@"الكروبات المشتركة (%lu) — %@",
-         (unsigned long)self.groups.count, self.groupsExpanded ? @"إخفاء" : @"إظهار"]
-                        forState:UIControlStateNormal];
+    [self.groupsButton setTitle:[NSString stringWithFormat:@"مصادر البحث (%lu) — %@",
+        (unsigned long)self.sources.count,
+        self.groupsExpanded ? @"إخفاء" : @"إظهار"] forState:UIControlStateNormal];
     [self startFreshScan];
 }
 
 - (void)toggleGroups {
     self.groupsExpanded = !self.groupsExpanded;
-    [self.groupsButton setTitle:[NSString stringWithFormat:@"الكروبات المشتركة (%lu) — %@",
-         (unsigned long)self.groups.count, self.groupsExpanded ? @"إخفاء" : @"إظهار"]
+    [self.groupsButton setTitle:[NSString stringWithFormat:@"مصادر البحث (%lu) — %@",
+         (unsigned long)self.sources.count, self.groupsExpanded ? @"إخفاء" : @"إظهار"]
                         forState:UIControlStateNormal];
     [self.tableView reloadData];
 }
@@ -424,15 +593,16 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     [self styleChips];
     [self.chipScroll scrollRectToVisible:CGRectInset(chip.frame, -24, 0) animated:YES];
     LeadSelectionHaptic();
-    if (self.target) [self startFreshScan];
+    if (self.target && !self.gatheringSources) [self startFreshScan];
 }
 
 - (void)startFreshScan {
-    if (!self.target || self.forwarding) return;
+    if (!self.target || self.forwarding || self.gatheringSources) return;
     [self leaveSelection];
     self.generation++;
     [self.results removeAllObjects];
     [self.olderOffsets removeAllObjects];
+    [self.pagesThisPass removeAllObjects];
     [self.seen removeAllObjects];
     [self.scanQueue removeAllObjects];
     for (NSDictionary *source in self.sources) {
@@ -454,9 +624,19 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     if (self.scanQueue.count == 0) {
         self.scanning = NO;
         NSString *summary = self.results.count ?
-            [NSString stringWithFormat:@"اكتمل الفحص: %lu رسالة ضمن %ld محادثة. اضغط مرة للفتح أو مطوّلاً للتحديد.",
+            [NSString stringWithFormat:@"نتائج البحث: %lu رسالة من %ld مصدر. ضغطة للفتح أو مطوّلة للتحديد.",
              (unsigned long)self.results.count, (long)self.totalChats] :
-            [NSString stringWithFormat:@"اكتمل الفحص ضمن %ld محادثة: لا توجد رسائل من هذا النوع.", (long)self.totalChats];
+            [NSString stringWithFormat:@"ما ظهرت رسائل من الفئة ضمن أول الصفحات المفحوصة من %ld مصدر.", (long)self.totalChats];
+        if (self.olderOffsets.count)
+            summary = [summary stringByAppendingFormat:@"\nباقي تاريخ أقدم في %lu محادثة؛ اضغط تحميل رسائل أقدم.",
+                       (unsigned long)self.olderOffsets.count];
+        if (self.publicCandidateCount)
+            summary = [summary stringByAppendingFormat:@"\nفحصنا %ld كروب عام مرشّح؛ مو فهرس شامل لتيليگرام.",
+                       (long)self.publicCandidateCount];
+        else
+            summary = [summary stringByAppendingString:@"\nمحاولة البحث العام محدودة: ما تضمن اكتشاف كل الكروبات."];
+        if (self.discoveryWasLimited)
+            summary = [summary stringByAppendingString:@"\nبعض مصادر البحث ما انقرأت؛ النتائج جزئية."];
         if (self.failedChats > 0)
             summary = [summary stringByAppendingFormat:@"\nتعذّر فحص %ld محادثة%@.", (long)self.failedChats,
                        self.firstScanError.length ? [NSString stringWithFormat:@" (%@)", self.firstScanError] : @""];
@@ -475,7 +655,11 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     NSData *payload = [LeadMessageDiscoveryBridge searchRequestForPeer:source[@"peer"]
          sender:self.target[@"peer"] category:self.category offsetId:offset];
     if (offset == 0) self.completedChats++;
-    if (!payload.length) { [self scanNextWithToken:token]; return; }
+    if (!payload.length) {
+        self.failedChats++;
+        if (!self.firstScanError.length) self.firstScanError = @"تعذّر إنشاء طلب البحث";
+        [self scanNextWithToken:token]; return;
+    }
     __weak typeof(self) weakSelf = self;
     if (!LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
         __strong typeof(weakSelf) self = weakSelf;
@@ -509,9 +693,12 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
                 && (!offset || [response[@"nextOffset"] intValue] < offset))
             {
                 self.olderOffsets[key] = response[@"nextOffset"];
-                // Continue even when this page contains no matching media.
-                // Queue at the end so a large chat cannot starve other chats.
-                [self.scanQueue addObject:source];
+                NSInteger pages = [self.pagesThisPass[key] integerValue] + 1;
+                self.pagesThisPass[key] = @(pages);
+                // Scan at most 3 pages (300 messages by sender) per source
+                // automatically. The button below fetches subsequent pages.
+                // This prevents a single prolific sender from delaying all groups.
+                if (pages < 3) [self.scanQueue addObject:source];
             }
             else
                 [self.olderOffsets removeObjectForKey:key];
@@ -546,6 +733,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
     }
     self.totalChats = self.scanQueue.count;
     self.completedChats = 0;
+    [self.pagesThisPass removeAllObjects];
     self.scanning = YES;
     [self scanNextWithToken:self.generation];
 }
@@ -691,7 +879,7 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (section == 0 && self.groupsExpanded) return @"المصادر (اضغط لإلغاء أو تفعيل البحث فيها)";
+    if (section == 0 && self.groupsExpanded) return @"مصادر البحث: مشتركة، بحسابك ولو غادرها الشخص، ومرشّحة عامة";
     if (section == 1 && self.target) return [NSString stringWithFormat:@"رسائل %@ — %lu", self.target[@"title"], (unsigned long)self.results.count];
     return nil;
 }
@@ -710,7 +898,8 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         NSDictionary *group = self.sources[path.row];
         BOOL included = ![self.excluded containsObject:group[@"key"]];
         cell.textLabel.text = group[@"title"];
-        cell.detailTextLabel.text = [group[@"kind"] isEqual:@"u"] ? @"المحادثة الخاصة" : @"كروب مشترك";
+        cell.detailTextLabel.text = group[@"scope"] ?: ([group[@"kind"] isEqual:@"u"] ?
+            @"المحادثة الخاصة" : @"كروب مشترك");
         cell.accessoryType = included ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     } else if (path.section == 1) {
         NSDictionary *item = self.results[path.row];
@@ -724,8 +913,9 @@ static NSData *LeadDiscoveryUnpack(NSData *data) {
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · %@", [formatter stringFromDate:date], body];
         if (!self.selectionMode) cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else {
-        cell.textLabel.text = @"تحميل رسائل أقدم";
-        cell.detailTextLabel.text = @"يبحث في الصفحات التالية من المحادثات";
+        cell.textLabel.text = [NSString stringWithFormat:@"تحميل رسائل أقدم (%lu مصدر)",
+           (unsigned long)self.olderOffsets.count];
+        cell.detailTextLabel.text = @"متابعة فحص رسائل المرسل القديمة على دفعات";
         cell.textLabel.textColor = UIColor.systemBlueColor;
     }
     return cell;

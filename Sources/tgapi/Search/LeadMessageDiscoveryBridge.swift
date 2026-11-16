@@ -128,6 +128,209 @@ final class LeadMessageDiscoveryBridge: NSObject {
         ] as NSDictionary
     }
 
+
+    // Unlike getCommonChats, getDialogs includes groups the account still has
+    // access to even if the selected sender left them years ago.
+    @objc(dialogsRequestWithOffsetDate:offsetId:offsetPeer:folderId:)
+    static func dialogsRequest(offsetDate: Int32, offsetId: Int32,
+                               offsetPeer: NSData?, folderId: Int32) -> NSData {
+        let buffer = Buffer()
+        buffer.appendInt32(Int32(bitPattern: 0xa0f4cb4f)) // messages.getDialogs
+        buffer.appendInt32(folderId == 1 ? (1 << 1) : 0)
+        if folderId == 1 { buffer.appendInt32(1) } // archived folder
+        buffer.appendInt32(offsetDate)
+        buffer.appendInt32(offsetId)
+        if let peer = offsetPeer, let parsed = decodePeer(peer) {
+            parsed.serialize(buffer, true)
+        } else {
+            buffer.appendInt32(2134579434) // inputPeerEmpty
+        }
+        buffer.appendInt32(100)
+        buffer.appendInt64(0)
+        return buffer.makeData() as NSData
+    }
+
+    private static func key(for peer: Api.Peer) -> String {
+        switch peer {
+        case .peerUser(let p): return "u\(p.userId)"
+        case .peerChat(let p): return "g\(p.chatId)"
+        case .peerChannel(let p): return "c\(p.channelId)"
+        }
+    }
+
+    private static func groupSources(from chats: [Api.Chat],
+                                     scope: String,
+                                     publicOnly: Bool) -> [[String: Any]] {
+        var items = [[String: Any]]()
+        for chat in chats {
+            switch chat {
+            case .chat(let value):
+                if publicOnly { continue } // legacy chats have no public username
+                items.append([
+                    "id": NSNumber(value: value.id),
+                    "key": "g\(value.id)", "kind": "g",
+                    "title": value.title, "username": "",
+                    "scope": scope,
+                    "peer": peerData(.inputPeerChat(.init(chatId: value.id)))
+                ])
+            case .channel(let value):
+                if value.flags & (1 << 5) != 0 { continue } // broadcast channel
+                guard let hash = value.accessHash else { continue }
+                let username = value.username ?? ""
+                if publicOnly && username.isEmpty { continue }
+                items.append([
+                    "id": NSNumber(value: value.id),
+                    "key": "c\(value.id)", "kind": "c",
+                    "title": value.title, "username": username,
+                    "scope": scope,
+                    "peer": peerData(.inputPeerChannel(
+                        .init(channelId: value.id, accessHash: hash)))
+                ])
+            case .community(let value):
+                if publicOnly { continue }
+                guard let hash = value.accessHash else { continue }
+                items.append([
+                    "id": NSNumber(value: value.id),
+                    "key": "c\(value.id)", "kind": "c",
+                    "title": value.title, "username": "",
+                    "scope": scope,
+                    "peer": peerData(.inputPeerChannel(
+                        .init(channelId: value.id, accessHash: hash)))
+                ])
+            default: continue
+            }
+        }
+        return items
+    }
+
+    @objc(parseDiscoveryDialogs:)
+    static func parseDiscoveryDialogs(_ bytes: NSData) -> NSDictionary? {
+        guard let response = payload(bytes) as? Api.messages.Dialogs else { return nil }
+        let dialogs: [Api.Dialog]
+        let chats: [Api.Chat]
+        let users: [Api.User]
+        let messages: [Api.Message]
+        switch response {
+        case .dialogs(let item):
+            dialogs = item.dialogs; chats = item.chats
+            users = item.users; messages = item.messages
+        case .dialogsSlice(let item):
+            dialogs = item.dialogs; chats = item.chats
+            users = item.users; messages = item.messages
+        case .dialogsNotModified:
+            return nil
+        }
+
+        let groups = groupSources(from: chats, scope: "كروب بحسابك", publicOnly: false)
+        var inputPeers = [String: Api.InputPeer]()
+        for record in groups {
+            if let key = record["key"] as? String,
+               let bytes = record["peer"] as? NSData,
+               let peer = decodePeer(bytes) { inputPeers[key] = peer }
+        }
+        for user in users {
+            if case .user(let item) = user, let hash = item.accessHash {
+                inputPeers["u\(item.id)"] = .inputPeerUser(
+                    .init(userId: item.id, accessHash: hash))
+            }
+        }
+
+        var messageDates = [String: [Int32: Int32]]()
+        for message in messages {
+            switch message {
+            case .message(let item):
+                messageDates[key(for: item.peerId), default: [:]][item.id] = item.date
+            case .messageService(let item):
+                messageDates[key(for: item.peerId), default: [:]][item.id] = item.date
+            default: break
+            }
+        }
+
+        var nextPeer: NSData?
+        var nextId: Int32 = 0
+        var nextDate: Int32 = 0
+        for dialog in dialogs {
+            guard case .dialog(let item) = dialog else { continue }
+            let k = key(for: item.peer)
+            guard let input = inputPeers[k] else { continue }
+            nextPeer = peerData(input)
+            nextId = item.topMessage
+            nextDate = messageDates[k]?[item.topMessage] ?? 0
+        }
+        return [
+            "items": groups,
+            "returned": NSNumber(value: dialogs.count),
+            "hasMore": NSNumber(value: dialogs.count >= 100 && nextPeer != nil),
+            "next": nextPeer.map {
+                ["peer": $0, "id": NSNumber(value: nextId),
+                 "date": NSNumber(value: nextDate)] as [String: Any]
+            } ?? [:]
+        ] as NSDictionary
+    }
+
+    // This first-party API search covers *normal* groups/private dialogs when
+    // the input peer is empty. It does not index all Telegram supergroups.
+    @objc(legacySenderGroupsRequest:)
+    static func legacySenderGroupsRequest(_ sender: NSData) -> NSData? {
+        let buffer = Buffer()
+        buffer.appendInt32(2134579434) // inputPeerEmpty
+        return searchRequest(peer: buffer.makeData() as NSData,
+                             sender: sender, category: 7, offsetId: 0)
+    }
+
+    // Broad text query, NOT a global sender search. Results only nominate
+    // public groups for subsequent server-side from_id verification.
+    @objc(publicGroupCandidatesRequestForUsername:)
+    static func publicGroupCandidatesRequest(username: String) -> NSData {
+        let buffer = Buffer()
+        buffer.appendInt32(Int32(bitPattern: 0x4bc6589a)) // messages.searchGlobal
+        buffer.appendInt32(1 << 2) // groups_only
+        serializeString(username, buffer: buffer, boxed: false)
+        buffer.appendInt32(Int32(bitPattern: 0x57e2f66c)) // no media filter
+        buffer.appendInt32(0) // min_date
+        buffer.appendInt32(0) // max_date
+        buffer.appendInt32(0) // offset_rate
+        buffer.appendInt32(2134579434) // offset_peer: empty
+        buffer.appendInt32(0) // offset_id
+        buffer.appendInt32(100) // limit
+        return buffer.makeData() as NSData
+    }
+
+    @objc(parseDiscoveredGroups:scope:)
+    static func parseDiscoveredGroups(_ bytes: NSData,
+                                      scope: String) -> NSDictionary? {
+        guard let response = payload(bytes) as? Api.messages.Messages else { return nil }
+        let messages: [Api.Message]
+        let chats: [Api.Chat]
+        switch response {
+        case .messages(let value):
+            messages = value.messages; chats = value.chats
+        case .messagesSlice(let value):
+            messages = value.messages; chats = value.chats
+        case .channelMessages(let value):
+            messages = value.messages; chats = value.chats
+        case .messagesNotModified:
+            return nil
+        }
+        // Only consider chats actually represented in the result messages.
+        // Never claim that a mere username mention proves the target sent there.
+        var represented = Set<String>()
+        for message in messages {
+            switch message {
+            case .message(let item): _ = represented.insert(key(for: item.peerId))
+            case .messageService(let item): _ = represented.insert(key(for: item.peerId))
+            default: break
+            }
+        }
+        let candidates = groupSources(
+            from: chats, scope: scope, publicOnly: scope == "مرشّح من البحث العام")
+            .filter { represented.contains($0["key"] as? String ?? "") }
+        return [
+            "items": candidates,
+            "returned": NSNumber(value: messages.count)
+        ] as NSDictionary
+    }
+
     // messages.search#29ee847a flags:# peer:InputPeer q:string
     // from_id:flags.0?InputPeer ... filter:MessagesFilter min_date:int
     // max_date:int offset_id:int add_offset:int limit:int max_id:int min_id:int hash:long
