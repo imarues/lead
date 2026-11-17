@@ -64,6 +64,7 @@ static BOOL gGroupNormalChosen=NO;
 static BOOL gGroupNormalActive=NO;
 static BOOL gGroupReplayAction=NO;
 static std::atomic<bool> gGroupGalleryPending{false};
+static std::atomic<uint32_t> gGroupPreviewLayoutTicks{0};
 static void (*gGroupRequestVideo)(id,SEL,id,id)=nullptr;
 static void (*gGroupDisableVideo)(id,SEL)=nullptr;
 static void (*gGroupDisableVideoCompletion)(id,SEL,id)=nullptr;
@@ -126,6 +127,9 @@ extern "C" id objc_retain(id);
 @property(nonatomic,weak) id lastPhysicalCamera;
 @property(nonatomic,weak) id protectedPhysicalCamera;
 @property(nonatomic,strong) UIView *localPreviewView;
+@property(nonatomic,strong) UIView *groupPreviewView;
+@property(nonatomic,strong) AVPlayer *groupPreviewPlayer;
+@property(nonatomic,strong) AVPlayerLayer *groupPreviewLayer;
 @property(nonatomic,strong) AVPlayer *localPreviewPlayer;
 @property(nonatomic,strong) AVPlayerLayer *localPreviewLayer;
 @property(nonatomic,strong) AVPlayerItemVideoOutput *localPreviewPixelOutput;
@@ -162,6 +166,9 @@ extern "C" id objc_retain(id);
 - (void)capturePhysicalCamera:(id)camera;
 - (void)startLocalPreview;
 - (void)removeLocalPreview;
+- (void)startGroupPreview;
+- (void)updateGroupPreview;
+- (void)removeGroupPreview;
 - (void)drawGalleryPreviewIntoRecording:(UIView *)root;
 - (void)dragLocalPreview:(UIPanGestureRecognizer *)gesture;
 - (void)pinchLocalPreview:(UIPinchGestureRecognizer *)gesture;
@@ -514,10 +521,12 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     gFramesSubmitted.store(0);
     gFullCallMode.store(false);
     gRemoteLayoutTicks.store(0);
+    gGroupPreviewLayoutTicks.store(0);
     gFullRemoteDuration.store(0);
     std::atomic_store(&gPCM,std::shared_ptr<AudioClip>());
     [self stopTimer];
     [self removeLocalPreview];
+    [self removeGroupPreview];
     [self removeRemotePreview];
     @synchronized(self) {
         self.clip=nil;self.externalCapturer=nil;self.nativeCallContext=nil;self.nextAudioSample=0;
@@ -846,7 +855,8 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     dispatch_source_set_event_handler(self.playbackTimer,^{[self playbackTick];});
     dispatch_resume(self.playbackTimer);
     dispatch_async(dispatch_get_main_queue(),^{
-        [self startLocalPreview];
+        if(gGroupMode.load()) [self startGroupPreview];
+        else [self startLocalPreview];
         if(gFullCallMode.load()) [self startRemotePreview];
     });
 }
@@ -859,6 +869,11 @@ static void LeadGroupStop(id self, SEL command, id completion) {
        (gRemoteLayoutTicks.fetch_add(1,std::memory_order_relaxed)%30)==0)
         dispatch_async(dispatch_get_main_queue(),^{
             if(gMode.load()==2)[self startRemotePreview];
+        });
+    if(gGroupMode.load() &&
+       (gGroupPreviewLayoutTicks.fetch_add(1,std::memory_order_relaxed)%30)==0)
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(gMode.load()==2 && gGroupMode.load())[self updateGroupPreview];
         });
     LeadVirtualClip *video=nil;id capturer=nil;
     @synchronized(self) {video=self.clip;capturer=self.externalCapturer;}
@@ -873,6 +888,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
         [self stopTimer];
         dispatch_async(dispatch_get_main_queue(),^{
             [self removeLocalPreview];
+            [self removeGroupPreview];
             [self removeRemotePreview];
         });
         NSLog(@"[LeadVirtualMedia] EOF: video=%llu, microphone-replaced=%llu, external bytes=%llu",
@@ -922,8 +938,10 @@ static void LeadGroupStop(id self, SEL command, id completion) {
 }
 
 - (void)rememberCallView:(UIView *)view {
-    if([NSStringFromClass(view.class) containsString:@"VideoChatScreenComponent"])
+    if([NSStringFromClass(view.class) containsString:@"VideoChatScreenComponent"]) {
         gGroupCallView=view;
+        if(gMode.load()==2 && gGroupMode.load()) [self startGroupPreview];
+    }
     if(view && [NSStringFromClass(view.class) containsString:@"PrivateCallScreen"]) {
         self.privateCallView=view;
         if(gMode.load()==2) {
@@ -933,6 +951,10 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     }
 }
 - (void)forgetCallView:(UIView *)view {
+    if(view==gGroupCallView) {
+        gGroupCallView=nil;
+        [self.groupPreviewView removeFromSuperview];
+    }
     if(self.privateCallView==view) {
         self.privateCallView=nil;
         [self.localPreviewView removeFromSuperview];
@@ -1215,6 +1237,122 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     if([camera respondsToSelector:@selector(setIsVideoEnabled:)])
         ((void (*)(id,SEL,bool))objc_msgSend)(
             camera,@selector(setIsVideoEnabled:),false);
+}
+// Show exactly the selected outgoing movie on the broadcaster's own screen.
+// This is a muted, hardware-decoded LOCAL mirror only; the frames transmitted to
+// the room continue to come from playbackTick -> submitSampleBuffer.
+- (void)removeGroupPreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self removeGroupPreview];});
+        return;
+    }
+    [self.groupPreviewPlayer pause];
+    [self.groupPreviewView removeFromSuperview];
+    self.groupPreviewLayer=nil;
+    self.groupPreviewPlayer=nil;
+    self.groupPreviewView=nil;
+}
+- (void)startGroupPreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self startGroupPreview];});
+        return;
+    }
+    if(!gGroupMode.load() || gMode.load()!=2 || !self.selectedURL)return;
+    if(!self.groupPreviewView) {
+        AVPlayerItem *item=[AVPlayerItem playerItemWithURL:self.selectedURL];
+        self.groupPreviewPlayer=[AVPlayer playerWithPlayerItem:item];
+        self.groupPreviewPlayer.muted=YES;
+        self.groupPreviewPlayer.volume=0.0f;
+        self.groupPreviewPlayer.actionAtItemEnd=AVPlayerActionAtItemEndPause;
+        self.groupPreviewLayer=[AVPlayerLayer playerLayerWithPlayer:self.groupPreviewPlayer];
+        // AspectFit: a portrait movie remains completely visible even in a
+        // wide group video tile, with letterboxing instead of cropping.
+        self.groupPreviewLayer.videoGravity=AVLayerVideoGravityResizeAspect;
+        UIView *preview=[[UIView alloc] initWithFrame:CGRectZero];
+        preview.backgroundColor=UIColor.blackColor;
+        preview.layer.cornerRadius=12;
+        preview.layer.masksToBounds=YES;
+        preview.userInteractionEnabled=NO;
+        preview.layer.zPosition=80000;
+        [preview.layer addSublayer:self.groupPreviewLayer];
+        UILabel *caption=[[UILabel alloc] initWithFrame:CGRectZero];
+        caption.text=@"معاينة بثك";
+        caption.textColor=UIColor.whiteColor;
+        caption.font=[UIFont boldSystemFontOfSize:12];
+        caption.backgroundColor=[UIColor colorWithWhite:0 alpha:0.5];
+        caption.layer.cornerRadius=5;
+        caption.layer.masksToBounds=YES;
+        caption.textAlignment=NSTextAlignmentCenter;
+        caption.tag=90879;
+        [preview addSubview:caption];
+        self.groupPreviewView=preview;
+        const double start=gStartClock.load();
+        double elapsed=start>0?MAX(0.0,CACurrentMediaTime()-start):0.0;
+        [self.groupPreviewPlayer seekToTime:CMTimeMakeWithSeconds(elapsed,600)
+           toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
+           completionHandler:^(BOOL finished) {
+            if(finished && gMode.load()==2 && gGroupMode.load())
+                dispatch_async(dispatch_get_main_queue(),^{[self.groupPreviewPlayer play];});
+        }];
+    }
+    [self updateGroupPreview];
+}
+- (void)updateGroupPreview {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(),^{[self updateGroupPreview];});
+        return;
+    }
+    if(!gGroupMode.load() || gMode.load()!=2)return;
+    if(!self.groupPreviewView) {
+        [self startGroupPreview];
+        return;
+    }
+    UIView *root=gGroupCallView;
+    if(!root || !root.window)return;
+    // Prefer Telegram's large outgoing participant-video tile, not a global
+    // window overlay that could hide call controls or another participant.
+    UIView *best=nil;
+    CGFloat bestArea=0;
+    NSMutableArray<UIView *> *stack=[NSMutableArray arrayWithObject:root];
+    while(stack.count) {
+        UIView *v=stack.lastObject;
+        [stack removeLastObject];
+        if(v.hidden || v.alpha<0.05)continue;
+        NSString *name=NSStringFromClass(v.class);
+        if([name containsString:@"VideoChatParticipantVideoComponent"] &&
+           v.bounds.size.width>root.bounds.size.width*0.55 &&
+           v.bounds.size.height>100) {
+            CGRect rect=[v convertRect:v.bounds toView:root];
+            if(CGRectGetMaxY(rect)<root.bounds.size.height*0.80 &&
+               CGRectGetMinY(rect)>=0 && CGRectGetWidth(rect)>0 &&
+               CGRectGetHeight(rect)>0) {
+                CGFloat area=rect.size.width*rect.size.height;
+                if(area>bestArea){bestArea=area;best=v;}
+            }
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+    CGRect frame=CGRectZero;
+    if(best) {
+        CGRect rect=[best convertRect:best.bounds toView:root];
+        frame=CGRectInset(rect,0,0);
+    } else {
+        // The group's tile can be lazily instantiated while the video
+        // participant joins. Keep a small unambiguous preview in that case.
+        CGFloat width=MIN(132,root.bounds.size.width*0.34);
+        CGFloat height=width*1.5;
+        frame=CGRectMake(MAX(8,root.bounds.size.width-width-16),
+                         MAX(95,root.safeAreaInsets.top+55),width,height);
+    }
+    if(frame.size.width<=0 || frame.size.height<=0)return;
+    self.groupPreviewView.frame=frame;
+    self.groupPreviewLayer.frame=self.groupPreviewView.bounds;
+    UILabel *caption=(UILabel *)[self.groupPreviewView viewWithTag:90879];
+    caption.frame=CGRectMake(8,MAX(4,frame.size.height-29),100,23);
+    if(self.groupPreviewView.superview!=root) {
+        [self.groupPreviewView removeFromSuperview];
+        [root addSubview:self.groupPreviewView];
+    }
 }
 - (void)removeLocalPreview {
     if(!NSThread.isMainThread) {
@@ -1863,20 +2001,42 @@ static BOOL LeadViewHasMuteTitle(UIView *view) {
     for(UIView *child in view.subviews)if(LeadViewHasMuteTitle(child))return YES;
     return NO;
 }
+static BOOL LeadGroupGreenMicGlow(UIView *root) {
+    if([NSStringFromClass(root.class) containsString:@"GlowView"]) {
+        for(CALayer *layer in root.layer.sublayers) {
+            if(![layer isKindOfClass:CAGradientLayer.class])continue;
+            NSArray *colors=((CAGradientLayer *)layer).colors;
+            if(!colors.count)continue;
+            UIColor *color=[UIColor colorWithCGColor:(__bridge CGColorRef)colors.firstObject];
+            CGFloat r=0,g=0,b=0,a=0;
+            if([color getRed:&r green:&g blue:&b alpha:&a] &&
+               g>0.48 && g>r*1.25 && g>b*1.20)return YES;
+        }
+    }
+    for(UIView *child in root.subviews)if(LeadGroupGreenMicGlow(child))return YES;
+    return NO;
+}
 static void LeadFindGroupControls(UIView *root,UIControl **camera,UIControl **mic) {
+    if(!root)return;
     if([root isKindOfClass:UIControl.class]) {
         if(LeadIsGroupCameraControl((UIControl *)root))*camera=(UIControl *)root;
-        if([NSStringFromClass(root.class) containsString:@"VideoChatMicButtonComponent"] &&
-            LeadViewHasMuteTitle(root))*mic=(UIControl *)root;
+        if([NSStringFromClass(root.class) containsString:@"VideoChatMicButtonComponent"])
+            *mic=(UIControl *)root;
     }
     for(UIView *child in root.subviews)LeadFindGroupControls(child,camera,mic);
 }
 static void LeadCloseGroupMediaControls(void) {
     UIControl *camera=nil,*mic=nil;
     LeadFindGroupControls(gGroupCallView,&camera,&mic);
-    // Only end tracking on the unmuted button. Its Swift implementation sets
-    // .muted explicitly; never toggle a button that is already muted.
-    if(mic)[mic endTrackingWithTouch:nil withEvent:nil];
+    // Telegram's native VideoChatMicButtonComponent calls setIsMuted(.muted)
+    // inside endTracking, which ALSO refreshes the visible green microphone.
+    // Only invoke it when native green glow (or a mute caption) says unmuted.
+    if(mic && (LeadGroupGreenMicGlow(mic) || LeadViewHasMuteTitle(mic))) {
+        [mic endTrackingWithTouch:nil withEvent:nil];
+        NSLog(@"[LeadVirtualMedia] EOF: requested native group UI microphone mute");
+    } else {
+        NSLog(@"[LeadVirtualMedia] EOF: microphone already muted or control not found");
+    }
     if(camera) {
         BOOL previous=gGroupReplayAction;
         gGroupReplayAction=YES;
@@ -1934,6 +2094,64 @@ static void LeadCloseGroupMediaControls(void) {
     [choice addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel
         handler:^(__unused UIAlertAction *a){gGroupChoiceBusy=NO;gGroupHold.store(false);}]];
     [host presentViewController:choice animated:YES completion:nil];
+}
+%end
+
+// The proven group uplink currently needs Telegram's shareCamera callback
+// to set its Swift PresentationGroupCallImpl state. Instead of showing a real
+// camera preview and making the user tap Continue, invoke that SAME callback
+// via its existing SolidRoundedButtonNode as soon as the preview is ready.
+// This preserves Build 98's working video handoff and skips its extra step.
+static BOOL LeadAcceptNativeGroupGalleryPreview(UIView *root) {
+    if(!root)return NO;
+    NSMutableArray<UIView *> *stack=[NSMutableArray arrayWithObject:root];
+    SEL nodeSel=NSSelectorFromString(@"asyncdisplaykit_node");
+    SEL pressSel=NSSelectorFromString(@"buttonPressed");
+    while(stack.count) {
+        UIView *view=stack.lastObject;
+        [stack removeLastObject];
+        if([view respondsToSelector:nodeSel]) {
+            id node=((id (*)(id,SEL))objc_msgSend)(view,nodeSel);
+            if(node && [NSStringFromClass([node class]) containsString:@"SolidRoundedButtonNode"] &&
+               [node respondsToSelector:pressSel]) {
+                ((void (*)(id,SEL))objc_msgSend)(node,pressSel);
+                NSLog(@"[LeadVirtualMedia] group gallery: native shareCamera continued automatically");
+                return YES;
+            }
+        }
+        [stack addObjectsFromArray:view.subviews];
+    }
+    return NO;
+}
+static void LeadTryAutoContinueGalleryPreview(UIViewController *controller,NSInteger attempts) {
+    if(!gGroupGalleryPending.load())return;
+    if(!controller || !controller.isViewLoaded)return;
+    if(LeadAcceptNativeGroupGalleryPreview(controller.view))return;
+    if(attempts>0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.065*NSEC_PER_SEC)),
+          dispatch_get_main_queue(),^{LeadTryAutoContinueGalleryPreview(controller,attempts-1);});
+    } else {
+        // Fail open to the manual Continue UI rather than silently abandon
+        // the user's selected video on a newer/unsupported Telegram version.
+        controller.view.alpha=1.0;
+        NSLog(@"[LeadVirtualMedia] automatic group Continue unavailable; manual native fallback");
+    }
+}
+
+%hook UIViewController
+- (void)viewWillAppear:(BOOL)animated {
+    if(gGroupGalleryPending.load() &&
+       [NSStringFromClass(self.class) containsString:@"VoiceChatCameraPreviewController"])
+        self.view.alpha=0.0;
+    %orig(animated);
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig(animated);
+    if(gGroupGalleryPending.load() &&
+       [NSStringFromClass(self.class) containsString:@"VoiceChatCameraPreviewController"]) {
+        self.view.alpha=0.0;
+        dispatch_async(dispatch_get_main_queue(),^{LeadTryAutoContinueGalleryPreview(self,12);});
+    }
 }
 %end
 
