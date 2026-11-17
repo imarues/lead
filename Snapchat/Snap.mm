@@ -327,6 +327,14 @@ static bool compatible=false;
 static void Tap(id self,SEL cmd,int media) {
     // Composer values 2/4 map to native video media 2; 1/3 are audio.
     if(media!=2 && media!=4){originalTap(self,cmd,media);return;}
+    // Snapchat invokes this selector on "Composer JS Thread". UIKit asserts
+    // when a modal is presented there (reported crash: Snap + 0x785c).
+    // Hop before reading UI/coordinator state; ARC retains the call target
+    // until the queued presentation completes. Audio calls stay untouched.
+    if(![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(),^{ Tap(self,cmd,media); });
+        return;
+    }
     if(Media().busy || mode.load())return;
     UIViewController *host=Host();if(!host)return;
     UIAlertController *sheet=[UIAlertController alertControllerWithTitle:@"مكالمة فيديو" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
