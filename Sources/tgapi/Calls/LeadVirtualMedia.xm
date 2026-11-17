@@ -166,6 +166,7 @@ extern "C" id objc_retain(id);
 - (void)dragLocalPreview:(UIPanGestureRecognizer *)gesture;
 - (void)pinchLocalPreview:(UIPinchGestureRecognizer *)gesture;
 - (void)layoutLocalPreviewInHost:(UIView *)host;
+- (void)groupSetPhysical:(id)camera enabled:(BOOL)on;
 - (void)installGroupHooks;
 - (void)groupVideoRequestedOnContext:(id)context capturer:(id)capturer completion:(id)completion;
 - (void)groupVideoFinished;
