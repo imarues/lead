@@ -262,14 +262,12 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             ((void (*)(id,SEL,bool))objc_msgSend)(
                 capturer,@selector(setIsVideoEnabled:),false);
     }
-    if(capturer && capturer==m.externalCapturer && gGroupGalleryPending.exchange(false)) {
-        gGroupContext=self;
-        gGroupObservedCapturer=capturer;gGroupFramesFlowing.store(false);
-        gGroupMode.store(true);gGroupHold.store(false);
-        if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
-        if(gNativeSetVideoEnabled)gNativeSetVideoEnabled(capturer,@selector(setIsVideoEnabled:),true);
-        gConnected.store(true);
-        [m nativeCapturerReady:capturer];
+    // The low-level WebRTC request also runs inside group calls. Do not
+    // consume the pending group selection here: only the GROUP context can
+    // establish the correct transport, video-active observer and EOF owner.
+    if(gGroupGalleryPending.load() && capturer && capturer!=m.externalCapturer) {
+        [m groupSetPhysical:capturer enabled:NO];
+        NSLog(@"[LeadVirtualMedia] rejected physical fallback during gallery handoff");
         return;
     }
     if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
@@ -284,9 +282,12 @@ static void LeadGroupRequestVideo(id self, SEL command, id capturer, id completi
         gGroupObservedCapturer=capturer;gGroupFramesFlowing.store(false);
         gGroupMode.store(true);
         gGroupHold.store(false);
+        // Set the source to active before the group transport requests it:
+        // its initial state is otherwise Paused, propagated to remote peers.
+        [m groupSetPhysical:capturer enabled:YES];
         if(gGroupRequestVideo)gGroupRequestVideo(self,command,capturer,completion);
-        if(gNativeSetVideoEnabled)gNativeSetVideoEnabled(capturer,@selector(setIsVideoEnabled:),true);
         gConnected.store(true);
+        NSLog(@"[LeadVirtualMedia] group external video attached: %@",NSStringFromClass([capturer class]));
         [m nativeCapturerReady:capturer];
         return;
     }
@@ -405,7 +406,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     gGroupContext=context;
     gGroupPendingCapturer=capturer;
     gGroupObservedCapturer=capturer;gGroupFramesFlowing.store(false);
-    gGroupPendingCompletion=completion;
+    gGroupPendingCompletion=[completion copy];
     [self capturePhysicalCamera:capturer];
     [self groupSetPhysical:capturer enabled:NO]; // real camera stays dark until the choice
     dispatch_async(dispatch_get_main_queue(),^{[self groupShowChoice];});
@@ -462,8 +463,9 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     gGroupMode.store(true);   // keeps the physical camera blocked from now on
     gGroupHold.store(false);
     gConnected.store(true);   // we are already inside the group call
-    gGroupRequestVideo(ctx,NSSelectorFromString(@"requestVideo:completion:"),custom,comp);
     [self groupSetPhysical:custom enabled:YES];
+    gGroupObservedCapturer=custom;gGroupFramesFlowing.store(false);
+    gGroupRequestVideo(ctx,NSSelectorFromString(@"requestVideo:completion:"),custom,comp);
     [self nativeCapturerReady:custom]; // maybeStart -> frames + audio begin
 }
 - (void)groupVideoFinished {
@@ -905,9 +907,14 @@ static void LeadGroupStop(id self, SEL command, id completion) {
         if(isfinite(pts) && pts<=video.lastSubmittedPTS)return;
         // 60 fps sources: send every second frame (an even 30 fps).
         if(isfinite(pts) && video.lastSubmittedPTS>=0 && pts-video.lastSubmittedPTS<(1.0/30.0)-0.004)return;
+        if(!CMSampleBufferGetImageBuffer(video.current))return;
         if(isfinite(pts))video.lastSubmittedPTS=pts;
         gFramesSubmitted.fetch_add(1);
-        // Full original-resolution source frames; WebRTC controls network resolution.
+        // Mark the source active when we submit the FIRST actual decoded frame,
+        // not from submitSampleBuffer's completion. On some Telegram builds
+        // that completion only executes after the paused track is consumed.
+        // Waiting for it causes a paused-video/first-frame deadlock.
+        LeadGroupFrameDelivered(capturer);
         ((void (*)(id,SEL,CMSampleBufferRef,int,void(^)(void)))objc_msgSend)(
             capturer,@selector(submitSampleBuffer:rotation:completion:),video.current,0,^{LeadGroupFrameDelivered(capturer);});
     }
@@ -1801,11 +1808,42 @@ static BOOL LeadGroupCameraLabel(UIView *view) {
 }
 static BOOL LeadIsGroupCameraControl(UIControl *control) {
     if(![NSStringFromClass(control.class) containsString:@"PlainButtonComponent"])return NO;
-    BOOL group=NO;
+    UIView *screen=nil;
     for(UIView *parent=control.superview;parent;parent=parent.superview) {
-        if([NSStringFromClass(parent.class) containsString:@"VideoChatScreenComponent"]) {group=YES;break;}
+        if([NSStringFromClass(parent.class) containsString:@"VideoChatScreenComponent"]) {
+            screen=parent;break;
+        }
     }
-    return group && LeadGroupCameraLabel(control);
+    if(!screen)return NO;
+    if(LeadGroupCameraLabel(control))return YES;
+
+    // Telegram's VideoChatActionButtonComponent renders its caption through
+    // MultilineTextComponent, NOT UILabel. In non-VoiceOver layouts its
+    // PlainButtonComponent accessibilityLabel can also be nil, so the old
+    // text-only matcher missed the tap and opened the native camera preview.
+    // Match the second button in the five-action bottom row as a fallback.
+    // Restrict this to the same parent, row and screen to avoid toolbar taps.
+    if(control.hidden || control.alpha<0.1 || !control.userInteractionEnabled ||
+       !control.superview || screen.bounds.size.height<240)return NO;
+    CGPoint p=[control.superview convertPoint:control.center toView:screen];
+    if(p.y < screen.bounds.size.height*0.67 || p.y > screen.bounds.size.height*0.96)
+        return NO;
+    NSMutableArray<UIControl *> *row=[NSMutableArray array];
+    for(UIView *v in control.superview.subviews) {
+        if(![v isKindOfClass:UIControl.class] ||
+           ![NSStringFromClass(v.class) containsString:@"PlainButtonComponent"] ||
+           v.hidden || v.alpha<0.1 || !v.userInteractionEnabled)continue;
+        CGPoint q=[v.superview convertPoint:v.center toView:screen];
+        if(fabs(q.y-p.y)<24.0 && v.bounds.size.width>=44.0)
+            [row addObject:(UIControl *)v];
+    }
+    if(row.count<4 || row.count>6)return NO;
+    [row sortUsingComparator:^NSComparisonResult(UIControl *a,UIControl *b) {
+        CGFloat ax=[a.superview convertPoint:a.center toView:screen].x;
+        CGFloat bx=[b.superview convertPoint:b.center toView:screen].x;
+        return ax<bx?NSOrderedAscending:(ax>bx?NSOrderedDescending:NSOrderedSame);
+    }];
+    return row[1]==control;
 }
 static BOOL LeadViewHasMuteTitle(UIView *view) {
     NSString *label=view.accessibilityLabel;
