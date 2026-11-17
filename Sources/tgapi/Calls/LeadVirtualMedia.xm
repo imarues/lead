@@ -240,10 +240,14 @@ static void LeadSwitchVideoInput(id self,SEL cmd,NSString *device) {
     if(gNativeSwitchInput)gNativeSwitchInput(self,cmd,device);
 }
 static void LeadGroupFrameDelivered(id capturer) {
-    if(!gGroupMode.load() || capturer!=[LeadVirtualMedia shared].externalCapturer ||
+    // Completions from the encoder may arrive AFTER EOF. Never resurrect the
+    // active-video state or remote participants will retain a frozen frame.
+    if(gMode.load()!=2 || !gGroupMode.load() ||
+       capturer!=[LeadVirtualMedia shared].externalCapturer ||
        gGroupFramesFlowing.exchange(true))return;
     dispatch_async(dispatch_get_main_queue(),^{
-        if(!gGroupMode.load() || capturer!=[LeadVirtualMedia shared].externalCapturer)return;
+        if(gMode.load()!=2 || !gGroupMode.load() ||
+           capturer!=[LeadVirtualMedia shared].externalCapturer)return;
         id observed=gGroupObservedCapturer ?: capturer;
         void (^observer)(bool)=objc_getAssociatedObject(observed,&kLeadVideoActiveObserver);
         if(observer)observer(true);
@@ -309,12 +313,16 @@ static void LeadGroupRequestVideo(id self, SEL command, id capturer, id completi
 }
 static void LeadGroupDisableVideo(id self, SEL command) {
     gGroupNormalActive=NO;
-    if(gGroupMode.load())[[LeadVirtualMedia shared] groupVideoUserStopped];
+    // EOF already owns the teardown. Do not asynchronously reset the media
+    // context in the middle of Telegram's own high-level disableVideo action.
+    if(gGroupMode.load() && gMode.load()!=3)
+        [[LeadVirtualMedia shared] groupVideoUserStopped];
     if(gGroupDisableVideo)gGroupDisableVideo(self,command);
 }
 static void LeadGroupDisableVideoCompletion(id self, SEL command, id completion) {
     gGroupNormalActive=NO;
-    if(gGroupMode.load())[[LeadVirtualMedia shared] groupVideoUserStopped];
+    if(gGroupMode.load() && gMode.load()!=3)
+        [[LeadVirtualMedia shared] groupVideoUserStopped];
     if(gGroupDisableVideoCompletion)gGroupDisableVideoCompletion(self,command,completion);
 }
 static void LeadGroupStop(id self, SEL command, id completion) {
@@ -480,25 +488,40 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     id ctx=gGroupContext;
     id external=self.externalCapturer;
     id physical=self.lastPhysicalCamera;
-    // Remain in EOF mode (silent PCM) until transport mute is committed.
+    // Block the mic and any more outgoing frames immediately at the movie EOF.
+    // Do NOT pause the capturer first: Telegram interprets Paused as "keep the
+    // participant's last frame on screen". We want the higher-level
+    // PresentationGroupCallImpl.disableVideo() to advertise video OFF instead.
     gMode.store(3);
+    gGroupFramesFlowing.store(false);
     [self stopTimer];
     SEL mute=NSSelectorFromString(@"setIsMuted:");
     if(ctx && [ctx respondsToSelector:mute])
         ((void (*)(id,SEL,bool))objc_msgSend)(ctx,mute,true);
+
+    // Trigger Telegram's actual onCameraPressed -> disableVideo first. This
+    // updates BOTH local isMyVideoActive and the group server's isVideoMuted
+    // participant metadata. Calling the low-level WebRTC method alone only
+    // detaches a capturer and may leave a frozen tile visible to peers.
+    LeadCloseGroupMediaControls();
+
+    // Native transport fallback, after the Swift state-change request.
+    // The active-observer wrapper cannot turn false back into true once EOF
+    // has reset gGroupFramesFlowing, even if a final encoder callback arrives.
     [self groupSetPhysical:external enabled:NO];
     if(physical!=external)[self groupSetPhysical:physical enabled:NO];
-    // Update Telegram's own camera/microphone state as well as its transport.
-    LeadCloseGroupMediaControls();
-    if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo")])
-        ((void (*)(id,SEL))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo"));
-    else if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo:")])
-        ((void (*)(id,SEL,id))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint,uint32_t ssrc){});
+    if(ctx) {
+        if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo:")])
+            ((void (*)(id,SEL,id))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint,uint32_t ssrc){});
+        else if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo")])
+            ((void (*)(id,SEL))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo"));
+    }
+    NSLog(@"[LeadVirtualMedia] group EOF: Swift camera-off requested before transport shutdown");
     gGroupMode.store(false);gGroupHold.store(false);gGroupGalleryPending.store(false);
     gGroupNormalChosen=NO;gGroupNormalActive=NO;
     gGroupContext=nil;gGroupObservedCapturer=nil;
     gGroupPendingCapturer=nil;gGroupPendingCompletion=nil;
-    [self resetAll]; // Native transport is already muted; PCM storage can be freed.
+    [self resetAll]; // Mic and camera now stopped, remain inside the voice chat.
 }
 - (void)groupVideoUserStopped {
     // The user pressed the camera button themselves while the video was playing.
