@@ -22,6 +22,8 @@
 #include <cmath>  // std::tanh used by virtual movie loudness compressor
 #include <cstring>
 
+static void LeadCloseGroupMediaControls(void);
+
 namespace {
 struct AudioClip { std::vector<int16_t> samples; };
 static std::shared_ptr<AudioClip> gPCM;
@@ -57,7 +59,6 @@ static void (*gNativeSwitchInput)(id,SEL,NSString *)=nullptr;
 static __weak id gGroupObservedCapturer=nil;
 static std::atomic<bool> gGroupFramesFlowing{false};
 static __weak UIView *gGroupCallView=nil;
-static void LeadCloseGroupMediaControls(void);
 static BOOL gGroupChoiceBusy=NO;
 static BOOL gGroupNormalChosen=NO;
 static BOOL gGroupNormalActive=NO;
