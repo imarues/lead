@@ -56,6 +56,8 @@ static void (*gNativeSetActiveObserver)(id,SEL,void(^)(bool))=nullptr;
 static void (*gNativeSwitchInput)(id,SEL,NSString *)=nullptr;
 static __weak id gGroupObservedCapturer=nil;
 static std::atomic<bool> gGroupFramesFlowing{false};
+static __weak UIView *gGroupCallView=nil;
+static void LeadCloseGroupMediaControls(void);
 static BOOL gGroupChoiceBusy=NO;
 static BOOL gGroupNormalChosen=NO;
 static BOOL gGroupNormalActive=NO;
@@ -220,7 +222,7 @@ static void LeadSetVideoActiveObserver(id self,SEL cmd,void (^observer)(bool)) {
         if(virtualSource && gGroupFramesFlowing.load())active=true;
         if(observer)observer(active);
     };
-    if(gNativeSetActiveObserver)gNativeSetActiveObserver(self,cmd,observer?wrapped:nil);
+    if(gNativeSetActiveObserver)gNativeSetActiveObserver(self,cmd,observer?wrapped:(void (^)(bool))nil);
 }
 static void LeadSwitchVideoInput(id self,SEL cmd,NSString *device) {
     // Telegram's rotate control must not turn a gallery source into a camera.
@@ -465,14 +467,27 @@ static void LeadGroupStop(id self, SEL command, id completion) {
 }
 - (void)groupVideoFinished {
     id ctx=gGroupContext;
-    gGroupMode.store(false);gGroupHold.store(false);gGroupContext=nil;
-    [self resetAll]; // mic returns to normal, virtual PCM released
-    if(!ctx)return;
-    // Same as closing the camera: the video tile disappears for everybody.
+    id external=self.externalCapturer;
+    id physical=self.lastPhysicalCamera;
+    // Remain in EOF mode (silent PCM) until transport mute is committed.
+    gMode.store(3);
+    [self stopTimer];
+    SEL mute=NSSelectorFromString(@"setIsMuted:");
+    if(ctx && [ctx respondsToSelector:mute])
+        ((void (*)(id,SEL,bool))objc_msgSend)(ctx,mute,true);
+    [self groupSetPhysical:external enabled:NO];
+    if(physical!=external)[self groupSetPhysical:physical enabled:NO];
+    // Update Telegram's own camera/microphone state as well as its transport.
+    LeadCloseGroupMediaControls();
     if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo")])
         ((void (*)(id,SEL))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo"));
     else if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo:")])
         ((void (*)(id,SEL,id))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint,uint32_t ssrc){});
+    gGroupMode.store(false);gGroupHold.store(false);gGroupGalleryPending.store(false);
+    gGroupNormalChosen=NO;gGroupNormalActive=NO;
+    gGroupContext=nil;gGroupObservedCapturer=nil;
+    gGroupPendingCapturer=nil;gGroupPendingCompletion=nil;
+    [self resetAll]; // Native transport is already muted; PCM storage can be freed.
 }
 - (void)groupVideoUserStopped {
     // The user pressed the camera button themselves while the video was playing.
@@ -898,6 +913,8 @@ static void LeadGroupStop(id self, SEL command, id completion) {
 }
 
 - (void)rememberCallView:(UIView *)view {
+    if([NSStringFromClass(view.class) containsString:@"VideoChatScreenComponent"])
+        gGroupCallView=view;
     if(view && [NSStringFromClass(view.class) containsString:@"PrivateCallScreen"]) {
         self.privateCallView=view;
         if(gMode.load()==2) {
@@ -1789,6 +1806,45 @@ static BOOL LeadIsGroupCameraControl(UIControl *control) {
     }
     return group && LeadGroupCameraLabel(control);
 }
+static BOOL LeadViewHasMuteTitle(UIView *view) {
+    NSString *label=view.accessibilityLabel;
+    if([view isKindOfClass:UILabel.class])label=((UILabel *)view).text;
+    SEL nodeSelector=NSSelectorFromString(@"asyncdisplaykit_node");
+    if(!label.length && [view respondsToSelector:nodeSelector]) {
+        id node=((id (*)(id,SEL))objc_msgSend)(view,nodeSelector);
+        SEL textSelector=NSSelectorFromString(@"attributedText");
+        if([node respondsToSelector:textSelector]) {
+            id text=((id (*)(id,SEL))objc_msgSend)(node,textSelector);
+            if([text isKindOfClass:NSAttributedString.class])label=[text string];
+        }
+    }
+    NSString *clean=[[label stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if([@[@"كتم",@"كتم الصوت",@"mute"] containsObject:clean?:@""])return YES;
+    for(UIView *child in view.subviews)if(LeadViewHasMuteTitle(child))return YES;
+    return NO;
+}
+static void LeadFindGroupControls(UIView *root,UIControl **camera,UIControl **mic) {
+    if([root isKindOfClass:UIControl.class]) {
+        if(LeadIsGroupCameraControl((UIControl *)root))*camera=(UIControl *)root;
+        if([NSStringFromClass(root.class) containsString:@"VideoChatMicButtonComponent"] &&
+            LeadViewHasMuteTitle(root))*mic=(UIControl *)root;
+    }
+    for(UIView *child in root.subviews)LeadFindGroupControls(child,camera,mic);
+}
+static void LeadCloseGroupMediaControls(void) {
+    UIControl *camera=nil,*mic=nil;
+    LeadFindGroupControls(gGroupCallView,&camera,&mic);
+    // Only end tracking on the unmuted button. Its Swift implementation sets
+    // .muted explicitly; never toggle a button that is already muted.
+    if(mic)[mic endTrackingWithTouch:nil withEvent:nil];
+    if(camera) {
+        BOOL previous=gGroupReplayAction;
+        gGroupReplayAction=YES;
+        [camera sendActionsForControlEvents:UIControlEventTouchUpInside];
+        gGroupReplayAction=previous;
+    }
+}
+
 %hook UIControl
 - (void)sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event {
     if(gGroupReplayAction || !LeadIsGroupCameraControl(self) || gGroupMode.load() || gGroupNormalActive) {
