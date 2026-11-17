@@ -2049,22 +2049,30 @@ static void LeadFindGroupControls(UIView *root,UIControl **camera,UIControl **mi
     for(UIView *child in root.subviews)LeadFindGroupControls(child,camera,mic);
 }
 static void LeadCloseGroupMediaControls(void) {
-    UIControl *camera=nil,*mic=nil;
-    LeadFindGroupControls(gGroupCallView,&camera,&mic);
-    // Telegram's native VideoChatMicButtonComponent calls setIsMuted(.muted)
-    // inside endTracking, which ALSO refreshes the visible green microphone.
-    // Only invoke it when native green glow (or a mute caption) says unmuted.
-    if(mic && (LeadGroupGreenMicGlow(mic) || LeadViewHasMuteTitle(mic))) {
-        [mic endTrackingWithTouch:nil withEvent:nil];
-        NSLog(@"[LeadVirtualMedia] EOF: requested native group UI microphone mute");
-    } else {
-        NSLog(@"[LeadVirtualMedia] EOF: microphone already muted or control not found");
-    }
-    if(camera) {
+    // Close the Swift-owned camera FIRST. Muting the mic can immediately
+    // rebuild VideoChatScreen, invalidating a camera-control pointer collected
+    // before the mic callback (the Build 99 regression).
+    UIControl *camera=nil,*unusedMic=nil;
+    LeadFindGroupControls(gGroupCallView,&camera,&unusedMic);
+    if(camera && camera.window) {
         BOOL previous=gGroupReplayAction;
         gGroupReplayAction=YES;
         [camera sendActionsForControlEvents:UIControlEventTouchUpInside];
         gGroupReplayAction=previous;
+        NSLog(@"[LeadVirtualMedia] EOF: pressed native group camera-off control");
+    } else {
+        NSLog(@"[LeadVirtualMedia] EOF: camera UI unavailable; native transport fallback");
+    }
+    // Resolve microphone AFTER camera shutdown in case Swift reconstructed
+    // its controls. Its native endTracking updates both mute transport and UI.
+    UIControl *unusedCamera=nil,*mic=nil;
+    LeadFindGroupControls(gGroupCallView,&unusedCamera,&mic);
+    if(mic && mic.window &&
+       (LeadGroupGreenMicGlow(mic) || LeadViewHasMuteTitle(mic))) {
+        [mic endTrackingWithTouch:nil withEvent:nil];
+        NSLog(@"[LeadVirtualMedia] EOF: requested native group UI microphone mute");
+    } else {
+        NSLog(@"[LeadVirtualMedia] EOF: microphone already muted or control not found");
     }
 }
 
