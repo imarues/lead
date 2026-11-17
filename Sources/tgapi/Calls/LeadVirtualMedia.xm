@@ -51,6 +51,11 @@ static bool gNativeHooksReady=false;
 static std::atomic<bool> gGroupMode{false};  // virtual video is live in a group call
 static std::atomic<bool> gGroupHold{false};  // camera-choice popup/picker open: real camera stays off
 static bool gGroupHooksReady=false;
+static char kLeadVideoActiveObserver;
+static void (*gNativeSetActiveObserver)(id,SEL,void(^)(bool))=nullptr;
+static void (*gNativeSwitchInput)(id,SEL,NSString *)=nullptr;
+static __weak id gGroupObservedCapturer=nil;
+static std::atomic<bool> gGroupFramesFlowing{false};
 static BOOL gGroupChoiceBusy=NO;
 static BOOL gGroupNormalChosen=NO;
 static BOOL gGroupNormalActive=NO;
@@ -203,6 +208,37 @@ static void LeadSetNativeCallState(id self, SEL command, LeadStateBlock block) {
     };
     if(gNativeStateSetter)gNativeStateSetter(self,command,wrapped);
 }
+// Group participant state subscribes to the Swift-owned capturer's isActive.
+// Preserve that subscription even for the legacy, late source-selection path.
+static void LeadSetVideoActiveObserver(id self,SEL cmd,void (^observer)(bool)) {
+    objc_setAssociatedObject(self,&kLeadVideoActiveObserver,observer,OBJC_ASSOCIATION_COPY_NONATOMIC);
+    __weak id source=self;
+    void (^wrapped)(bool)=^(bool active){
+        id camera=source;
+        BOOL virtualSource=gGroupMode.load() &&
+            (camera==gGroupObservedCapturer || camera==[LeadVirtualMedia shared].externalCapturer);
+        if(virtualSource && gGroupFramesFlowing.load())active=true;
+        if(observer)observer(active);
+    };
+    if(gNativeSetActiveObserver)gNativeSetActiveObserver(self,cmd,observer?wrapped:nil);
+}
+static void LeadSwitchVideoInput(id self,SEL cmd,NSString *device) {
+    // Telegram's rotate control must not turn a gallery source into a camera.
+    if((gGroupGalleryPending.load() || gGroupMode.load()) &&
+       self==[LeadVirtualMedia shared].externalCapturer)return;
+    if(gNativeSwitchInput)gNativeSwitchInput(self,cmd,device);
+}
+static void LeadGroupFrameDelivered(id capturer) {
+    if(!gGroupMode.load() || capturer!=[LeadVirtualMedia shared].externalCapturer ||
+       gGroupFramesFlowing.exchange(true))return;
+    dispatch_async(dispatch_get_main_queue(),^{
+        if(!gGroupMode.load() || capturer!=[LeadVirtualMedia shared].externalCapturer)return;
+        id observed=gGroupObservedCapturer ?: capturer;
+        void (^observer)(bool)=objc_getAssociatedObject(observed,&kLeadVideoActiveObserver);
+        if(observer)observer(true);
+    });
+}
+
 static void LeadNativeCameraEnabled(id self,SEL cmd,bool enabled) {
     // Source may already exist when CallKit accepts. Even if Telegram tries
     // to enable the camera again, the incoming-source gate denies it.
@@ -225,8 +261,10 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
     }
     if(capturer && capturer==m.externalCapturer && gGroupGalleryPending.exchange(false)) {
         gGroupContext=self;
+        gGroupObservedCapturer=capturer;gGroupFramesFlowing.store(false);
         gGroupMode.store(true);gGroupHold.store(false);
         if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
+        if(gNativeSetVideoEnabled)gNativeSetVideoEnabled(capturer,@selector(setIsVideoEnabled:),true);
         gConnected.store(true);
         [m nativeCapturerReady:capturer];
         return;
@@ -240,9 +278,11 @@ static void LeadGroupRequestVideo(id self, SEL command, id capturer, id completi
     LeadVirtualMedia *m=[LeadVirtualMedia shared];
     if(capturer && capturer==m.externalCapturer && gGroupGalleryPending.exchange(false)) {
         gGroupContext=self;
+        gGroupObservedCapturer=capturer;gGroupFramesFlowing.store(false);
         gGroupMode.store(true);
         gGroupHold.store(false);
         if(gGroupRequestVideo)gGroupRequestVideo(self,command,capturer,completion);
+        if(gNativeSetVideoEnabled)gNativeSetVideoEnabled(capturer,@selector(setIsVideoEnabled:),true);
         gConnected.store(true);
         [m nativeCapturerReady:capturer];
         return;
@@ -321,6 +361,12 @@ static void LeadGroupStop(id self, SEL command, id completion) {
         gNativeRequestVideo=(decltype(gNativeRequestVideo))method_setImplementation(req,(IMP)LeadRequestNativeVideo);
         if(enabled)gNativeSetVideoEnabled=(decltype(gNativeSetVideoEnabled))
             method_setImplementation(enabled,(IMP)LeadNativeCameraEnabled);
+        Method active=class_getInstanceMethod(c,@selector(setOnIsActiveUpdated:));
+        if(active)gNativeSetActiveObserver=(decltype(gNativeSetActiveObserver))
+            method_setImplementation(active,(IMP)LeadSetVideoActiveObserver);
+        Method rotate=class_getInstanceMethod(c,@selector(switchVideoInput:));
+        if(rotate)gNativeSwitchInput=(decltype(gNativeSwitchInput))
+            method_setImplementation(rotate,(IMP)LeadSwitchVideoInput);
         gNativeHooksReady=true;
         return YES;
     }
@@ -355,6 +401,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     gGroupHold.store(true);
     gGroupContext=context;
     gGroupPendingCapturer=capturer;
+    gGroupObservedCapturer=capturer;gGroupFramesFlowing.store(false);
     gGroupPendingCompletion=completion;
     [self capturePhysicalCamera:capturer];
     [self groupSetPhysical:capturer enabled:NO]; // real camera stays dark until the choice
@@ -425,7 +472,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo")])
         ((void (*)(id,SEL))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo"));
     else if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo:")])
-        ((void (*)(id,SEL,id))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint){});
+        ((void (*)(id,SEL,id))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint,uint32_t ssrc){});
 }
 - (void)groupVideoUserStopped {
     // The user pressed the camera button themselves while the video was playing.
@@ -437,6 +484,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
 }
 - (void)resetAll {
     gMode.store(0);
+    gGroupFramesFlowing.store(false);
     gExpectCapturer.store(false);
     gConnected.store(false);
     gStartClock.store(0);
@@ -845,7 +893,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
         gFramesSubmitted.fetch_add(1);
         // Full original-resolution source frames; WebRTC controls network resolution.
         ((void (*)(id,SEL,CMSampleBufferRef,int,void(^)(void)))objc_msgSend)(
-            capturer,@selector(submitSampleBuffer:rotation:completion:),video.current,0,^{});
+            capturer,@selector(submitSampleBuffer:rotation:completion:),video.current,0,^{LeadGroupFrameDelivered(capturer);});
     }
 }
 
