@@ -1,0 +1,48 @@
+name: Build Snapchat dylib
+on:
+  push:
+    branches: ['سناب']
+    paths:
+      - 'Snapchat/**'
+      - '!Snapchat/*.dylib'
+      - '.github/workflows/snap.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: snap-dylib
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: waruhachi/theos-action@v2.4.6
+        with:
+          theos-src: waruhachi/theos
+          theos-branch: main
+          sdks-src: waruhachi/sdks
+          sdks-branch: main
+      - name: Build standalone Snapchat adapter
+        run: make -C Snapchat clean all FINALPACKAGE=1
+      - name: Validate Mach-O and dependencies
+        run: |
+          test -s Snapchat/dist/Snap.dylib
+          file Snapchat/dist/Snap.dylib
+          lipo -info Snapchat/dist/Snap.dylib
+          otool -L Snapchat/dist/Snap.dylib
+          codesign -dvv Snapchat/dist/Snap.dylib 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Snap-dylib
+          path: Snapchat/dist/Snap.dylib
+      - name: Publish dylib on Snapchat branch
+        run: |
+          cp Snapchat/dist/Snap.dylib Snapchat/Snap.dylib
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f Snapchat/Snap.dylib
+          git diff --cached --quiet && exit 0
+          git commit -m 'Publish compiled Snap.dylib [skip ci]'
+          git push origin HEAD:سناب
