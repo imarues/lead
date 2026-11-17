@@ -51,6 +51,11 @@ static bool gNativeHooksReady=false;
 static std::atomic<bool> gGroupMode{false};  // virtual video is live in a group call
 static std::atomic<bool> gGroupHold{false};  // camera-choice popup/picker open: real camera stays off
 static bool gGroupHooksReady=false;
+static BOOL gGroupChoiceBusy=NO;
+static BOOL gGroupNormalChosen=NO;
+static BOOL gGroupNormalActive=NO;
+static BOOL gGroupReplayAction=NO;
+static std::atomic<bool> gGroupGalleryPending{false};
 static void (*gGroupRequestVideo)(id,SEL,id,id)=nullptr;
 static void (*gGroupDisableVideo)(id,SEL)=nullptr;
 static void (*gGroupDisableVideoCompletion)(id,SEL,id)=nullptr;
@@ -175,6 +180,11 @@ static id LeadInitNativeVideoCapturer(id self, SEL command, NSString *deviceId, 
         }
         NSLog(@"[LeadVirtualMedia] external video factory unavailable");
     }
+    // A selected group gallery source must never fall back to a physical camera.
+    if(gGroupGalleryPending.load()) {
+        objc_release(self);
+        return nil;
+    }
     id camera=gNativeInit ? gNativeInit(self,command,deviceId,keepLandscape) : self;
     if(camera)[[LeadVirtualMedia shared] capturePhysicalCamera:camera];
     return camera;
@@ -213,6 +223,14 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
             ((void (*)(id,SEL,bool))objc_msgSend)(
                 capturer,@selector(setIsVideoEnabled:),false);
     }
+    if(capturer && capturer==m.externalCapturer && gGroupGalleryPending.exchange(false)) {
+        gGroupContext=self;
+        gGroupMode.store(true);gGroupHold.store(false);
+        if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
+        gConnected.store(true);
+        [m nativeCapturerReady:capturer];
+        return;
+    }
     if(gNativeRequestVideo)gNativeRequestVideo(self,command,capturer);
 }
 
@@ -220,21 +238,35 @@ static void LeadRequestNativeVideo(id self, SEL command, id capturer) {
 // user taps the camera button. Intercept here, ask Normal / Upload video.
 static void LeadGroupRequestVideo(id self, SEL command, id capturer, id completion) {
     LeadVirtualMedia *m=[LeadVirtualMedia shared];
-    if(!capturer || capturer==m.externalCapturer) {
+    if(capturer && capturer==m.externalCapturer && gGroupGalleryPending.exchange(false)) {
+        gGroupContext=self;
+        gGroupMode.store(true);
+        gGroupHold.store(false);
+        if(gGroupRequestVideo)gGroupRequestVideo(self,command,capturer,completion);
+        gConnected.store(true);
+        [m nativeCapturerReady:capturer];
+        return;
+    }
+    if(gGroupNormalChosen || !capturer || capturer==m.externalCapturer) {
+        if(gGroupNormalChosen)gGroupNormalActive=YES;
+        gGroupNormalChosen=NO;
         if(gGroupRequestVideo)gGroupRequestVideo(self,command,capturer,completion);
         return;
     }
     [m groupVideoRequestedOnContext:self capturer:capturer completion:completion];
 }
 static void LeadGroupDisableVideo(id self, SEL command) {
+    gGroupNormalActive=NO;
     if(gGroupMode.load())[[LeadVirtualMedia shared] groupVideoUserStopped];
     if(gGroupDisableVideo)gGroupDisableVideo(self,command);
 }
 static void LeadGroupDisableVideoCompletion(id self, SEL command, id completion) {
+    gGroupNormalActive=NO;
     if(gGroupMode.load())[[LeadVirtualMedia shared] groupVideoUserStopped];
     if(gGroupDisableVideoCompletion)gGroupDisableVideoCompletion(self,command,completion);
 }
 static void LeadGroupStop(id self, SEL command, id completion) {
+    gGroupNormalActive=NO;gGroupGalleryPending.store(false);
     if((gGroupMode.load() || gGroupHold.load()) && self==gGroupContext) {
         gGroupMode.store(false);gGroupHold.store(false);gGroupContext=nil;
         gGroupPendingCapturer=nil;gGroupPendingCompletion=nil;
@@ -390,10 +422,10 @@ static void LeadGroupStop(id self, SEL command, id completion) {
     [self resetAll]; // mic returns to normal, virtual PCM released
     if(!ctx)return;
     // Same as closing the camera: the video tile disappears for everybody.
-    if(gGroupDisableVideo)
-        gGroupDisableVideo(ctx,NSSelectorFromString(@"disableVideo"));
-    else if(gGroupDisableVideoCompletion)
-        gGroupDisableVideoCompletion(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint){});
+    if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo")])
+        ((void (*)(id,SEL))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo"));
+    else if([ctx respondsToSelector:NSSelectorFromString(@"disableVideo:")])
+        ((void (*)(id,SEL,id))objc_msgSend)(ctx,NSSelectorFromString(@"disableVideo:"),^(NSString *endpoint){});
 }
 - (void)groupVideoUserStopped {
     // The user pressed the camera button themselves while the video was playing.
@@ -723,6 +755,7 @@ static void LeadGroupStop(id self, SEL command, id completion) {
 - (void)maybeStart {
     if(gIncomingChoice.load() && gIncomingConnected.load())
         gConnected.store(true);
+    if(gGroupGalleryPending.load())return;
     if(!gConnected.load() || gMode.load()!=1)return;
     id captured=nil;
     @synchronized(self){captured=self.externalCapturer;}
@@ -1680,6 +1713,85 @@ static void LeadHookIncomingAnswerDelegate(id delegate) {
         NSLog(@"[LeadVirtualMedia] incoming video answer options installed");
     }
 }
+
+// Telegram creates its preview capturer BEFORE requestVideo:completion:.
+// Intercept the actual camera control action, before onCameraPressed executes.
+static BOOL LeadGroupCameraLabel(UIView *view) {
+    NSString *label=view.accessibilityLabel;
+    if([view isKindOfClass:UILabel.class])label=((UILabel *)view).text;
+    SEL nodeSelector=NSSelectorFromString(@"asyncdisplaykit_node");
+    if(!label.length && [view respondsToSelector:nodeSelector]) {
+        id node=((id (*)(id,SEL))objc_msgSend)(view,nodeSelector);
+        SEL textSelector=NSSelectorFromString(@"attributedText");
+        if([node respondsToSelector:textSelector]) {
+            id text=((id (*)(id,SEL))objc_msgSend)(node,textSelector);
+            if([text isKindOfClass:NSAttributedString.class])label=[text string];
+        }
+    }
+    NSString *clean=[[label stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if([@[@"الكاميرا",@"كاميرا",@"camera",@"video",@"الفيديو",@"فيديو"] containsObject:clean?:@""])return YES;
+    for(UIView *child in view.subviews)if(LeadGroupCameraLabel(child))return YES;
+    return NO;
+}
+static BOOL LeadIsGroupCameraControl(UIControl *control) {
+    if(![NSStringFromClass(control.class) containsString:@"PlainButtonComponent"])return NO;
+    BOOL group=NO;
+    for(UIView *parent=control.superview;parent;parent=parent.superview) {
+        if([NSStringFromClass(parent.class) containsString:@"VideoChatScreenComponent"]) {group=YES;break;}
+    }
+    return group && LeadGroupCameraLabel(control);
+}
+%hook UIControl
+- (void)sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event {
+    if(gGroupReplayAction || !LeadIsGroupCameraControl(self) || gGroupMode.load() || gGroupNormalActive) {
+        %orig;
+        return;
+    }
+    if(gGroupChoiceBusy)return;
+    LeadVirtualMedia *media=[LeadVirtualMedia shared];
+    UIViewController *host=[media host];
+    if(!host)return; // Do not open the real camera without a choice.
+    gGroupChoiceBusy=YES;
+    gGroupNormalChosen=NO;
+    gGroupGalleryPending.store(false);
+    [media installGroupHooks];
+    __weak UIControl *button=self;
+    __weak id originalTarget=target;
+    void (^resume)(void)=^{
+        UIControl *control=button;
+        if(!control.window || !originalTarget) {
+            gGroupGalleryPending.store(false);gGroupHold.store(false);
+            [media resetAll];return;
+        }
+        gGroupReplayAction=YES;
+        [control sendAction:action to:originalTarget forEvent:nil];
+        gGroupReplayAction=NO;
+    };
+    UIAlertController *choice=[UIAlertController alertControllerWithTitle:@"كاميرا المكالمة"
+        message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [choice addAction:[UIAlertAction actionWithTitle:@"اتصال طبيعي" style:UIAlertActionStyleDefault
+        handler:^(__unused UIAlertAction *a){
+            gGroupChoiceBusy=NO;gGroupNormalChosen=YES;
+            gGroupHold.store(false);
+            dispatch_async(dispatch_get_main_queue(),resume);
+        }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"رفع فيديو" style:UIAlertActionStyleDefault
+        handler:^(__unused UIAlertAction *a){
+            gGroupHold.store(true);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                [media preparePicker:^(BOOL ok){
+                    gGroupChoiceBusy=NO;
+                    if(!ok){gGroupHold.store(false);return;}
+                    gGroupGalleryPending.store(true);
+                    resume();
+                } fullCall:NO];
+            });
+        }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel
+        handler:^(__unused UIAlertAction *a){gGroupChoiceBusy=NO;gGroupHold.store(false);}]];
+    [host presentViewController:choice animated:YES completion:nil];
+}
+%end
 
 %hook CXProvider
 - (void)setDelegate:(id<CXProviderDelegate>)delegate queue:(dispatch_queue_t)queue {
