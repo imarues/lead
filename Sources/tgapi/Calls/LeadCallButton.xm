@@ -10,6 +10,29 @@ extern "C" void LeadVirtualMediaInstallButton(UIView *view);
 extern "C" void LeadVirtualMediaInstallEarlyHooks(void);
 extern "C" void LeadVirtualMediaRemoveButton(UIView *view);
 
+// Keep Lead's own REC control visible and interactive to the local user,
+// while excluding its layer from native iOS screenshots/screen recordings.
+// UIApplicationUserDidTakeScreenshotNotification is posted AFTER the capture,
+// so reacting to that notification would leave the REC control in the image.
+// This CoreAnimation mask is undocumented: safely leave the UI untouched on
+// OS versions where the layer capability is unavailable.
+static void LeadExcludeRecordingControlFromSystemCapture(UIView *control) {
+    if(!control)return;
+    CALayer *layer=control.layer;
+    SEL readMask=NSSelectorFromString(@"disableUpdateMask");
+    SEL writeMask=NSSelectorFromString(@"setDisableUpdateMask:");
+    if(![layer respondsToSelector:readMask] ||
+       ![layer respondsToSelector:writeMask])return;
+    @try {
+        NSInteger currentMask=[[layer valueForKey:@"disableUpdateMask"] integerValue];
+        [layer setValue:@(currentMask | (1 << 1) | (1 << 4))
+                 forKey:@"disableUpdateMask"];
+    } @catch (__unused NSException *exception) {
+        // The recording button must continue to work if an iOS update changes
+        // its internal CoreAnimation capture behavior.
+    }
+}
+
 static char kLeadCallRecordButtonKey;
 static BOOL leadPrivateHooksInstalled=NO;
 static BOOL leadGroupHooksInstalled=NO;
@@ -114,6 +137,7 @@ static BOOL leadGroupHooksInstalled=NO;
     move.maximumNumberOfTouches=1;
     [badge addGestureRecognizer:move];
     [controller.view addSubview:badge];
+    LeadExcludeRecordingControlFromSystemCapture(badge);
     self.hudWindow=window;
     self.hudButton=badge;
     // Never makeKeyAndVisible: Telegram keeps its key window and keyboard.
@@ -269,6 +293,7 @@ static void LeadInstallCallControl(UIView *callView) {
     pan.maximumNumberOfTouches=1;
     [button addGestureRecognizer:pan];
     [callView addSubview:button];
+    LeadExcludeRecordingControlFromSystemCapture(button);
     objc_setAssociatedObject(callView,&kLeadCallRecordButtonKey,button,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [LeadCallRecordButtonTarget shared].currentCallButton=button;
     [[LeadCallRecordButtonTarget shared] refreshRecordingUI];
