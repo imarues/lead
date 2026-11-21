@@ -23,7 +23,15 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.4.0";
+static NSString *const kIFVersion = @"0.5.0";
+
+// Shared monotonic clock: RTC capture buffers can use disjoint/rebased PTS.
+// Starting this ONLY when the remote call is answered keeps video and audio in sync.
+static CFTimeInterval gIFPlaybackEpoch = 0;
+static CFTimeInterval IFMediaElapsed(void) {
+    CFTimeInterval epoch=gIFPlaybackEpoch;
+    return epoch>0 ? MAX(0.0,CACurrentMediaTime()-epoch) : 0.0;
+}
 
 static UIWindow *IFMainWindow(void) {
     UIWindow *fallback = nil;
@@ -178,10 +186,8 @@ static void IFShowMessage(NSString *title, NSString *message) {
     NSUInteger nBytes=(NSUInteger)frames*channels*bytesPerSample;
     if(nBytes>1024*1024) { [self.lock unlock]; return NULL; }
     NSMutableData *data=[NSMutableData dataWithLength:nBytes];
-    CMTime time=CMSampleBufferGetPresentationTimeStamp(input);
-    if(!CMTIME_IS_NUMERIC(self.origin)) self.origin=time;
-    CMTime delta=CMTimeSubtract(time,self.origin);
-    double elapsed=CMTIME_IS_NUMERIC(delta)?MAX(0,CMTimeGetSeconds(delta)):0;
+    // Use the same wall/host clock as video, not microphone sample PTS.
+    double elapsed=IFMediaElapsed();
     const float *pcm=(const float *)self.samples.bytes;
     NSUInteger available=self.samples.length/sizeof(float);
     BOOL isFloat=(asbd->mFormatFlags & kAudioFormatFlagIsFloat)!=0;
@@ -321,6 +327,8 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @property (nonatomic, strong) NSTimer *endTimer;
 @property (nonatomic, assign) BOOL callConnected;
 @property (nonatomic, assign) BOOL participantJoined;
+@property (nonatomic, assign) BOOL sawRinging;
+@property (nonatomic, assign) NSUInteger clearedRingingPolls;
 @property (nonatomic, assign) BOOL hangupRequested;
 + (instancetype)shared;
 - (void)offerCallOptions:(void (^)(void))nativeContinuation;
@@ -331,6 +339,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @end
 
 @interface IFFrameEngine : NSObject
++ (instancetype)rtc;
 @property (nonatomic, strong) NSRecursiveLock *lock;
 @property (nonatomic, strong) NSURL *url;
 @property (nonatomic, strong) AVAssetReader *reader;
@@ -362,6 +371,15 @@ static void IFShowMessage(NSString *title, NSString *message) {
     dispatch_once(&once, ^{ s=[IFFrameEngine new]; });
     return s;
 }
++ (instancetype)rtc {
+    // The legacy RTC capture hook may have a different buffer size/format
+    // from AVCapture. Give it an independent reader to avoid reopening the
+    // file on every alternating frame (a common frozen-first-frame cause).
+    static IFFrameEngine *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s=[IFFrameEngine new]; });
+    return s;
+}
 - (instancetype)init {
     if ((self=[super init])) {
         _lock=[NSRecursiveLock new];
@@ -387,6 +405,10 @@ static void IFShowMessage(NSString *title, NSString *message) {
     self.duration=0; self.started=NO; self.finished=NO; self.playing=NO;
     AVURLAsset *asset=[AVURLAsset URLAssetWithURL:url options:nil];
     CFTimeInterval seconds=CMTimeGetSeconds(asset.duration);
+    if(!isfinite(seconds) || seconds<=0) {
+        AVAssetTrack *video=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+        seconds=video ? CMTimeGetSeconds(video.timeRange.duration) : 0;
+    }
     self.duration=(isfinite(seconds) && seconds>0) ? seconds : 0;
     [self.lock unlock];
     NSLog(@"[InstaFakeCam] armed clip %@ (%.2fs); playback gated by remote acceptance",
@@ -431,17 +453,29 @@ static void IFShowMessage(NSString *title, NSString *message) {
     // already composited into the capture stream's exact pixel format and size.
     // The previous build rendered CIImage into 420f/420v pixel buffers without
     // validating that destination, which can produce solid black frames.
-    CGSize transformed=CGSizeApplyAffineTransform(track.naturalSize,track.preferredTransform);
-    CGSize natural=CGSizeMake(fabs(transformed.width),fabs(transformed.height));
-    if(natural.width<=0 || natural.height<=0) {
+    // A track's preferredTransform may include +/-90 degree rotation and
+    // negative translation. Normalize the transformed pixel bounds first,
+    // then scale and center in OUTPUT coordinates, not source coordinates.
+    CGRect oriented=CGRectStandardize(CGRectApplyAffineTransform(
+        (CGRect){CGPointZero,track.naturalSize},track.preferredTransform));
+    CGSize natural=oriented.size;
+    if(!isfinite(natural.width)||!isfinite(natural.height)||
+       natural.width<=0||natural.height<=0) {
         NSLog(@"[InstaFakeCam v%@] invalid video geometry",kIFVersion);
         return NO;
     }
     CGFloat scale=MAX((CGFloat)w/natural.width,(CGFloat)h/natural.height);
-    CGAffineTransform xform=track.preferredTransform;
-    xform=CGAffineTransformConcat(xform,CGAffineTransformMakeScale(scale,scale));
-    xform=CGAffineTransformConcat(xform,CGAffineTransformMakeTranslation(
-        ((CGFloat)w-natural.width*scale)/2.0,((CGFloat)h-natural.height*scale)/2.0));
+    CGFloat dx=((CGFloat)w-natural.width*scale)/2.0;
+    CGFloat dy=((CGFloat)h-natural.height*scale)/2.0;
+    CGAffineTransform normalized=CGAffineTransformConcat(
+        CGAffineTransformMakeTranslation(-CGRectGetMinX(oriented),-CGRectGetMinY(oriented)),
+        track.preferredTransform);
+    CGAffineTransform xform=CGAffineTransformConcat(
+        CGAffineTransformMakeTranslation(dx,dy),
+        CGAffineTransformConcat(CGAffineTransformMakeScale(scale,scale),normalized));
+    NSLog(@"[InstaFakeCam v%@] video orientation %.0fx%.0f -> %.0fx%.0f",
+          kIFVersion,track.naturalSize.width,track.naturalSize.height,
+          natural.width,natural.height);
     AVMutableVideoCompositionLayerInstruction *layer=
         [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:track];
     [layer setTransform:xform atTime:kCMTimeZero];
@@ -515,18 +549,14 @@ static void IFShowMessage(NSString *title, NSString *message) {
     // fallback seen in the previous test build.
     OSType cameraFormat=CVPixelBufferGetPixelFormatType(source);
     BOOL readerReady=[self prepareForWidth:w height:h format:cameraFormat];
-    CMTime captureTime=CMSampleBufferGetPresentationTimeStamp(input);
-    CMTime elapsed=kCMTimeInvalid;
+    CFTimeInterval elapsed=IFMediaElapsed();
     if(self.playing && !self.finished && readerReady) {
-        if(!CMTIME_IS_NUMERIC(self.origin)) self.origin=captureTime;
-        elapsed=CMTimeSubtract(captureTime,self.origin);
-        if(CMTIME_IS_NUMERIC(elapsed)) {
-            while(self.next &&
-               CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(self.next),elapsed)<=0) {
-                if(self.held) CFRelease(self.held);
-                self.held=self.next;
-                self.next=[self.output copyNextSampleBuffer];
-            }
+        CMTime desired=CMTimeMakeWithSeconds(elapsed,600);
+        while(self.next &&
+              CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(self.next),desired)<=0) {
+            if(self.held) CFRelease(self.held);
+            self.held=self.next;
+            self.next=[self.output copyNextSampleBuffer];
         }
     }
     // The first actual frame is retained before acceptance. After acceptance,
@@ -560,8 +590,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
                         kCFBooleanTrue,kCMAttachmentMode_ShouldNotPropagate);
     }
     if(status!=noErr) NSLog(@"[InstaFakeCam v%@] output frame status=%d",kIFVersion,(int)status);
-    if(self.playing && self.duration>0 && CMTIME_IS_NUMERIC(elapsed) &&
-       CMTimeGetSeconds(elapsed)>=self.duration && !self.finished) {
+    if(self.playing && self.duration>0 && elapsed>=self.duration && !self.finished) {
         self.finished=YES;
         dispatch_async(dispatch_get_main_queue(), ^{
             [[IFCallCoordinator shared] fakeClipFinished];
@@ -643,6 +672,13 @@ static BOOL IFOutgoingCallStillRinging(void) {
            IFViewHasRingingText(window.rootViewController.view,0,&visited) : NO;
 }
 
+// Require a visible native hang-up control before trusting the fallback.
+// This avoids interpreting dismissing/rejecting the ringing UI as an answer.
+static BOOL IFActiveCallControlsVisible(void) {
+    UIWindow *win=IFMainWindow();
+    return win && win.rootViewController && IFFindHangup(win.rootViewController.view)!=nil;
+}
+
 @implementation IFCallCoordinator
 + (instancetype)shared {
     static IFCallCoordinator *s;
@@ -655,7 +691,10 @@ static BOOL IFOutgoingCallStillRinging(void) {
     [self.endTimer invalidate]; self.endTimer=nil;
     self.callConnected=NO;
     self.participantJoined=NO;
+    self.sawRinging=NO;
+    self.clearedRingingPolls=0;
     self.hangupRequested=NO;
+    gIFPlaybackEpoch=0;
     self.callSession=nil; self.callManager=nil;
     self.requestedMode=IFModeNormal;
     self.pickerStep=0;
@@ -663,6 +702,7 @@ static BOOL IFOutgoingCallStillRinging(void) {
     self.outgoingURL=nil; self.incomingURL=nil;
     [[IFLocalRemotePreview shared] hide];
     [[IFFrameEngine shared] stop];
+    [[IFFrameEngine rtc] stop];
     [[IFAudioEngine shared] stop];
 }
 - (void)callDidEnd {
@@ -698,17 +738,21 @@ static BOOL IFOutgoingCallStillRinging(void) {
 - (void)markConnected {
     if(self.callConnected || self.requestedMode==IFModeNormal || self.hangupRequested) return;
     self.callConnected=YES;
-    NSLog(@"[InstaFakeCam] remote connection confirmed; playback permitted");
+    gIFPlaybackEpoch=CACurrentMediaTime();
+    NSLog(@"[InstaFakeCam v%@] remote connected; host media clock starts now",kIFVersion);
     [[IFFrameEngine shared] beginPlayback];
+    [[IFFrameEngine rtc] beginPlayback];
     [[IFAudioEngine shared] beginPlayback];
     if(self.requestedMode==IFModeDual && self.incomingURL)
         [[IFLocalRemotePreview shared] presentURL:self.incomingURL];
     CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
     if(isfinite(duration) && duration>0.1) {
         [self.endTimer invalidate];
-        self.endTimer=[NSTimer scheduledTimerWithTimeInterval:duration
+        self.endTimer=[NSTimer timerWithTimeInterval:duration
                        target:self selector:@selector(fakeClipFinished)
                        userInfo:nil repeats:NO];
+        [[NSRunLoop mainRunLoop] addTimer:self.endTimer forMode:NSRunLoopCommonModes];
+        NSLog(@"[InstaFakeCam v%@] hangup armed for %.2f seconds",kIFVersion,duration);
     }
 }
 - (void)inspectConnectionState {
@@ -719,23 +763,42 @@ static BOOL IFOutgoingCallStillRinging(void) {
         session=((id(*)(id,SEL))objc_msgSend)(manager,@selector(currentSession));
         if(session) self.callSession=session;
     }
-    if(!session) return;
-
-    // Never start during the visible outgoing dial/ring UI.
-    if(IFOutgoingCallStillRinging()) return;
-    // Restore the previous working session gating path. A remote-join event
-    // is used if available; isAnswered plus disappearance of Calling UI is
-    // the version-compatible fallback.
-    if([session respondsToSelector:@selector(isAnswered)]) {
-        BOOL answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
-        if(answered) [self markConnected];
-    } else if(self.participantJoined) {
+    // The Photos-picker workflow starts before dialing. Detect the actual
+    // transition from a visible ringing screen to active call controls.
+    BOOL stillRinging=IFOutgoingCallStillRinging();
+    if(stillRinging) {
+        self.sawRinging=YES;
+        self.clearedRingingPolls=0;
+        return;
+    }
+    // Prefer positive RTC confirmation when this Instagram version exposes it.
+    BOOL answered=NO;
+    if(session && [session respondsToSelector:@selector(isAnswered)])
+        answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
+    if(answered || self.participantJoined) {
         [self markConnected];
+        return;
+    }
+    // New Instagram variants can omit legacy IGVideoCallSession/isAnswered
+    // and participantDidJoin. Require observed ringing, a stable transition,
+    // and a LIVE hangup button, rather than relying on elapsed dial time.
+    if(self.sawRinging && IFActiveCallControlsVisible()) {
+        if(++self.clearedRingingPolls>=3) {
+            NSLog(@"[InstaFakeCam v%@] answer recognized via ringing->call UI",kIFVersion);
+            [self markConnected];
+        }
+    } else {
+        self.clearedRingingPolls=0;
     }
 }
 - (void)pollConnection:(NSTimer *)timer {
     if(self.requestedMode==IFModeNormal) { [timer invalidate]; self.stateTimer=nil; return; }
     [self inspectConnectionState];
+    // End even when capture frames stop (camera minimized/swapped) and even
+    // if the one-shot timer was delayed by an Instagram UI interaction.
+    CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
+    if(self.callConnected && !self.hangupRequested && duration>0 &&
+       IFMediaElapsed()>=duration) [self fakeClipFinished];
     id manager=self.callManager;
     if(manager && [manager respondsToSelector:@selector(hasActiveCall)]) {
         BOOL active=((BOOL(*)(id,SEL))objc_msgSend)(manager,@selector(hasActiveCall));
@@ -805,7 +868,10 @@ static BOOL IFOutgoingCallStillRinging(void) {
             generator.requestedTimeToleranceAfter=kCMTimePositiveInfinity;
             firstFrame=[generator copyCGImageAtTime:kCMTimeZero actualTime:NULL error:&error];
         }
-        BOOL ready=(track && firstFrame);
+        CFTimeInterval seconds=CMTimeGetSeconds(asset.duration);
+        if((!isfinite(seconds)||seconds<=0) && track)
+            seconds=CMTimeGetSeconds(track.timeRange.duration);
+        BOOL ready=(track && firstFrame && isfinite(seconds) && seconds>0);
         if(firstFrame) CGImageRelease(firstFrame);
         dispatch_async(dispatch_get_main_queue(), ^{
             if(!ready) {
@@ -818,6 +884,7 @@ static BOOL IFOutgoingCallStillRinging(void) {
             }
             NSLog(@"[InstaFakeCam v%@] video import preflight OK: %@",kIFVersion,videoURL.lastPathComponent);
             [[IFFrameEngine shared] arm:videoURL];
+            [[IFFrameEngine rtc] arm:videoURL];
             [[IFAudioEngine shared] arm:videoURL];
             [self runNative];
         });
@@ -865,7 +932,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.4.0"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.0"
                       message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
@@ -1000,6 +1067,44 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
 }
 @end
 
+// Some Instagram builds use AVFoundation audio delivery instead of the
+// legacy IGVideoCallCaptureCoordinator didReceiveAudioBuffer: callback.
+// Cover that second path without touching the native microphone when normal
+// calls are selected. The RTC audio unit path may still be private.
+@interface IFAudioCaptureProxy : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
+@property (nonatomic, strong) id<AVCaptureAudioDataOutputSampleBufferDelegate> original;
+@end
+@implementation IFAudioCaptureProxy
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)buffer
+       fromConnection:(AVCaptureConnection *)connection {
+    id<AVCaptureAudioDataOutputSampleBufferDelegate> recipient=self.original;
+    if(![recipient respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) return;
+    if(![[IFFrameEngine shared] isArmed]) {
+        [recipient captureOutput:output didOutputSampleBuffer:buffer fromConnection:connection];
+        return;
+    }
+    CMSampleBufferRef fake=[[IFAudioEngine shared] copyAudioForInput:buffer];
+    if(fake) {
+        [recipient captureOutput:output didOutputSampleBuffer:fake fromConnection:connection];
+        CFRelease(fake);
+    }
+    // No original microphone samples leave this path during virtual calls.
+}
+@end
+static const void *kIFAudioProxyKey=&kIFAudioProxyKey;
+
+%hook AVCaptureAudioDataOutput
+- (void)setSampleBufferDelegate:(id)delegate queue:(dispatch_queue_t)queue {
+    if(!delegate || [delegate isKindOfClass:[IFAudioCaptureProxy class]]) {
+        %orig; return;
+    }
+    IFAudioCaptureProxy *proxy=[IFAudioCaptureProxy new];
+    proxy.original=delegate;
+    objc_setAssociatedObject(self,kIFAudioProxyKey,proxy,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(proxy,queue);
+}
+%end
+
 static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %hook AVCaptureVideoDataOutput
@@ -1062,7 +1167,7 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 // methods when this API exists, so it can substitute BOTH media streams.
 %hook IGVideoCallCaptureCoordinator
 - (void)didReceiveVideoBuffer:(CMSampleBufferRef)buffer {
-    IFFrameEngine *engine=[IFFrameEngine shared];
+    IFFrameEngine *engine=[IFFrameEngine rtc];
     if(![engine isArmed]) { %orig; return; }
     CMSampleBufferRef fake=[engine copyReplacementFor:buffer];
     if(fake) { %orig(fake); CFRelease(fake); }
@@ -1092,6 +1197,6 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.4.0",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.0",kIFVersion);
     }
 }
