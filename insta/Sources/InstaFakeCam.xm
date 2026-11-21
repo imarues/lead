@@ -717,8 +717,8 @@ static void IFShowMessage(NSString *title, NSString *message) {
     NSString *mirror=gIFCaptureMirrorKnown?(gIFCaptureMirrored?@"YES":@"NO"):@"?";
     self.label.text=[NSString stringWithFormat:
        @"IF v%@ | %.1f / %.1f sec | connected=%d | mirrored=%@\n"
-        "video AV:%llu RTC:%llu decoded:%llu rebuild:%llu\n"
-        "audio AV:%llu RTC:%llu decoded file:%.1f sec",
+       @"video AV:%llu RTC:%llu decoded:%llu rebuild:%llu\n"
+       @"audio AV:%llu RTC:%llu decoded file:%.1f sec",
        kIFVersion,IFMediaElapsed(),duration,connected,mirror,
        (unsigned long long)gIFVideoAVCallbacks,(unsigned long long)gIFVideoRTCCallbacks,
        (unsigned long long)gIFDecodedFrames,(unsigned long long)gIFReaderRebuilds,
