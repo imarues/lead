@@ -22,7 +22,7 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.3.0";
+static NSString *const kIFVersion = @"0.4.0";
 
 static UIWindow *IFMainWindow(void) {
     UIWindow *fallback = nil;
@@ -175,7 +175,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @property (nonatomic, strong) NSRecursiveLock *lock;
 @property (nonatomic, strong) NSURL *url;
 @property (nonatomic, strong) AVAssetReader *reader;
-@property (nonatomic, strong) AVAssetReaderTrackOutput *output;
+@property (nonatomic, strong) AVAssetReaderVideoCompositionOutput *output;
 @property (nonatomic, strong) AVAssetTrack *track;
 @property (nonatomic, strong) CIContext *context;
 @property (nonatomic, assign) CMSampleBufferRef held;
@@ -183,6 +183,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @property (nonatomic, assign) CMTime origin;
 @property (nonatomic, assign) NSInteger pixelWidth;
 @property (nonatomic, assign) NSInteger pixelHeight;
+@property (nonatomic, assign) OSType pixelFormat;
 @property (nonatomic, assign) CFTimeInterval duration;
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, assign) BOOL started;
@@ -218,7 +219,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
     if(self.held) { CFRelease(self.held); self.held=NULL; }
     if(self.next) { CFRelease(self.next); self.next=NULL; }
     self.origin=kCMTimeInvalid;
-    self.pixelWidth=0; self.pixelHeight=0;
+    self.pixelWidth=0; self.pixelHeight=0; self.pixelFormat=0;
 }
 - (void)arm:(NSURL *)url {
     [self.lock lock];
@@ -256,31 +257,83 @@ static void IFShowMessage(NSString *title, NSString *message) {
     }
     [self.lock unlock];
 }
-- (BOOL)prepareForWidth:(size_t)w height:(size_t)h {
-    if (self.reader && self.pixelWidth == w && self.pixelHeight == h) return YES;
-    if (!self.url) return NO;
+- (BOOL)prepareForWidth:(size_t)w height:(size_t)h format:(OSType)format {
+    if(self.reader && self.pixelWidth==(NSInteger)w && self.pixelHeight==(NSInteger)h &&
+       self.pixelFormat==format) return YES;
+    if(!self.url) return NO;
     [self clearReaderLocked];
     AVURLAsset *asset=[AVURLAsset URLAssetWithURL:self.url options:nil];
     AVAssetTrack *track=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
-    if(!track) { NSLog(@"[InstaFakeCam] clip contains no video track"); return NO; }
+    if(!track) {
+        NSLog(@"[InstaFakeCam v%@] no video track in clip %@",kIFVersion,self.url.lastPathComponent);
+        return NO;
+    }
+    // Based on the public Sparkle Instants reader architecture: output is
+    // already composited into the capture stream's exact pixel format and size.
+    // The previous build rendered CIImage into 420f/420v pixel buffers without
+    // validating that destination, which can produce solid black frames.
+    CGSize transformed=CGSizeApplyAffineTransform(track.naturalSize,track.preferredTransform);
+    CGSize natural=CGSizeMake(fabs(transformed.width),fabs(transformed.height));
+    if(natural.width<=0 || natural.height<=0) {
+        NSLog(@"[InstaFakeCam v%@] invalid video geometry",kIFVersion);
+        return NO;
+    }
+    CGFloat scale=MAX((CGFloat)w/natural.width,(CGFloat)h/natural.height);
+    CGAffineTransform xform=track.preferredTransform;
+    xform=CGAffineTransformConcat(xform,CGAffineTransformMakeScale(scale,scale));
+    xform=CGAffineTransformConcat(xform,CGAffineTransformMakeTranslation(
+        ((CGFloat)w-natural.width*scale)/2.0,((CGFloat)h-natural.height*scale)/2.0));
+    AVMutableVideoCompositionLayerInstruction *layer=
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:track];
+    [layer setTransform:xform atTime:kCMTimeZero];
+    AVMutableVideoCompositionInstruction *instruction=[AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instruction.timeRange=CMTimeRangeMake(kCMTimeZero,asset.duration);
+    instruction.layerInstructions=@[layer];
+    instruction.backgroundColor=UIColor.blackColor.CGColor;
+    AVMutableVideoComposition *composition=[AVMutableVideoComposition videoComposition];
+    composition.renderSize=CGSizeMake(w,h);
+    CMTime frameDuration=track.minFrameDuration;
+    if(!CMTIME_IS_NUMERIC(frameDuration)||CMTimeCompare(frameDuration,kCMTimeZero)<=0)
+        frameDuration=CMTimeMake(1,30);
+    composition.frameDuration=frameDuration;
+    composition.instructions=@[instruction];
+
     NSError *error=nil;
     AVAssetReader *reader=[AVAssetReader assetReaderWithAsset:asset error:&error];
-    if(!reader) { NSLog(@"[InstaFakeCam] asset reader %@",error); return NO; }
-    AVAssetReaderTrackOutput *output=[AVAssetReaderTrackOutput
-         assetReaderTrackOutputWithTrack:track
-         outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA)}];
+    if(!reader) {
+        NSLog(@"[InstaFakeCam v%@] reader create error %@",kIFVersion,error);
+        return NO;
+    }
+    AVAssetReaderVideoCompositionOutput *output=
+        [AVAssetReaderVideoCompositionOutput assetReaderVideoCompositionOutputWithVideoTracks:@[track]
+            videoSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:@(format)}];
+    output.videoComposition=composition;
     output.alwaysCopiesSampleData=NO;
-    if (![reader canAddOutput:output]) return NO;
+    if(![reader canAddOutput:output]) {
+        NSLog(@"[InstaFakeCam v%@] unsupported camera pixel format %u",kIFVersion,(unsigned)format);
+        return NO;
+    }
     [reader addOutput:output];
-    if (![reader startReading]) {
-        NSLog(@"[InstaFakeCam] startReading failed %@",reader.error);
+    if(![reader startReading]) {
+        NSLog(@"[InstaFakeCam v%@] reader start error %@ format=%u",
+            kIFVersion,reader.error,(unsigned)format);
         return NO;
     }
     self.reader=reader; self.output=output; self.track=track;
-    self.pixelWidth=w; self.pixelHeight=h;
-    self.duration=CMTimeGetSeconds(asset.duration);
+    self.pixelWidth=w; self.pixelHeight=h; self.pixelFormat=format;
     self.next=[output copyNextSampleBuffer];
-    return self.next != NULL;
+    if(!self.next) {
+        NSLog(@"[InstaFakeCam v%@] no decoded frames; reader status=%ld error=%@",
+              kIFVersion,(long)reader.status,reader.error);
+        [self clearReaderLocked];
+        return NO;
+    }
+    // Hold the first real frame while the call is ringing. This prevents
+    // a black local camera preview without consuming the video duration.
+    self.held=self.next;
+    self.next=[output copyNextSampleBuffer];
+    NSLog(@"[InstaFakeCam v%@] decoded first frame %zux%zu fmt=%u",kIFVersion,w,h,(unsigned)format);
+    return YES;
 }
 - (CMSampleBufferRef)copyReplacementFor:(CMSampleBufferRef)input {
     [self.lock lock];
@@ -295,84 +348,49 @@ static void IFShowMessage(NSString *title, NSString *message) {
     // Prepare/hold a frame while ringing but render BLACK until accepted.
     // This protects against consuming the clip early and against the real-camera
     // fallback seen in the previous test build.
-    BOOL readerReady=[self prepareForWidth:w height:h];
+    OSType cameraFormat=CVPixelBufferGetPixelFormatType(source);
+    BOOL readerReady=[self prepareForWidth:w height:h format:cameraFormat];
     CMTime captureTime=CMSampleBufferGetPresentationTimeStamp(input);
     CMTime elapsed=kCMTimeInvalid;
-    if (self.playing && !self.finished && readerReady) {
-        if (!CMTIME_IS_NUMERIC(self.origin)) self.origin=captureTime;
+    if(self.playing && !self.finished && readerReady) {
+        if(!CMTIME_IS_NUMERIC(self.origin)) self.origin=captureTime;
         elapsed=CMTimeSubtract(captureTime,self.origin);
-        if (CMTIME_IS_NUMERIC(elapsed)) {
-            while (self.next &&
-                   CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(self.next),elapsed) <= 0) {
+        if(CMTIME_IS_NUMERIC(elapsed)) {
+            while(self.next &&
+               CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(self.next),elapsed)<=0) {
                 if(self.held) CFRelease(self.held);
                 self.held=self.next;
                 self.next=[self.output copyNextSampleBuffer];
             }
-            if (!self.held && self.next) {
-                self.held=self.next;
-                self.next=[self.output copyNextSampleBuffer];
-            }
         }
     }
-    // If the session was accepted but a sample is temporarily unavailable,
-    // output black rather than any authentic camera pixels.
-    BOOL renderClip=self.playing && self.held!=NULL;
-
-    // Always output a replacement frame while armed: if decoding fails, use black,
-    // rather than briefly leaking the real camera image to the recipient.
-    CIImage *image=nil;
-    if (renderClip) {
-        CVImageBufferRef media=CMSampleBufferGetImageBuffer(self.held);
-        if(media) {
-            image=[CIImage imageWithCVPixelBuffer:media];
-            CGAffineTransform preferred=self.track.preferredTransform;
-            image=[image imageByApplyingTransform:preferred];
-            CGRect ext=image.extent;
-            image=[image imageByApplyingTransform:CGAffineTransformMakeTranslation(-ext.origin.x,-ext.origin.y)];
-            ext=image.extent;
-            if(ext.size.width>0 && ext.size.height>0) {
-                CGFloat scale=MAX((CGFloat)w/ext.size.width,(CGFloat)h/ext.size.height);
-                image=[image imageByApplyingTransform:CGAffineTransformMakeScale(scale,scale)];
-                CGRect scaled=image.extent;
-                image=[image imageByApplyingTransform:
-                       CGAffineTransformMakeTranslation(((CGFloat)w-scaled.size.width)/2.0,
-                                                        ((CGFloat)h-scaled.size.height)/2.0)];
-            }
+    // The first actual frame is retained before acceptance. After acceptance,
+    // frame advancement starts at t=0. At EOF, the last frame is held until
+    // the end-call action is acknowledged.
+    CVPixelBufferRef target=self.held ? CMSampleBufferGetImageBuffer(self.held) : NULL;
+    if(!target) {
+        // Report the error instead of silently switching to real camera.
+        static CFTimeInterval previousWarning=0;
+        CFTimeInterval now=CFAbsoluteTimeGetCurrent();
+        if(now-previousWarning>10) {
+            previousWarning=now;
+            NSLog(@"[InstaFakeCam v%@] no frame; reader status=%ld error=%@",
+                  kIFVersion,(long)self.reader.status,self.reader.error);
         }
-    }
-    if(!image) image=[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]];
-
-    CVPixelBufferRef target=NULL;
-    OSType format=CVPixelBufferGetPixelFormatType(source);
-    NSDictionary *attributes=@{
-       (id)kCVPixelBufferIOSurfacePropertiesKey:@{},
-       (id)kCVPixelBufferCGImageCompatibilityKey:@YES,
-       (id)kCVPixelBufferCGBitmapContextCompatibilityKey:@YES
-    };
-    CVReturn result=CVPixelBufferCreate(kCFAllocatorDefault,w,h,format,
-                                       (__bridge CFDictionaryRef)attributes,&target);
-    if(result!=kCVReturnSuccess || !target) {
-        NSLog(@"[InstaFakeCam] CVPixelBufferCreate failed %d",result);
         [self.lock unlock];
         return NULL;
     }
-    CGColorSpaceRef rgb=CGColorSpaceCreateDeviceRGB();
-    [self.context render:image toCVPixelBuffer:target
-                 bounds:CGRectMake(0,0,w,h) colorSpace:rgb];
-    CGColorSpaceRelease(rgb);
-
-    CMVideoFormatDescriptionRef description=NULL;
+    CMVideoFormatDescriptionRef desc=NULL;
     CMSampleBufferRef outputBuffer=NULL;
-    OSStatus status=CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,target,&description);
-    if(status==noErr && description) {
+    OSStatus status=CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,target,&desc);
+    if(status==noErr && desc) {
         CMSampleTimingInfo timing={kCMTimeInvalid,kCMTimeInvalid,kCMTimeInvalid};
         CMSampleBufferGetSampleTimingInfo(input,0,&timing);
         status=CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,target,YES,NULL,NULL,
-                                                  description,&timing,&outputBuffer);
+                                                  desc,&timing,&outputBuffer);
     }
-    if(description) CFRelease(description);
-    CVPixelBufferRelease(target);
-
+    if(desc) CFRelease(desc);
+    if(status!=noErr) NSLog(@"[InstaFakeCam v%@] output frame status=%d",kIFVersion,(int)status);
     if(self.playing && self.duration>0 && CMTIME_IS_NUMERIC(elapsed) &&
        CMTimeGetSeconds(elapsed)>=self.duration && !self.finished) {
         self.finished=YES;
@@ -534,17 +552,15 @@ static BOOL IFOutgoingCallStillRinging(void) {
 
     // Never start during the visible outgoing dial/ring UI.
     if(IFOutgoingCallStillRinging()) return;
-    // isAnswered alone can mean that the LOCAL call session was answered.
-    // Require a real participantDidJoin notification before starting playback.
-    // This intentionally fails closed on incompatible Instagram builds rather
-    // than exhausting the prerecorded clip while still ringing.
-    if(!self.participantJoined) return;
+    // Restore the previous working session gating path. A remote-join event
+    // is used if available; isAnswered plus disappearance of Calling UI is
+    // the version-compatible fallback.
     if([session respondsToSelector:@selector(isAnswered)]) {
         BOOL answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
-        NSLog(@"[InstaFakeCam v%@] joined=%d isAnswered=%d",kIFVersion,self.participantJoined,answered);
-        if(!answered) return;
+        if(answered) [self markConnected];
+    } else if(self.participantJoined) {
+        [self markConnected];
     }
-    [self markConnected];
 }
 - (void)pollConnection:(NSTimer *)timer {
     if(self.requestedMode==IFModeNormal) { [timer invalidate]; self.stateTimer=nil; return; }
@@ -647,8 +663,8 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.3.0"
-                      message:@"Photos gallery · remote answer gate · automatic hangup"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.4.0"
+                      message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
     [menu addAction:[UIAlertAction actionWithTitle:@"Normal video call"
@@ -854,6 +870,6 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.3.0",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.4.0",kIFVersion);
     }
 }
