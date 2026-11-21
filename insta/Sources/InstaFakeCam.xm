@@ -3,6 +3,7 @@
 // Tested by GitHub CI compilation; actual Instagram/RTC media compatibility requires device tests.
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreImage/CoreImage.h>
@@ -59,6 +60,162 @@ static void IFShowMessage(NSString *title, NSString *message) {
         [presenter presentViewController:alert animated:YES completion:nil];
     });
 }
+
+// Audio from the chosen VIDEO clip is decoded as mono 48kHz floating PCM.
+// When Instagram uses its legacy didReceiveAudioBuffer: RTC entry point,
+// an incoming microphone sample buffer is replaced with synchronized clip
+// audio. On unrecognized formats, the microphone buffer is NOT forwarded.
+@interface IFAudioEngine : NSObject
+@property (nonatomic, strong) NSLock *lock;
+@property (nonatomic, strong) NSData *samples;
+@property (nonatomic, assign) BOOL playing;
+@property (nonatomic, assign) CMTime origin;
+@property (nonatomic, assign) BOOL capturedAudio;
+- (void)arm:(NSURL *)url;
+- (void)beginPlayback;
+- (void)stop;
+- (CMSampleBufferRef)copyAudioForInput:(CMSampleBufferRef)input;
+@end
+@implementation IFAudioEngine
++ (instancetype)shared {
+    static IFAudioEngine *s; static dispatch_once_t once;
+    dispatch_once(&once, ^{ s=[IFAudioEngine new]; });
+    return s;
+}
+- (instancetype)init {
+    if((self=[super init])) { _lock=[NSLock new]; _origin=kCMTimeInvalid; }
+    return self;
+}
+- (void)arm:(NSURL *)url {
+    [self.lock lock];
+    self.samples=nil;
+    self.playing=NO;
+    self.origin=kCMTimeInvalid;
+    self.capturedAudio=NO;
+    [self.lock unlock];
+    if(!url) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
+        AVURLAsset *asset=[AVURLAsset URLAssetWithURL:url options:nil];
+        AVAssetTrack *track=[asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+        if(!track) {
+            NSLog(@"[InstaFakeCam] selected video has no audio track");
+            return;
+        }
+        NSError *err=nil;
+        AVAssetReader *reader=[AVAssetReader assetReaderWithAsset:asset error:&err];
+        if(!reader) { NSLog(@"[InstaFakeCam] audio reader error %@",err); return; }
+        AVAssetReaderTrackOutput *output=[AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track
+         outputSettings:@{AVFormatIDKey:@(kAudioFormatLinearPCM),
+                          AVSampleRateKey:@(48000),
+                          AVNumberOfChannelsKey:@(1),
+                          AVLinearPCMBitDepthKey:@(32),
+                          AVLinearPCMIsFloatKey:@YES,
+                          AVLinearPCMIsBigEndianKey:@NO,
+                          AVLinearPCMIsNonInterleaved:@NO}];
+        output.alwaysCopiesSampleData=NO;
+        if(![reader canAddOutput:output]) {
+            NSLog(@"[InstaFakeCam] audio output conversion unsupported"); return;
+        }
+        [reader addOutput:output];
+        if(![reader startReading]) {
+            NSLog(@"[InstaFakeCam] audio startReading failed %@",reader.error);return;
+        }
+        NSMutableData *pcm=[NSMutableData data];
+        // Cap decoded PCM at ~90s (17MB) to keep on-device memory bounded.
+        const NSUInteger maxBytes=90*48000*sizeof(float);
+        CMSampleBufferRef buffer=NULL;
+        while((buffer=[output copyNextSampleBuffer])) {
+            CMBlockBufferRef block=CMSampleBufferGetDataBuffer(buffer);
+            size_t length=block ? CMBlockBufferGetDataLength(block) : 0;
+            if(length && length<=maxBytes-pcm.length) {
+                NSUInteger offset=pcm.length;
+                [pcm increaseLengthBy:length];
+                CMBlockBufferCopyDataBytes(block,0,length,(uint8_t *)pcm.mutableBytes+offset);
+            }
+            CFRelease(buffer);
+            if(pcm.length>=maxBytes) break;
+        }
+        [reader cancelReading];
+        [self.lock lock];
+        // A new selection can supersede this decode; do not overwrite it.
+        if(!self.playing) self.samples=[pcm copy];
+        [self.lock unlock];
+        NSLog(@"[InstaFakeCam] decoded audio track %.2f sec", (double)pcm.length/(48000*sizeof(float)));
+    });
+}
+- (void)beginPlayback {
+    [self.lock lock]; self.playing=YES; self.origin=kCMTimeInvalid; [self.lock unlock];
+}
+- (void)stop {
+    [self.lock lock];
+    self.samples=nil; self.playing=NO; self.origin=kCMTimeInvalid;
+    self.capturedAudio=NO;
+    [self.lock unlock];
+}
+- (CMSampleBufferRef)copyAudioForInput:(CMSampleBufferRef)input {
+    if(!input) return NULL;
+    [self.lock lock];
+    CMAudioFormatDescriptionRef fmt=(CMAudioFormatDescriptionRef)CMSampleBufferGetFormatDescription(input);
+    const AudioStreamBasicDescription *asbd=fmt?CMAudioFormatDescriptionGetStreamBasicDescription(fmt):NULL;
+    CMItemCount frames=CMSampleBufferGetNumSamples(input);
+    if(!asbd || asbd->mFormatID!=kAudioFormatLinearPCM ||
+       asbd->mChannelsPerFrame==0 || asbd->mChannelsPerFrame>2 ||
+       (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ||
+       frames<=0 || frames>8192 ||
+       !((asbd->mBitsPerChannel==32 && (asbd->mFormatFlags & kAudioFormatFlagIsFloat)) ||
+         (asbd->mBitsPerChannel==16 && !(asbd->mFormatFlags & kAudioFormatFlagIsFloat)))) {
+        [self.lock unlock];
+        return NULL;
+    }
+    if(!self.capturedAudio) {
+        NSLog(@"[InstaFakeCam] RTC audio hook active (%.0fHz, %u channel(s), %u bit)",
+             asbd->mSampleRate,asbd->mChannelsPerFrame,asbd->mBitsPerChannel);
+        self.capturedAudio=YES;
+    }
+    const NSUInteger channels=asbd->mChannelsPerFrame,bytesPerSample=asbd->mBitsPerChannel/8;
+    NSUInteger nBytes=(NSUInteger)frames*channels*bytesPerSample;
+    if(nBytes>1024*1024) { [self.lock unlock]; return NULL; }
+    NSMutableData *data=[NSMutableData dataWithLength:nBytes];
+    CMTime time=CMSampleBufferGetPresentationTimeStamp(input);
+    if(!CMTIME_IS_NUMERIC(self.origin)) self.origin=time;
+    CMTime delta=CMTimeSubtract(time,self.origin);
+    double elapsed=CMTIME_IS_NUMERIC(delta)?MAX(0,CMTimeGetSeconds(delta)):0;
+    const float *pcm=(const float *)self.samples.bytes;
+    NSUInteger available=self.samples.length/sizeof(float);
+    BOOL isFloat=(asbd->mFormatFlags & kAudioFormatFlagIsFloat)!=0;
+    double hz=asbd->mSampleRate>0?asbd->mSampleRate:48000;
+    for(NSUInteger i=0;i<(NSUInteger)frames;i++) {
+        NSUInteger index=(NSUInteger)llround((elapsed+(double)i/hz)*48000.0);
+        float value=(self.playing && index<available)?pcm[index]:0.0f;
+        if(!isfinite(value)) value=0;
+        value=MAX(-1,MIN(1,value));
+        for(NSUInteger ch=0;ch<channels;ch++) {
+            NSUInteger offset=(i*channels+ch)*bytesPerSample;
+            if(isFloat) {
+                memcpy((uint8_t *)data.mutableBytes+offset,&value,sizeof(float));
+            } else {
+                int16_t sample=(int16_t)lrintf(value*32767.0f);
+                memcpy((uint8_t *)data.mutableBytes+offset,&sample,sizeof(int16_t));
+            }
+        }
+    }
+    [self.lock unlock];
+    CMBlockBufferRef block=NULL;
+    OSStatus status=CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,NULL,nBytes,
+        kCFAllocatorDefault,NULL,0,nBytes,0,&block);
+    if(status!=noErr||!block) return NULL;
+    status=CMBlockBufferReplaceDataBytes(data.bytes,block,0,nBytes);
+    CMSampleBufferRef output=NULL;
+    if(status==noErr) {
+        CMSampleTimingInfo timing={kCMTimeInvalid,kCMTimeInvalid,kCMTimeInvalid};
+        CMSampleBufferGetSampleTimingInfo(input,0,&timing);
+        status=CMSampleBufferCreateReady(kCFAllocatorDefault,block,fmt,frames,
+                             1,&timing,0,NULL,&output);
+    }
+    CFRelease(block);
+    return status==noErr?output:NULL;
+}
+@end
 
 // Incoming-camera simulation is strictly LOCAL: it does not change the other
 // participant's actual transmission. It visually covers their preview.
@@ -494,6 +651,7 @@ static BOOL IFOutgoingCallStillRinging(void) {
     self.outgoingURL=nil; self.incomingURL=nil;
     [[IFLocalRemotePreview shared] hide];
     [[IFFrameEngine shared] stop];
+    [[IFAudioEngine shared] stop];
 }
 - (void)callDidEnd {
     if(!NSThread.isMainThread) {
@@ -530,6 +688,7 @@ static BOOL IFOutgoingCallStillRinging(void) {
     self.callConnected=YES;
     NSLog(@"[InstaFakeCam] remote connection confirmed; playback permitted");
     [[IFFrameEngine shared] beginPlayback];
+    [[IFAudioEngine shared] beginPlayback];
     if(self.requestedMode==IFModeDual && self.incomingURL)
         [[IFLocalRemotePreview shared] presentURL:self.incomingURL];
     CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
@@ -647,6 +806,7 @@ static BOOL IFOutgoingCallStillRinging(void) {
             }
             NSLog(@"[InstaFakeCam v%@] video import preflight OK: %@",kIFVersion,videoURL.lastPathComponent);
             [[IFFrameEngine shared] arm:videoURL];
+            [[IFAudioEngine shared] arm:videoURL];
             [self runNative];
         });
     });
@@ -882,6 +1042,26 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
              isExistingParticipant:(BOOL)existing {
     %orig;
     [[IFCallCoordinator shared] participantJoinedSession:session];
+}
+%end
+
+// Legacy Instagram RTC capture-coordinator hook. This is the actual boundary
+// between camera/microphone capture and the call's processVideo/processAudio
+// methods when this API exists, so it can substitute BOTH media streams.
+%hook IGVideoCallCaptureCoordinator
+- (void)didReceiveVideoBuffer:(CMSampleBufferRef)buffer {
+    IFFrameEngine *engine=[IFFrameEngine shared];
+    if(![engine isArmed]) { %orig; return; }
+    CMSampleBufferRef fake=[engine copyReplacementFor:buffer];
+    if(fake) { %orig(fake); CFRelease(fake); }
+    // Never fall through to the real camera on a decoding failure.
+}
+- (void)didReceiveAudioBuffer:(CMSampleBufferRef)buffer {
+    IFFrameEngine *engine=[IFFrameEngine shared];
+    if(![engine isArmed]) { %orig; return; }
+    CMSampleBufferRef fake=[[IFAudioEngine shared] copyAudioForInput:buffer];
+    if(fake) { %orig(fake); CFRelease(fake); }
+    // If RTC audio uses an unsupported buffer format, do not send real mic.
 }
 %end
 
