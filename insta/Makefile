@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = InstaFakeCam
 InstaFakeCam_FILES = Sources/InstaFakeCam.xm
 InstaFakeCam_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-function -Os
-InstaFakeCam_FRAMEWORKS = UIKit Foundation AVFoundation CoreMedia CoreVideo CoreImage PhotosUI UniformTypeIdentifiers QuartzCore
+InstaFakeCam_FRAMEWORKS = UIKit Foundation AVFoundation AudioToolbox CoreMedia CoreVideo CoreImage PhotosUI UniformTypeIdentifiers QuartzCore
 InstaFakeCam_LIBRARIES = substrate
 InstaFakeCam_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 
