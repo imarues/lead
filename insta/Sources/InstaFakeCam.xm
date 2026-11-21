@@ -17,7 +17,6 @@
 #import <dlfcn.h>
 #import <AudioUnit/AudioUnit.h>
 
-extern "C" void MSHookFunction(void *symbol, void *replace, void **result);
 
 typedef NS_ENUM(NSInteger, IFMode) {
     IFModeNormal = 0,
@@ -27,7 +26,7 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.7.0";
+static NSString *const kIFVersion = @"0.7.1";
 
 // Device-only diagnostic counters: no media, names, or calls leave the device.
 static volatile uint64_t gIFVideoAVCallbacks=0, gIFVideoRTCCallbacks=0;
@@ -721,38 +720,10 @@ static void IFShowMessage(NSString *title, NSString *message) {
 }
 @end
 
-// VoiceProcessingIO mic input path for WebRTC builds that do not send audio
-// via AVCaptureAudioDataOutput or IGVideoCallCaptureCoordinator. Restrict to
-// AudioUnitRender input bus 1 while a virtual call is armed.
-typedef OSStatus (*IFAudioUnitRenderFunc)(AudioUnit, AudioUnitRenderActionFlags *,
-                const AudioTimeStamp *, UInt32, UInt32, AudioBufferList *);
-static IFAudioUnitRenderFunc gIFOriginalAudioUnitRender=NULL;
-static OSStatus IFAudioUnitRenderHook(AudioUnit unit, AudioUnitRenderActionFlags *flags,
-         const AudioTimeStamp *timestamp, UInt32 bus, UInt32 frames, AudioBufferList *buffers) {
-    if(!gIFOriginalAudioUnitRender) return kAudio_ParamError;
-    OSStatus status=gIFOriginalAudioUnitRender(unit,flags,timestamp,bus,frames,buffers);
-    if(status!=noErr || bus!=1 || !buffers || ![[IFFrameEngine shared] isArmed])
-        return status;
-    __sync_add_and_fetch(&gIFAudioUnitCallbacks,1);
-    AudioStreamBasicDescription asbd={0};
-    UInt32 size=sizeof(asbd);
-    OSStatus fmtStatus=AudioUnitGetProperty(unit,kAudioUnitProperty_StreamFormat,
-                                             kAudioUnitScope_Output,1,&asbd,&size);
-    BOOL substituted=fmtStatus==noErr &&
-        [[IFAudioEngine shared] replaceAudioUnitBuffers:buffers format:&asbd frames:frames];
-    if(substituted) __sync_add_and_fetch(&gIFAudioUnitInjected,1);
-    else {
-        __sync_add_and_fetch(&gIFAudioUnitUnsupported,1);
-        // Fail closed: never forward raw microphone data while fake clip is armed.
-        if(buffers->mNumberBuffers<=8) {
-            for(UInt32 i=0;i<buffers->mNumberBuffers;i++) {
-                AudioBuffer *b=&buffers->mBuffers[i];
-                if(b->mData && b->mDataByteSize<1024*1024) memset(b->mData,0,b->mDataByteSize);
-            }
-        }
-    }
-    return status;
-}
+// v0.7.1: NO function patching of AudioToolbox/AudioToolboxCore.
+// iOS 18 code signing terminates the process with CODESIGNING Invalid Page
+// when AudioUnitRender is patched in signed system code. Only safe UIKit and
+// application callback hooks remain active. AudioUnit diagnostics are disabled.
 
 static BOOL IFOutgoingCallStillRinging(void);
 
@@ -808,14 +779,12 @@ static BOOL IFOutgoingCallStillRinging(void);
     self.label.text=[NSString stringWithFormat:
        @"IF v%@ | %.1f / %.1f sec | connected=%d | mirrored=%@\n"
        @"video AV:%llu RTC:%llu decoded:%llu rebuild:%llu\n"
-       @"audio AV:%llu RTC:%llu AU:%llu inj:%llu bad:%llu\n"
+       @"audio AV:%llu RTC:%llu AU:disabled (iOS 18)\n"
        @"file audio:%.1f sec | UI ringing=%d",
        kIFVersion,IFMediaElapsed(),duration,connected,mirror,
        (unsigned long long)gIFVideoAVCallbacks,(unsigned long long)gIFVideoRTCCallbacks,
        (unsigned long long)gIFDecodedFrames,(unsigned long long)gIFReaderRebuilds,
        (unsigned long long)gIFAudioAVCallbacks,(unsigned long long)gIFAudioRTCCallbacks,
-       (unsigned long long)gIFAudioUnitCallbacks,(unsigned long long)gIFAudioUnitInjected,
-       (unsigned long long)gIFAudioUnitUnsupported,
        [[IFAudioEngine shared] decodedSeconds],IFOutgoingCallStillRinging()];
 }
 - (void)hide {
@@ -1236,7 +1205,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.7.0"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.7.1"
                       message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
@@ -1552,14 +1521,7 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.7.0",kIFVersion);
-        void *symbol=dlsym(RTLD_DEFAULT,"AudioUnitRender");
-        if(symbol) {
-            MSHookFunction(symbol,(void *)&IFAudioUnitRenderHook,(void **)&gIFOriginalAudioUnitRender);
-            NSLog(@"[InstaFakeCam] installed VoiceProcessingIO AudioUnitRender hook=%d",
-                  gIFOriginalAudioUnitRender!=NULL);
-        } else {
-            NSLog(@"[InstaFakeCam] AudioUnitRender unavailable");
-        }
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.7.1",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] AudioUnitRender system hook intentionally disabled (iOS code-signing safety)",kIFVersion);
     }
 }
