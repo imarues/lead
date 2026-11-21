@@ -76,43 +76,199 @@ static BOOL LeadSnowSceneHasCall(UIWindowScene *scene) {
     return NO;
 }
 
-static UIImage *LeadSnowParticleImage(void) {
+// Use real six-branch crystals with fine side branches instead of solid white disks.
+// Distant particles are soft pinpoints; foreground particles have recognizable detail.
+static CGFloat LeadSnowRandom(CGFloat low, CGFloat high) {
+    return low + (high - low) * ((CGFloat)arc4random_uniform(100000) / 100000.0);
+}
+
+static UIImage *LeadSnowMakeTexture(NSInteger depth) {
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.opaque = NO;
+    format.scale = 2.0;
     UIGraphicsImageRenderer *renderer =
-        [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(12, 12)];
-    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextRef c = ctx.CGContext;
-        CGContextSetFillColorWithColor(c, [UIColor colorWithWhite:1 alpha:0.94].CGColor);
-        CGContextFillEllipseInRect(c, CGRectMake(2, 2, 8, 8));
+        [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(36, 36) format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGContextRef c = context.CGContext;
+        CGContextSetAllowsAntialiasing(c, YES);
+        CGContextSetShouldAntialias(c, YES);
+        CGFloat mid = 18.0;
+        if (depth == 0) {
+            // Tiny, soft, out-of-focus flakes for the distant depth layer.
+            const CGFloat components[] = {1,1,1,0.72, 1,1,1,0.0};
+            CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+            CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, NULL, 2);
+            CGContextDrawRadialGradient(c, gradient, CGPointMake(mid,mid), 0,
+                                        CGPointMake(mid,mid), 10, 0);
+            CGGradientRelease(gradient);
+            CGColorSpaceRelease(space);
+            return;
+        }
+        CGContextSetLineCap(c, kCGLineCapRound);
+        CGContextSetLineJoin(c, kCGLineJoinRound);
+        CGContextSetStrokeColorWithColor(c, [UIColor colorWithWhite:1 alpha:0.94].CGColor);
+        CGContextSetLineWidth(c, depth == 2 ? 1.50 : 1.85);
+        CGFloat radius = depth == 2 ? 14.0 : 12.8;
+        for (NSInteger arm = 0; arm < 6; arm++) {
+            CGFloat angle = (CGFloat)arm * (CGFloat)M_PI / 3.0;
+            CGFloat dx = cos(angle), dy = sin(angle);
+            CGContextMoveToPoint(c, mid, mid);
+            CGContextAddLineToPoint(c, mid + dx * radius, mid + dy * radius);
+            // Two delicate Y-shaped branches per crystal arm.
+            for (NSInteger segment = 0; segment < 2; segment++) {
+                CGFloat along = radius * (segment == 0 ? 0.50 : 0.76);
+                CGFloat length = radius * (segment == 0 ? 0.22 : 0.15);
+                CGFloat x = mid + dx * along, y = mid + dy * along;
+                for (NSInteger side = -1; side <= 1; side += 2) {
+                    CGFloat branch = angle - (CGFloat)side * (CGFloat)M_PI / 3.8;
+                    CGContextMoveToPoint(c, x, y);
+                    CGContextAddLineToPoint(c, x - cos(branch) * length,
+                                              y - sin(branch) * length);
+                }
+            }
+        }
+        CGContextStrokePath(c);
+        CGContextSetFillColorWithColor(c, UIColor.whiteColor.CGColor);
+        CGContextFillEllipseInRect(c, CGRectMake(mid - 1.2, mid - 1.2, 2.4, 2.4));
     }];
 }
 
-static CAEmitterLayer *LeadSnowEmitter(void) {
-    CAEmitterLayer *layer = [CAEmitterLayer layer];
-    layer.emitterShape = kCAEmitterLayerLine;
-    layer.emitterMode = kCAEmitterLayerSurface;
-    layer.renderMode = kCAEmitterLayerUnordered;
-    UIImage *particle = LeadSnowParticleImage();
-    NSMutableArray<CAEmitterCell *> *cells = [NSMutableArray array];
-    for (NSInteger i = 0; i < 3; i++) {
-        CAEmitterCell *cell = [CAEmitterCell emitterCell];
-        cell.contents = (__bridge id)particle.CGImage;
-        cell.birthRate = i == 0 ? 9.0 : (i == 1 ? 5.0 : 3.0);
-        cell.lifetime = 15.0;
-        cell.lifetimeRange = 3.0;
-        cell.velocity = i == 0 ? 65.0 : (i == 1 ? 85.0 : 48.0);
-        cell.velocityRange = 22.0;
-        cell.emissionLongitude = (CGFloat)M_PI_2;
-        cell.emissionRange = (CGFloat)M_PI / 10.0;
-        cell.yAcceleration = 7.0;
-        cell.scale = i == 0 ? 0.28 : (i == 1 ? 0.40 : 0.54);
-        cell.scaleRange = 0.11;
-        cell.alphaRange = 0.28;
-        cell.spinRange = 0.40;
-        [cells addObject:cell];
+@interface LeadSnowFlake : NSObject
+@property (nonatomic, strong) CALayer *layer;
+@property (nonatomic, assign) CGFloat baseX;
+@property (nonatomic, assign) CGFloat y;
+@property (nonatomic, assign) CGFloat speed;
+@property (nonatomic, assign) CGFloat sway;
+@property (nonatomic, assign) CGFloat phase;
+@property (nonatomic, assign) CGFloat swayFrequency;
+@property (nonatomic, assign) CGFloat spin;
+@property (nonatomic, assign) CGFloat rotation;
+@property (nonatomic, assign) CGFloat size;
+@property (nonatomic, assign) NSInteger depth;
+@end
+@implementation LeadSnowFlake
+@end
+
+@interface LeadSnowCanvas : UIView
+@property (nonatomic, strong) NSMutableArray<LeadSnowFlake *> *flakes;
+@property (nonatomic, strong) CADisplayLink *displayLink;
+@property (nonatomic, assign) CFTimeInterval lastTimestamp;
+@property (nonatomic, assign) CGSize previousSize;
+- (void)start;
+- (void)stop;
+@end
+
+@implementation LeadSnowCanvas
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.backgroundColor = UIColor.clearColor;
+    self.opaque = NO;
+    self.userInteractionEnabled = NO;
+    self.clipsToBounds = YES;
+    self.flakes = [NSMutableArray arrayWithCapacity:96];
+    self.previousSize = frame.size;
+    static NSArray<UIImage *> *textures;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        textures = @[LeadSnowMakeTexture(0), LeadSnowMakeTexture(1), LeadSnowMakeTexture(2)];
+    });
+    // Seed snow over the FULL viewport immediately, not just from the top.
+    // 48 distant + 36 middle + 12 near flakes = gentle, layered snowfall.
+    for (NSInteger i = 0; i < 96; i++) {
+        NSInteger depth = i < 48 ? 0 : (i < 84 ? 1 : 2);
+        LeadSnowFlake *flake = [LeadSnowFlake new];
+        flake.depth = depth;
+        flake.layer = [CALayer layer];
+        flake.layer.contents = (__bridge id)textures[depth].CGImage;
+        flake.layer.contentsGravity = kCAGravityResizeAspect;
+        flake.layer.contentsScale = UIScreen.mainScreen.scale;
+        flake.layer.opacity = depth == 0 ? LeadSnowRandom(.33, .58) :
+                              (depth == 1 ? LeadSnowRandom(.52, .83) : LeadSnowRandom(.67, .93));
+        flake.size = depth == 0 ? LeadSnowRandom(6.0, 9.0) :
+                     (depth == 1 ? LeadSnowRandom(9.0, 12.5) : LeadSnowRandom(13.0, 17.0));
+        flake.layer.bounds = CGRectMake(0, 0, flake.size, flake.size);
+        flake.baseX = LeadSnowRandom(0, MAX(1, frame.size.width));
+        flake.y = LeadSnowRandom(0, MAX(1, frame.size.height));
+        flake.speed = depth == 0 ? LeadSnowRandom(24, 43) :
+                      (depth == 1 ? LeadSnowRandom(40, 66) : LeadSnowRandom(58, 89));
+        flake.sway = depth == 0 ? LeadSnowRandom(5, 12) :
+                     (depth == 1 ? LeadSnowRandom(9, 18) : LeadSnowRandom(13, 26));
+        flake.phase = LeadSnowRandom(0, (CGFloat)M_PI * 2);
+        flake.swayFrequency = LeadSnowRandom(.50, 1.10);
+        flake.rotation = LeadSnowRandom(0, (CGFloat)M_PI * 2);
+        flake.spin = LeadSnowRandom(-.25, .25);
+        [self.layer addSublayer:flake.layer];
+        [self.flakes addObject:flake];
     }
-    layer.emitterCells = cells;
-    return layer;
+    [self updateFlakePositions];
+    return self;
 }
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat oldWidth = self.previousSize.width, oldHeight = self.previousSize.height;
+    CGSize newSize = self.bounds.size;
+    if (oldWidth > 1 && oldHeight > 1 &&
+        (fabs(oldWidth - newSize.width) > 1 || fabs(oldHeight - newSize.height) > 1)) {
+        for (LeadSnowFlake *flake in self.flakes) {
+            flake.baseX *= newSize.width / oldWidth;
+            flake.y *= newSize.height / oldHeight;
+        }
+    }
+    self.previousSize = newSize;
+    [self updateFlakePositions];
+}
+
+- (void)updateFlakePositions {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (LeadSnowFlake *flake in self.flakes) {
+        CGFloat x = flake.baseX + sin(flake.phase) * flake.sway;
+        flake.layer.position = CGPointMake(x, flake.y);
+        flake.layer.transform = CATransform3DMakeRotation(flake.rotation, 0, 0, 1);
+    }
+    [CATransaction commit];
+}
+
+- (void)tick:(CADisplayLink *)link {
+    if (self.bounds.size.width <= 1 || self.bounds.size.height <= 1) return;
+    CFTimeInterval dt = self.lastTimestamp > 0 ? MIN(.065, link.timestamp - self.lastTimestamp) : (1.0 / 30.0);
+    self.lastTimestamp = link.timestamp;
+    if (dt <= 0) return;
+    CGFloat width = CGRectGetWidth(self.bounds), height = CGRectGetHeight(self.bounds);
+    for (LeadSnowFlake *flake in self.flakes) {
+        flake.y += flake.speed * dt;
+        flake.phase += flake.swayFrequency * dt;
+        flake.rotation += flake.spin * dt;
+        if (flake.y > height + 22) {
+            // Re-enter anywhere across the screen after drifting past the bottom.
+            flake.y = -LeadSnowRandom(8, height * .26 + 8);
+            flake.baseX = LeadSnowRandom(0, width);
+            flake.phase = LeadSnowRandom(0, (CGFloat)M_PI * 2);
+        }
+    }
+    [self updateFlakePositions];
+}
+
+- (void)start {
+    if (self.displayLink) return;
+    self.lastTimestamp = 0;
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
+    link.preferredFramesPerSecond = 30;
+    [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    self.displayLink = link;
+}
+- (void)stop {
+    [self.displayLink invalidate];
+    self.displayLink = nil;
+    self.lastTimestamp = 0;
+}
+- (void)dealloc {
+    [self stop];
+}
+@end
 
 @interface LeadSnowManager : NSObject
 @property (nonatomic, strong) NSMapTable<UIWindowScene *, LeadSnowWindow *> *windows;
@@ -228,13 +384,8 @@ static CAEmitterLayer *LeadSnowEmitter(void) {
     window.backgroundColor = UIColor.clearColor;
     window.userInteractionEnabled = NO;
     UIViewController *root = [UIViewController new];
-    root.view.backgroundColor = UIColor.clearColor;
-    root.view.userInteractionEnabled = NO;
-    root.view.clipsToBounds = YES;
+    root.view = [[LeadSnowCanvas alloc] initWithFrame:window.bounds];
     window.rootViewController = root;
-    CAEmitterLayer *emitter = LeadSnowEmitter();
-    emitter.name = @"LeadSnowEmitter";
-    [root.view.layer addSublayer:emitter];
     window.hidden = YES;
     [self.windows setObject:window forKey:scene];
     return window;
@@ -249,7 +400,10 @@ static CAEmitterLayer *LeadSnowEmitter(void) {
     if (!enabled) {
         [self.timer invalidate];
         self.timer = nil;
-        for (LeadSnowWindow *window in self.windows.objectEnumerator) window.hidden = YES;
+        for (LeadSnowWindow *window in self.windows.objectEnumerator) {
+            [(LeadSnowCanvas *)window.rootViewController.view stop];
+            window.hidden = YES;
+        }
         return;
     }
     if (!self.timer) {
@@ -265,7 +419,10 @@ static CAEmitterLayer *LeadSnowEmitter(void) {
         BOOL active = self.appActive &&
                       scene.activationState == UISceneActivationStateForegroundActive;
         if (!active) {
-            if (window) window.hidden = YES;
+            if (window) {
+                [(LeadSnowCanvas *)window.rootViewController.view stop];
+                window.hidden = YES;
+            }
             continue;
         }
         BOOL isChat = NO;
@@ -276,19 +433,19 @@ static CAEmitterLayer *LeadSnowEmitter(void) {
         }
         BOOL show = !isChat && !LeadSnowSceneHasCall(scene);
         if (!show) {
-            if (window) window.hidden = YES;
+            if (window) {
+                [(LeadSnowCanvas *)window.rootViewController.view stop];
+                window.hidden = YES;
+            }
             continue;
         }
         if (!window) window = [self windowForScene:scene];
         CGRect bounds = scene.coordinateSpace.bounds;
         if (!CGRectEqualToRect(window.frame, bounds)) window.frame = bounds;
-        UIView *view = window.rootViewController.view;
-        CAEmitterLayer *emitter = (CAEmitterLayer *)[view.layer.sublayers firstObject];
-        emitter.frame = view.bounds;
-        emitter.emitterPosition = CGPointMake(CGRectGetMidX(view.bounds), -12);
-        emitter.emitterSize = CGSizeMake(CGRectGetWidth(view.bounds), 1);
+        LeadSnowCanvas *canvas = (LeadSnowCanvas *)window.rootViewController.view;
         [self applyKeyboardExclusionToWindow:window];
-        if (window.hidden) window.hidden = NO; // Do not call makeKeyAndVisible.
+        if (window.hidden) window.hidden = NO; // Never become a key window.
+        [canvas start];
     }
 }
 @end
