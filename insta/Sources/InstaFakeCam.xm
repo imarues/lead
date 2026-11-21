@@ -618,8 +618,38 @@ static BOOL IFOutgoingCallStillRinging(void) {
     } else {
         self.incomingURL=url;
     }
-    [[IFFrameEngine shared] arm:self.outgoingURL];
-    [self runNative];
+    // Verify the imported video independently of the live camera's format.
+    // A malformed/iCloud-incomplete clip must produce a clear error, not a
+    // mysteriously black call. Do not block the UI/capture thread during decode.
+    NSURL *videoURL=[self.outgoingURL copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        AVURLAsset *asset=[AVURLAsset URLAssetWithURL:videoURL options:nil];
+        AVAssetTrack *track=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+        NSError *error=nil;
+        CGImageRef firstFrame=NULL;
+        if(track) {
+            AVAssetImageGenerator *generator=[[AVAssetImageGenerator alloc] initWithAsset:asset];
+            generator.appliesPreferredTrackTransform=YES;
+            generator.requestedTimeToleranceBefore=kCMTimePositiveInfinity;
+            generator.requestedTimeToleranceAfter=kCMTimePositiveInfinity;
+            firstFrame=[generator copyCGImageAtTime:kCMTimeZero actualTime:NULL error:&error];
+        }
+        BOOL ready=(track && firstFrame);
+        if(firstFrame) CGImageRelease(firstFrame);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if(!ready) {
+                NSLog(@"[InstaFakeCam v%@] invalid selected clip: %@",kIFVersion,error);
+                [self reset];
+                gIFCallMenuVisible=NO;
+                IFShowMessage(@"Selected video cannot be decoded",
+                    error.localizedDescription?:@"Try a saved H.264 MP4 video from your Photos library.");
+                return;
+            }
+            NSLog(@"[InstaFakeCam v%@] video import preflight OK: %@",kIFVersion,videoURL.lastPathComponent);
+            [[IFFrameEngine shared] arm:videoURL];
+            [self runNative];
+        });
+    });
 }
 - (void)picker:(PHPickerViewController *)picker
 didFinishPicking:(NSArray<PHPickerResult *> *)results {
