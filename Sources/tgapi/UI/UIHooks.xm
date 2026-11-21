@@ -8,6 +8,11 @@
 #import <os/lock.h>
 #import <objc/message.h>
 
+// Snow is a visual-only overlay, independent of Telegram calls/media handling.
+extern void LeadSnowInstall(void);
+extern void LeadSnowChatDidAppear(UIViewController *chat);
+extern void LeadSnowChatWillDisappear(UIViewController *chat);
+
 @interface ASDisplayNode : NSObject
 @property (atomic, strong, readonly) CALayer *layer;
 @property (atomic, assign, readonly) UIView *view;
@@ -1514,6 +1519,14 @@ static void LeadInstallProfileItems(UIViewController *controller) {
         }
     } @catch (NSException *e) {}
 }
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    LeadSnowChatDidAppear((UIViewController *)self);
+}
+- (void)viewWillDisappear:(BOOL)animated {
+    LeadSnowChatWillDisappear((UIViewController *)self);
+    %orig;
+}
 %end
 
 %hook _TtC10TelegramUI22TelegramRootController
@@ -1885,6 +1898,8 @@ static void hook() {
         kDisableEmojiInteractionStatus: @NO,
         kDisableEmojiAcknowledgementStatus: @NO,
         kConfirmCalls: @YES,
+        kLeadSnowEnabled: @NO,
+        kLeadSnowHideInChats: @NO,
         @"LeadCallRecordingEnabled": @NO,
         kHideTTLLabel: @YES,
         kVisualStarsEnabled: @NO,
@@ -1911,6 +1926,8 @@ static void hook() {
         }
         [leadDefaults setBool:YES forKey:kLeadMediaDefaultsMigration];
     }
+
+    LeadSnowInstall();
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         %init(
