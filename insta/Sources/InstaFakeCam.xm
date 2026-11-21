@@ -8,6 +8,9 @@
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <PhotosUI/PhotosUI.h>
+#import <Photos/Photos.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import <math.h>
 
@@ -146,13 +149,24 @@ static void IFShowMessage(NSString *title, NSString *message) {
 
 // Method names are from the openly available Sparkle Instagram call hooks.
 // This UI interception is version-dependent; it does not cover incoming calls.
-@interface IFCallCoordinator : NSObject <UIDocumentPickerDelegate>
+@interface IFCallCoordinator : NSObject <PHPickerViewControllerDelegate>
 @property (nonatomic, assign) IFMode requestedMode;
 @property (nonatomic, assign) NSInteger pickerStep;
 @property (nonatomic, copy) void (^nativeContinuation)(void);
 @property (nonatomic, strong) NSURL *outgoingURL;
 @property (nonatomic, strong) NSURL *incomingURL;
+@property (nonatomic, weak) id callManager;
+@property (nonatomic, weak) id callSession;
+@property (nonatomic, strong) NSTimer *stateTimer;
+@property (nonatomic, strong) NSTimer *endTimer;
+@property (nonatomic, assign) BOOL callConnected;
+@property (nonatomic, assign) BOOL participantJoined;
+@property (nonatomic, assign) BOOL hangupRequested;
++ (instancetype)shared;
 - (void)offerCallOptions:(void (^)(void))nativeContinuation;
+- (void)observeManager:(id)manager session:(id)session;
+- (void)participantJoinedSession:(id)session;
+- (void)callDidEnd;
 - (void)fakeClipFinished;
 @end
 
@@ -171,7 +185,11 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @property (nonatomic, assign) CFTimeInterval duration;
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, assign) BOOL started;
+@property (nonatomic, assign) BOOL playing;
 - (void)arm:(NSURL *)url;
+- (void)beginPlayback;
+- (BOOL)isArmed;
+- (CFTimeInterval)clipDuration;
 - (void)stop;
 - (CMSampleBufferRef)copyReplacementFor:(CMSampleBufferRef)input;
 @end
@@ -205,15 +223,36 @@ static void IFShowMessage(NSString *title, NSString *message) {
     [self.lock lock];
     [self clearReaderLocked];
     self.url=[url copy];
-    self.duration=0; self.started=NO; self.finished=NO;
+    self.duration=0; self.started=NO; self.finished=NO; self.playing=NO;
+    AVURLAsset *asset=[AVURLAsset URLAssetWithURL:url options:nil];
+    CFTimeInterval seconds=CMTimeGetSeconds(asset.duration);
+    self.duration=(isfinite(seconds) && seconds>0) ? seconds : 0;
     [self.lock unlock];
-    NSLog(@"[InstaFakeCam] armed clip %@",url.lastPathComponent);
+    NSLog(@"[InstaFakeCam] armed clip %@ (%.2fs); playback gated by remote acceptance",
+          url.lastPathComponent, self.duration);
 }
 - (void)stop {
     [self.lock lock];
     self.url=nil;
     [self clearReaderLocked];
-    self.started=NO; self.finished=NO; self.duration=0;
+    self.started=NO; self.finished=NO; self.playing=NO; self.duration=0;
+    [self.lock unlock];
+}
+- (BOOL)isArmed {
+    [self.lock lock]; BOOL result=(self.url!=nil); [self.lock unlock]; return result;
+}
+- (CFTimeInterval)clipDuration {
+    [self.lock lock]; CFTimeInterval result=self.duration; [self.lock unlock]; return result;
+}
+- (void)beginPlayback {
+    [self.lock lock];
+    if(self.url && !self.playing) {
+        // First frame starts ONLY after the remote participant joins.
+        self.playing=YES;
+        self.finished=NO;
+        self.origin=kCMTimeInvalid;
+        NSLog(@"[InstaFakeCam] remote answered; starting video clock from frame zero");
+    }
     [self.lock unlock];
 }
 - (BOOL)prepareForWidth:(size_t)w height:(size_t)h {
@@ -244,41 +283,44 @@ static void IFShowMessage(NSString *title, NSString *message) {
 }
 - (CMSampleBufferRef)copyReplacementFor:(CMSampleBufferRef)input {
     [self.lock lock];
-    if (!self.url || self.finished) { [self.lock unlock]; return NULL; }
+    // NEVER stop replacing frames merely because the clip ended:
+    // otherwise the live camera would become visible before hangup completes.
+    if (!self.url) { [self.lock unlock]; return NULL; }
     CVImageBufferRef source=CMSampleBufferGetImageBuffer(input);
     if(!source) { [self.lock unlock]; return NULL; }
     size_t w=CVPixelBufferGetWidth(source),h=CVPixelBufferGetHeight(source);
     if(!w||!h) { [self.lock unlock]; return NULL; }
 
+    // Prepare/hold a frame while ringing but render BLACK until accepted.
+    // This protects against consuming the clip early and against the real-camera
+    // fallback seen in the previous test build.
     BOOL readerReady=[self prepareForWidth:w height:h];
     CMTime captureTime=CMSampleBufferGetPresentationTimeStamp(input);
-    if (!CMTIME_IS_NUMERIC(self.origin)) self.origin=captureTime;
-    CMTime elapsed=CMTimeSubtract(captureTime,self.origin);
-    if (readerReady && CMTIME_IS_NUMERIC(elapsed)) {
-        while (self.next &&
-               CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(self.next),elapsed) <= 0) {
-            if(self.held) CFRelease(self.held);
-            self.held=self.next;
-            self.next=[self.output copyNextSampleBuffer];
-        }
-        if (!self.held && self.next) {
-            self.held=self.next;
-            self.next=[self.output copyNextSampleBuffer];
+    CMTime elapsed=kCMTimeInvalid;
+    if (self.playing && !self.finished && readerReady) {
+        if (!CMTIME_IS_NUMERIC(self.origin)) self.origin=captureTime;
+        elapsed=CMTimeSubtract(captureTime,self.origin);
+        if (CMTIME_IS_NUMERIC(elapsed)) {
+            while (self.next &&
+                   CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(self.next),elapsed) <= 0) {
+                if(self.held) CFRelease(self.held);
+                self.held=self.next;
+                self.next=[self.output copyNextSampleBuffer];
+            }
+            if (!self.held && self.next) {
+                self.held=self.next;
+                self.next=[self.output copyNextSampleBuffer];
+            }
         }
     }
-    if(!self.started && readerReady) {
-        self.started=YES;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            IFCallCoordinator *coordinator=(id)[IFCallCoordinator performSelector:@selector(shared)];
-            if(coordinator.requestedMode==IFModeDual && coordinator.incomingURL)
-                [[IFLocalRemotePreview shared] presentURL:coordinator.incomingURL];
-        });
-    }
+    // If the session was accepted but a sample is temporarily unavailable,
+    // output black rather than any authentic camera pixels.
+    BOOL renderClip=self.playing && self.held!=NULL;
 
     // Always output a replacement frame while armed: if decoding fails, use black,
     // rather than briefly leaking the real camera image to the recipient.
     CIImage *image=nil;
-    if (self.held) {
+    if (renderClip) {
         CVImageBufferRef media=CMSampleBufferGetImageBuffer(self.held);
         if(media) {
             image=[CIImage imageWithCVPixelBuffer:media];
@@ -330,11 +372,11 @@ static void IFShowMessage(NSString *title, NSString *message) {
     if(description) CFRelease(description);
     CVPixelBufferRelease(target);
 
-    if(self.duration>0 && CMTIME_IS_NUMERIC(elapsed) &&
+    if(self.playing && self.duration>0 && CMTIME_IS_NUMERIC(elapsed) &&
        CMTimeGetSeconds(elapsed)>=self.duration && !self.finished) {
         self.finished=YES;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [[IFCallCoordinator performSelector:@selector(shared)] fakeClipFinished];
+            [[IFCallCoordinator shared] fakeClipFinished];
         });
     }
     [self.lock unlock];
@@ -373,12 +415,82 @@ static UIControl *IFFindHangup(UIView *view) {
     return s;
 }
 - (void)reset {
+    [self.stateTimer invalidate]; self.stateTimer=nil;
+    [self.endTimer invalidate]; self.endTimer=nil;
+    self.callConnected=NO;
+    self.participantJoined=NO;
+    self.hangupRequested=NO;
+    self.callSession=nil; self.callManager=nil;
     self.requestedMode=IFModeNormal;
     self.pickerStep=0;
     self.nativeContinuation=nil;
     self.outgoingURL=nil; self.incomingURL=nil;
     [[IFLocalRemotePreview shared] hide];
     [[IFFrameEngine shared] stop];
+}
+- (void)callDidEnd {
+    if(self.requestedMode==IFModeNormal && ![[IFFrameEngine shared] isArmed])
+        return;
+    NSLog(@"[InstaFakeCam] native call ended; resetting media");
+    [self reset];
+}
+- (void)observeManager:(id)manager session:(id)session {
+    if(self.requestedMode==IFModeNormal) return;
+    if(manager) self.callManager=manager;
+    if(session) self.callSession=session;
+    [self inspectConnectionState];
+}
+- (void)participantJoinedSession:(id)session {
+    if(self.requestedMode==IFModeNormal || self.hangupRequested) return;
+    if(session) self.callSession=session;
+    self.participantJoined=YES;
+    [self inspectConnectionState];
+}
+- (void)markConnected {
+    if(self.callConnected || self.requestedMode==IFModeNormal || self.hangupRequested) return;
+    self.callConnected=YES;
+    NSLog(@"[InstaFakeCam] remote connection confirmed; playback permitted");
+    [[IFFrameEngine shared] beginPlayback];
+    if(self.requestedMode==IFModeDual && self.incomingURL)
+        [[IFLocalRemotePreview shared] presentURL:self.incomingURL];
+    CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
+    if(isfinite(duration) && duration>0.1) {
+        [self.endTimer invalidate];
+        self.endTimer=[NSTimer scheduledTimerWithTimeInterval:duration
+                       target:self selector:@selector(fakeClipFinished)
+                       userInfo:nil repeats:NO];
+    }
+}
+- (void)inspectConnectionState {
+    if(self.requestedMode==IFModeNormal || self.callConnected || self.hangupRequested) return;
+    id session=self.callSession;
+    id manager=self.callManager;
+    if(!session && manager && [manager respondsToSelector:@selector(currentSession)]) {
+        session=((id(*)(id,SEL))objc_msgSend)(manager,@selector(currentSession));
+        if(session) self.callSession=session;
+    }
+    if(!session) return;
+
+    // isAnswered belongs to IGVideoCallSession, not local camera capture.
+    // The call needs an actual answered state (or the observed remote-join
+    // callback on Instagram versions where this selector no longer exists).
+    if([session respondsToSelector:@selector(isAnswered)]) {
+        BOOL answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
+        if(answered) [self markConnected];
+    } else if(self.participantJoined) {
+        [self markConnected];
+    }
+}
+- (void)pollConnection:(NSTimer *)timer {
+    if(self.requestedMode==IFModeNormal) { [timer invalidate]; self.stateTimer=nil; return; }
+    [self inspectConnectionState];
+    id manager=self.callManager;
+    if(manager && [manager respondsToSelector:@selector(hasActiveCall)]) {
+        BOOL active=((BOOL(*)(id,SEL))objc_msgSend)(manager,@selector(hasActiveCall));
+        if(!active && (self.callConnected || self.hangupRequested)) {
+            [self callDidEnd];
+        }
+    }
 }
 - (void)runNative {
     void (^continuation)(void)=[self.nativeContinuation copy];
@@ -389,102 +501,140 @@ static UIControl *IFFindHangup(UIView *view) {
         continuation();
         gIFResumingNativeCall=NO;
     }
+    if(self.requestedMode!=IFModeNormal) {
+        [self.stateTimer invalidate];
+        self.stateTimer=[NSTimer scheduledTimerWithTimeInterval:0.25
+                   target:self selector:@selector(pollConnection:)
+                   userInfo:nil repeats:YES];
+    }
 }
 - (void)beginPicking {
     UIViewController *host=IFPresenter();
     if(!host) { [self reset]; gIFCallMenuVisible=NO; return; }
-    UIDocumentPickerViewController *picker=[[UIDocumentPickerViewController alloc]
-                 initForOpeningContentTypes:@[UTTypeMovie,UTTypeVideo] asCopy:YES];
-    picker.allowsMultipleSelection=NO;
+    PHPickerConfiguration *config=[[PHPickerConfiguration alloc] initWithPhotoLibrary:PHPhotoLibrary.sharedPhotoLibrary];
+    config.filter=[PHPickerFilter videosFilter];
+    config.selectionLimit=1;
+    config.preferredAssetRepresentationMode=PHPickerConfigurationAssetRepresentationModeCurrent;
+    PHPickerViewController *picker=[[PHPickerViewController alloc] initWithConfiguration:config];
     picker.delegate=self;
     [host presentViewController:picker animated:YES completion:nil];
 }
+- (void)handleSelectedVideoURL:(NSURL *)url error:(NSError *)error {
+    if(!url) {
+        NSLog(@"[InstaFakeCam] Photos picker copy failed %@",error);
+        [self reset]; gIFCallMenuVisible=NO;
+        IFShowMessage(@"Video import failed",
+                      error.localizedDescription?:@"Please select a video from Photos.");
+        return;
+    }
+    if(self.pickerStep==0) {
+        self.outgoingURL=url;
+        if(self.requestedMode==IFModeDual) {
+            self.pickerStep=1;
+            [self beginPicking];
+            return;
+        }
+    } else {
+        self.incomingURL=url;
+    }
+    [[IFFrameEngine shared] arm:self.outgoingURL];
+    [self runNative];
+}
+- (void)picker:(PHPickerViewController *)picker
+didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:^{
+        PHPickerResult *chosen=results.firstObject;
+        if(!chosen) { [self reset]; gIFCallMenuVisible=NO; return; }
+        NSItemProvider *item=chosen.itemProvider;
+        NSString *movieType=UTTypeMovie.identifier;
+        if(![item hasItemConformingToTypeIdentifier:movieType]) {
+            [self handleSelectedVideoURL:nil error:nil];
+            return;
+        }
+        [item loadFileRepresentationForTypeIdentifier:movieType
+                                   completionHandler:^(NSURL *temporary, NSError *error) {
+            NSURL *saved=nil;
+            if(temporary && !error) {
+                NSString *dir=[NSHomeDirectory() stringByAppendingPathComponent:@"Documents/InstaFakeCam"];
+                [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                    withIntermediateDirectories:YES attributes:nil error:NULL];
+                NSString *ext=temporary.pathExtension.length?temporary.pathExtension:@"mov";
+                saved=[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"%@.%@",NSUUID.UUID.UUIDString,ext]]];
+                NSError *copyError=nil;
+                if(![[NSFileManager defaultManager] copyItemAtURL:temporary toURL:saved error:&copyError]) {
+                    saved=nil;
+                    error=copyError;
+                }
+            }
+            NSURL *finalURL=saved;
+            NSError *finalError=error;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self handleSelectedVideoURL:finalURL error:finalError];
+            });
+        }];
+    }];
+}
 - (void)offerCallOptions:(void (^)(void))nativeContinuation {
-    if (gIFCallMenuVisible) return;
+    if(gIFCallMenuVisible) return;
     UIViewController *host=IFPresenter();
-    if (!host) { if(nativeContinuation)nativeContinuation(); return; }
+    if(!host) { if(nativeContinuation)nativeContinuation(); return; }
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
     UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Instagram Video Call"
-                    message:@"Choose a call camera mode"
-                    preferredStyle:UIAlertControllerStyleActionSheet];
+                      message:@"Choose your camera source"
+                      preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
     [menu addAction:[UIAlertAction actionWithTitle:@"Normal video call"
-                     style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         weakSelf.requestedMode=IFModeNormal;
         [weakSelf runNative];
     }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"Fake my camera (choose video)"
-                     style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+    [menu addAction:[UIAlertAction actionWithTitle:@"Fake my camera (Photos)"
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         weakSelf.requestedMode=IFModeOutgoing;
         weakSelf.pickerStep=0;
         [weakSelf beginPicking];
     }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"Fake both cameras (choose 2 videos)"
-                     style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+    [menu addAction:[UIAlertAction actionWithTitle:@"Fake both cameras (Photos)"
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         weakSelf.requestedMode=IFModeDual;
         weakSelf.pickerStep=0;
         [weakSelf beginPicking];
     }]];
     [menu addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                     style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a) {
+            style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *a) {
         [weakSelf reset]; gIFCallMenuVisible=NO;
     }]];
     menu.popoverPresentationController.sourceView=host.view;
     menu.popoverPresentationController.sourceRect=CGRectMake(CGRectGetMidX(host.view.bounds),32,1,1);
     [host presentViewController:menu animated:YES completion:nil];
 }
-- (void)documentPicker:(UIDocumentPickerViewController *)controller
-       didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSURL *picked=urls.firstObject;
-    if(!picked) { [self reset]; gIFCallMenuVisible=NO; return; }
-    BOOL scoped=[picked startAccessingSecurityScopedResource];
-    NSString *dir=[NSHomeDirectory() stringByAppendingPathComponent:@"Documents/InstaFakeCam"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir
-                   withIntermediateDirectories:YES attributes:nil error:NULL];
-    NSString *extension=picked.pathExtension.length?picked.pathExtension:@"mov";
-    NSURL *destination=[NSURL fileURLWithPath:
-      [dir stringByAppendingPathComponent:
-       [NSString stringWithFormat:@"%@.%@",NSUUID.UUID.UUIDString,extension]]];
-    NSError *error=nil;
-    BOOL copied=[[NSFileManager defaultManager] copyItemAtURL:picked toURL:destination error:&error];
-    if(scoped) [picked stopAccessingSecurityScopedResource];
-    if(!copied) {
-        NSLog(@"[InstaFakeCam] picker copy failed %@",error);
-        [self reset]; gIFCallMenuVisible=NO;
-        IFShowMessage(@"Video import failed",error.localizedDescription?:@"Please choose another video");
+- (void)fakeClipFinished {
+    if(self.requestedMode==IFModeNormal || !self.callConnected || self.hangupRequested) return;
+    self.hangupRequested=YES;
+    [self.endTimer invalidate]; self.endTimer=nil;
+    NSLog(@"[InstaFakeCam] selected clip reached its duration; requesting hangup");
+    [[IFLocalRemotePreview shared] hide];
+    // IMPORTANT: DO NOT call reset here. Keep replacing camera frames with
+    // the last video frame or black until native call teardown is confirmed.
+    id manager=self.callManager;
+    if(manager && [manager respondsToSelector:@selector(leaveCallWithReason:)]) {
+        ((void(*)(id,SEL,long long))objc_msgSend)(manager,
+                       @selector(leaveCallWithReason:), 0);
+        NSLog(@"[InstaFakeCam] requested native IGVideoCallManager hangup");
         return;
     }
-    if(self.pickerStep==0) {
-        self.outgoingURL=destination;
-        if(self.requestedMode==IFModeDual) {
-            self.pickerStep=1;
-            dispatch_async(dispatch_get_main_queue(), ^{ [self beginPicking]; });
-            return;
-        }
-    } else {
-        self.incomingURL=destination;
-    }
-    [[IFFrameEngine shared] arm:self.outgoingURL];
-    [self runNative];
-}
-- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    [self reset]; gIFCallMenuVisible=NO;
-}
-- (void)fakeClipFinished {
-    NSLog(@"[InstaFakeCam] fake outgoing clip reached the end");
-    [[IFLocalRemotePreview shared] hide];
     UIWindow *main=IFMainWindow();
     UIControl *end=IFFindHangup(main.rootViewController.view);
     if(end) {
         [end sendActionsForControlEvents:UIControlEventTouchUpInside];
-        NSLog(@"[InstaFakeCam] sent End Call control event");
+        NSLog(@"[InstaFakeCam] sent End Call UI control event");
     } else {
         IFShowMessage(@"Video finished",
-            @"Could not locate Instagram's End Call button for this version. End the call manually.");
+          @"Automatic hangup is unavailable in this Instagram version. End the call manually; the real camera stays blocked.");
     }
-    [self reset];
 }
 @end
 
@@ -498,10 +648,21 @@ static UIControl *IFFindHangup(UIView *view) {
 - (void)captureOutput:(AVCaptureOutput *)output
  didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
-    CMSampleBufferRef fake=[[IFFrameEngine shared] copyReplacementFor:sampleBuffer];
+    IFFrameEngine *engine=[IFFrameEngine shared];
+    BOOL armed=[engine isArmed];
+    CMSampleBufferRef fake=armed?[engine copyReplacementFor:sampleBuffer]:NULL;
     id<AVCaptureVideoDataOutputSampleBufferDelegate> recipient=self.original;
-    if([recipient respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)])
-        [recipient captureOutput:output didOutputSampleBuffer:fake?:sampleBuffer fromConnection:connection];
+    if([recipient respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+        if(!armed) {
+            [recipient captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+        } else if(fake) {
+            [recipient captureOutput:output didOutputSampleBuffer:fake fromConnection:connection];
+        } else {
+            // Fail CLOSED. Never send the real camera frame when fake is armed
+            // even if a video file cannot be decoded or the buffer creation fails.
+            NSLog(@"[InstaFakeCam] dropped camera frame because fake output was unavailable");
+        }
+    }
     if(fake) CFRelease(fake);
 }
 - (void)captureOutput:(AVCaptureOutput *)output
@@ -525,6 +686,43 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
     proxy.original=delegate;
     objc_setAssociatedObject(self,kIFCaptureProxyKey,proxy,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     %orig(proxy,queue);
+}
+%end
+
+// Calls are connected independently of camera capture. Classes/selectors are
+// derived from public Instagram class-dumped headers; availability varies by build.
+%hook IGVideoCallManager
+- (void)startCallSession:(id)session completion:(id)completion {
+    [[IFCallCoordinator shared] observeManager:self session:session];
+    %orig;
+}
+- (void)startCallWithActivity:(id)activity {
+    [[IFCallCoordinator shared] observeManager:self session:nil];
+    %orig;
+}
+- (void)videoCallSession:(id)session participantDidJoin:(id)participant
+             isFirstJoin:(BOOL)first videoView:(id)view
+             videoState:(long long)state audioEnabled:(BOOL)enabled
+             isExistingParticipant:(BOOL)existing {
+    %orig;
+    [[IFCallCoordinator shared] observeManager:self session:session];
+    [[IFCallCoordinator shared] participantJoinedSession:session];
+}
+- (void)videoCallControllerDidEnd:(id)controller reasonCallEnded:(BOOL)reason {
+    %orig;
+    [[IFCallCoordinator shared] callDidEnd];
+}
+- (void)leaveCallWithReason:(long long)reason {
+    %orig;
+    [[IFCallCoordinator shared] callDidEnd];
+}
+%end
+
+%hook IGVideoCallSession
+- (void)videoCallController:(id)controller didAddParticipant:(id)participant
+      isExistingParticipant:(BOOL)existing {
+    %orig;
+    [[IFCallCoordinator shared] participantJoinedSession:self];
 }
 %end
 
