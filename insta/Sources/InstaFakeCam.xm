@@ -23,7 +23,7 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.5.2";
+static NSString *const kIFVersion = @"0.5.3";
 
 // Shared monotonic clock: RTC capture buffers can use disjoint/rebased PTS.
 // Starting this ONLY when the remote call is answered keeps video and audio in sync.
@@ -174,7 +174,10 @@ static void IFShowMessage(NSString *title, NSString *message) {
     CMItemCount frames=CMSampleBufferGetNumSamples(input);
     if(!asbd || asbd->mFormatID!=kAudioFormatLinearPCM ||
        asbd->mChannelsPerFrame==0 || asbd->mChannelsPerFrame>2 ||
-       (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ||
+       // A mono non-interleaved PCM buffer has the same physical layout
+       // as interleaved mono; only reject planar audio when multi-channel.
+       ((asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) &&
+         asbd->mChannelsPerFrame>1) ||
        frames<=0 || frames>8192 ||
        !((asbd->mBitsPerChannel==32 && (asbd->mFormatFlags & kAudioFormatFlagIsFloat)) ||
          (asbd->mBitsPerChannel==16 && !(asbd->mFormatFlags & kAudioFormatFlagIsFloat)))) {
@@ -979,7 +982,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.2"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.3"
                       message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
@@ -1245,6 +1248,6 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.2",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.3",kIFVersion);
     }
 }
