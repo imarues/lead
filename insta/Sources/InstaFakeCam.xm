@@ -477,18 +477,30 @@ static BOOL IFOutgoingCallStillRinging(void) {
     [[IFFrameEngine shared] stop];
 }
 - (void)callDidEnd {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self callDidEnd]; });
+        return;
+    }
     if(self.requestedMode==IFModeNormal && ![[IFFrameEngine shared] isArmed])
         return;
     NSLog(@"[InstaFakeCam] native call ended; resetting media");
     [self reset];
 }
 - (void)observeManager:(id)manager session:(id)session {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self observeManager:manager session:session]; });
+        return;
+    }
     if(self.requestedMode==IFModeNormal) return;
     if(manager) self.callManager=manager;
     if(session) self.callSession=session;
     [self inspectConnectionState];
 }
 - (void)participantJoinedSession:(id)session {
+    if(!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self participantJoinedSession:session]; });
+        return;
+    }
     if(self.requestedMode==IFModeNormal || self.hangupRequested) return;
     if(session) self.callSession=session;
     self.participantJoined=YES;
