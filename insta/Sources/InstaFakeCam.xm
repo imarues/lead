@@ -395,6 +395,28 @@ static BOOL IFIsEndCallButton(UIView *view) {
                              @"قطع الاتصال",@"terminar llamada",@"raccrocher"]) {
         if([label containsString:token]) return YES;
     }
+    // Recent Instagram may omit an accessibility label on the red hang-up
+    // circle. Accept this visual fallback only in the call control-bar area.
+    UIWindow *win=view.window;
+    if(win) {
+        CGRect box=[view convertRect:view.bounds toView:win];
+        CGFloat cx=CGRectGetMidX(box), cy=CGRectGetMidY(box);
+        CGFloat sw=CGRectGetWidth(win.bounds), sh=CGRectGetHeight(win.bounds);
+        if(cx>sw*.64 && cy>sh*.58 && box.size.width>=35 && box.size.width<=125 &&
+           box.size.height>=35 && box.size.height<=125) {
+            NSMutableArray<UIView *> *queue=[NSMutableArray arrayWithObject:view];
+            NSInteger inspected=0;
+            while(queue.count && inspected++<12) {
+                UIView *candidate=queue.firstObject;
+                [queue removeObjectAtIndex:0];
+                CGFloat red=0,green=0,blue=0,alpha=0;
+                if([candidate.backgroundColor getRed:&red green:&green blue:&blue alpha:&alpha]
+                   && red>.68 && green<.38 && blue<.48 && alpha>.65)
+                    return YES;
+                [queue addObjectsFromArray:candidate.subviews];
+            }
+        }
+    }
     return NO;
 }
 static UIControl *IFFindHangup(UIView *view) {
@@ -405,6 +427,32 @@ static UIControl *IFFindHangup(UIView *view) {
         if(match) return match;
     }
     return nil;
+}
+
+// A secondary guard: the outgoing call's "Calling..." screen must be gone
+// even if a version reports its transport as connected before anyone answers.
+static BOOL IFViewHasRingingText(UIView *root, NSInteger depth, NSUInteger *visited) {
+    if(!root || root.hidden || root.alpha<.02 || depth>22 || (*visited)++>2200)
+        return NO;
+    NSString *value=nil;
+    if([root isKindOfClass:UILabel.class]) value=((UILabel *)root).text;
+    if(value.length) {
+        NSString *label=value.lowercaseString;
+        for(NSString *needle in @[@"calling...",@"calling…",@"ringing...",
+                    @"ringing…",@"connecting...",@"connecting…",
+                    @"جاري الاتصال",@"جار الاتصال",@"يتصل...",@"الاتصال جار"]) {
+            if([label containsString:needle]) return YES;
+        }
+    }
+    for(UIView *child in root.subviews)
+        if(IFViewHasRingingText(child,depth+1,visited)) return YES;
+    return NO;
+}
+static BOOL IFOutgoingCallStillRinging(void) {
+    UIWindow *window=IFMainWindow();
+    NSUInteger visited=0;
+    return window.rootViewController ?
+           IFViewHasRingingText(window.rootViewController.view,0,&visited) : NO;
 }
 
 @implementation IFCallCoordinator
@@ -471,9 +519,10 @@ static UIControl *IFFindHangup(UIView *view) {
     }
     if(!session) return;
 
+    // Never start during the visible outgoing dial/ring UI.
+    if(IFOutgoingCallStillRinging()) return;
     // isAnswered belongs to IGVideoCallSession, not local camera capture.
-    // The call needs an actual answered state (or the observed remote-join
-    // callback on Instagram versions where this selector no longer exists).
+    // The real call must be accepted; a capture callback is NOT acceptance.
     if([session respondsToSelector:@selector(isAnswered)]) {
         BOOL answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
         if(answered) [self markConnected];
