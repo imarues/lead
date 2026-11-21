@@ -23,12 +23,13 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.5.1";
+static NSString *const kIFVersion = @"0.5.2";
 
 // Shared monotonic clock: RTC capture buffers can use disjoint/rebased PTS.
 // Starting this ONLY when the remote call is answered keeps video and audio in sync.
 static CFTimeInterval gIFPlaybackEpoch = 0;
 static CFTimeInterval gIFRingingPreviewEpoch = 0;
+static BOOL gIFCallUIPortrait = YES;
 static CFTimeInterval IFMediaElapsed(void) {
     // During ringing the outgoing local camera shows moving footage. Once
     // answered, reset to t=0 so the remote receives the COMPLETE clip.
@@ -472,8 +473,16 @@ static void IFShowMessage(NSString *title, NSString *message) {
     // A track's preferredTransform may include +/-90 degree rotation and
     // negative translation. Normalize the transformed pixel bounds first,
     // then scale and center in OUTPUT coordinates, not source coordinates.
+    CGAffineTransform videoTransform=track.preferredTransform;
+    // Instagram's call renderer may display landscape raw capture buffers
+    // rotated counterclockwise on a portrait screen. Match the expected
+    // buffer orientation before it reaches Instagram's own UI/RTC transform.
+    BOOL compensateLandscapeCapture=gIFCallUIPortrait && w>h;
+    if(compensateLandscapeCapture)
+        videoTransform=CGAffineTransformConcat(
+            CGAffineTransformMakeRotation((CGFloat)M_PI_2),videoTransform);
     CGRect oriented=CGRectStandardize(CGRectApplyAffineTransform(
-        CGRectMake(0,0,track.naturalSize.width,track.naturalSize.height),track.preferredTransform));
+        CGRectMake(0,0,track.naturalSize.width,track.naturalSize.height),videoTransform));
     CGSize natural=oriented.size;
     if(!isfinite(natural.width)||!isfinite(natural.height)||
        natural.width<=0||natural.height<=0) {
@@ -485,13 +494,13 @@ static void IFShowMessage(NSString *title, NSString *message) {
     CGFloat dy=((CGFloat)h-natural.height*scale)/2.0;
     CGAffineTransform normalized=CGAffineTransformConcat(
         CGAffineTransformMakeTranslation(-CGRectGetMinX(oriented),-CGRectGetMinY(oriented)),
-        track.preferredTransform);
+        videoTransform);
     CGAffineTransform xform=CGAffineTransformConcat(
         CGAffineTransformMakeTranslation(dx,dy),
         CGAffineTransformConcat(CGAffineTransformMakeScale(scale,scale),normalized));
-    NSLog(@"[InstaFakeCam v%@] video orientation %.0fx%.0f -> %.0fx%.0f",
+    NSLog(@"[InstaFakeCam v%@] video orientation %.0fx%.0f -> %.0fx%.0f (capture=%zux%zu, compensate=%d)",
           kIFVersion,track.naturalSize.width,track.naturalSize.height,
-          natural.width,natural.height);
+          natural.width,natural.height,w,h,compensateLandscapeCapture);
     AVMutableVideoCompositionLayerInstruction *layer=
         [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:track];
     [layer setTransform:xform atTime:kCMTimeZero];
@@ -827,6 +836,10 @@ static BOOL IFActiveCallControlsVisible(void) {
     }
 }
 - (void)runNative {
+    UIWindow *callWindow=IFMainWindow();
+    UIInterfaceOrientation interfaceOrientation=callWindow.windowScene.interfaceOrientation;
+    gIFCallUIPortrait=UIInterfaceOrientationIsPortrait(interfaceOrientation) ||
+        (callWindow.bounds.size.height>callWindow.bounds.size.width);
     void (^continuation)(void)=[self.nativeContinuation copy];
     self.nativeContinuation=nil;
     gIFCallMenuVisible=NO;
@@ -966,7 +979,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.1"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.2"
                       message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
@@ -1232,6 +1245,6 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.1",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.2",kIFVersion);
     }
 }
