@@ -22,6 +22,7 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
+static NSString *const kIFVersion = @"0.3.0";
 
 static UIWindow *IFMainWindow(void) {
     UIWindow *fallback = nil;
@@ -533,14 +534,17 @@ static BOOL IFOutgoingCallStillRinging(void) {
 
     // Never start during the visible outgoing dial/ring UI.
     if(IFOutgoingCallStillRinging()) return;
-    // isAnswered belongs to IGVideoCallSession, not local camera capture.
-    // The real call must be accepted; a capture callback is NOT acceptance.
+    // isAnswered alone can mean that the LOCAL call session was answered.
+    // Require a real participantDidJoin notification before starting playback.
+    // This intentionally fails closed on incompatible Instagram builds rather
+    // than exhausting the prerecorded clip while still ringing.
+    if(!self.participantJoined) return;
     if([session respondsToSelector:@selector(isAnswered)]) {
         BOOL answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
-        if(answered) [self markConnected];
-    } else if(self.participantJoined) {
-        [self markConnected];
+        NSLog(@"[InstaFakeCam v%@] joined=%d isAnswered=%d",kIFVersion,self.participantJoined,answered);
+        if(!answered) return;
     }
+    [self markConnected];
 }
 - (void)pollConnection:(NSTimer *)timer {
     if(self.requestedMode==IFModeNormal) { [timer invalidate]; self.stateTimer=nil; return; }
@@ -643,8 +647,8 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Instagram Video Call"
-                      message:@"Choose your camera source"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.3.0"
+                      message:@"Photos gallery · remote answer gate · automatic hangup"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
     [menu addAction:[UIAlertAction actionWithTitle:@"Normal video call"
@@ -680,21 +684,64 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [[IFLocalRemotePreview shared] hide];
     // IMPORTANT: DO NOT call reset here. Keep replacing camera frames with
     // the last video frame or black until native call teardown is confirmed.
-    id manager=self.callManager;
-    if(manager && [manager respondsToSelector:@selector(leaveCallWithReason:)]) {
-        ((void(*)(id,SEL,long long))objc_msgSend)(manager,
-                       @selector(leaveCallWithReason:), 0);
-        NSLog(@"[InstaFakeCam] requested native IGVideoCallManager hangup");
-        return;
+    // Discover the LIVE call controller, not just the main scene root.
+    // Instagram's 166.0 class-dump exposes _leaveCallWithReason: and
+    // videoCallControlsViewDidTapHangUpButton:. Modern versions may rename them.
+    BOOL submitted=NO;
+    NSMutableArray<UIViewController *> *controllers=[NSMutableArray array];
+    for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if(![scene isKindOfClass:UIWindowScene.class]) continue;
+        for(UIWindow *win in ((UIWindowScene *)scene).windows) {
+            if(win.hidden || !win.rootViewController) continue;
+            [controllers addObject:win.rootViewController];
+        }
     }
-    UIWindow *main=IFMainWindow();
-    UIControl *end=IFFindHangup(main.rootViewController.view);
-    if(end) {
-        [end sendActionsForControlEvents:UIControlEventTouchUpInside];
-        NSLog(@"[InstaFakeCam] sent End Call UI control event");
-    } else {
-        IFShowMessage(@"Video finished",
-          @"Automatic hangup is unavailable in this Instagram version. End the call manually; the real camera stays blocked.");
+    for(NSUInteger i=0;i<controllers.count && i<250;i++) {
+        UIViewController *vc=controllers[i];
+        if(vc.presentedViewController) [controllers addObject:vc.presentedViewController];
+        [controllers addObjectsFromArray:vc.childViewControllers];
+        NSString *className=NSStringFromClass(vc.class);
+        if([className containsString:@"IGVideoCallViewController"] &&
+           [vc respondsToSelector:@selector(_leaveCallWithReason:)]) {
+            ((void(*)(id,SEL,long long))objc_msgSend)(vc,@selector(_leaveCallWithReason:),0);
+            NSLog(@"[InstaFakeCam] requested hangup via %@ _leaveCallWithReason:",className);
+            submitted=YES;
+            break;
+        }
+    }
+    id manager=self.callManager;
+    if(!submitted && manager && [manager respondsToSelector:@selector(leaveCallWithReason:)]) {
+        ((void(*)(id,SEL,long long))objc_msgSend)(manager,@selector(leaveCallWithReason:),0);
+        NSLog(@"[InstaFakeCam] requested native IGVideoCallManager hangup");
+        submitted=YES;
+    }
+    if(!submitted && manager && [manager respondsToSelector:@selector(callKitCoordinator)]) {
+        id coordinator=((id(*)(id,SEL))objc_msgSend)(manager,@selector(callKitCoordinator));
+        if([coordinator respondsToSelector:@selector(endCurrentCall)]) {
+            ((void(*)(id,SEL))objc_msgSend)(coordinator,@selector(endCurrentCall));
+            NSLog(@"[InstaFakeCam] requested CallKit endCurrentCall");
+            submitted=YES;
+        }
+    }
+    if(!submitted) {
+        for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if(![scene isKindOfClass:UIWindowScene.class]) continue;
+            for(UIWindow *win in ((UIWindowScene *)scene).windows) {
+                if(win.hidden || !win.rootViewController) continue;
+                UIControl *end=IFFindHangup(win.rootViewController.view);
+                if(end) {
+                    [end sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    NSLog(@"[InstaFakeCam] requested hangup from native call button");
+                    submitted=YES;
+                    break;
+                }
+            }
+            if(submitted) break;
+        }
+    }
+    if(!submitted) {
+        IFShowMessage(@"Clip ended — hang up manually",
+          @"This Instagram build has a different call-ending API. Camera replacement remains armed to prevent exposure.");
     }
 }
 @end
@@ -780,11 +827,15 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 }
 %end
 
-%hook IGVideoCallSession
-- (void)videoCallController:(id)controller didAddParticipant:(id)participant
-      isExistingParticipant:(BOOL)existing {
+// Session's didAddParticipant can include the local user or signaling-only
+// participants. It is intentionally NOT treated as remote acceptance.
+%hook IGVideoCallViewController
+- (void)videoCallSession:(id)session participantDidJoin:(id)participant
+             isFirstJoin:(BOOL)first videoView:(id)view
+             videoState:(long long)state audioEnabled:(BOOL)enabled
+             isExistingParticipant:(BOOL)existing {
     %orig;
-    [[IFCallCoordinator shared] participantJoinedSession:self];
+    [[IFCallCoordinator shared] participantJoinedSession:session];
 }
 %end
 
@@ -803,6 +854,6 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam] injected into Instagram; waiting for Direct video call");
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.3.0",kIFVersion);
     }
 }
