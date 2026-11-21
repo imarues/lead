@@ -1,0 +1,9 @@
+Package: com.ikiraplus.instafakecam
+Name: InstaFakeCam
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Independent Instagram video-call virtual camera prototype (audio still from microphone).
+Maintainer: InstaFakeCam
+Author: InstaFakeCam
+Section: Tweaks
+Depends: firmware (>= 14.0)
