@@ -713,8 +713,9 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
     [[IFCallCoordinator shared] callDidEnd];
 }
 - (void)leaveCallWithReason:(long long)reason {
+    // A call-end request is asynchronous. Keep substituting virtual frames
+    // until actual RTC teardown; resetting here exposes the real camera.
     %orig;
-    [[IFCallCoordinator shared] callDidEnd];
 }
 %end
 
