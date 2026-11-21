@@ -48,6 +48,8 @@
 #define kGhostDetailsToggle @"LeadGhostDetailsToggle"
 #define kGhostPeerRecords @"LeadGhostPeerRecords"
 #define kGhostPeerKeys @"LeadGhostPeerKeys"
+#define kLeadSnowEnabled @"LeadSnowEnabled"
+#define kLeadSnowHideInChats @"LeadSnowHideInChats"
 #define kDisableOnlineStatus @"disableOnlineStatus"
 
 #define kDisableTypingStatus @"disableTypingStatus"
