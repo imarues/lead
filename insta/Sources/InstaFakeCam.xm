@@ -68,6 +68,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @interface IFAudioEngine : NSObject
 @property (nonatomic, strong) NSLock *lock;
 @property (nonatomic, strong) NSData *samples;
+@property (nonatomic, strong) NSURL *selectedURL;
 @property (nonatomic, assign) BOOL playing;
 @property (nonatomic, assign) CMTime origin;
 @property (nonatomic, assign) BOOL capturedAudio;
@@ -89,6 +90,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 - (void)arm:(NSURL *)url {
     [self.lock lock];
     self.samples=nil;
+    self.selectedURL=url;
     self.playing=NO;
     self.origin=kCMTimeInvalid;
     self.capturedAudio=NO;
@@ -137,8 +139,8 @@ static void IFShowMessage(NSString *title, NSString *message) {
         }
         [reader cancelReading];
         [self.lock lock];
-        // A new selection can supersede this decode; do not overwrite it.
-        if(!self.playing) self.samples=[pcm copy];
+        // A new selection can supersede this asynchronous decode.
+        if([self.selectedURL isEqual:url]) self.samples=[pcm copy];
         [self.lock unlock];
         NSLog(@"[InstaFakeCam] decoded audio track %.2f sec", (double)pcm.length/(48000*sizeof(float)));
     });
@@ -148,7 +150,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 }
 - (void)stop {
     [self.lock lock];
-    self.samples=nil; self.playing=NO; self.origin=kCMTimeInvalid;
+    self.samples=nil; self.selectedURL=nil; self.playing=NO; self.origin=kCMTimeInvalid;
     self.capturedAudio=NO;
     [self.lock unlock];
 }
@@ -493,6 +495,12 @@ static void IFShowMessage(NSString *title, NSString *message) {
     return YES;
 }
 - (CMSampleBufferRef)copyReplacementFor:(CMSampleBufferRef)input {
+    // A previously substituted sample may traverse both AVCapture and the
+    // Instagram call coordinator. Avoid decoding/replacing it twice.
+    if(input && CMGetAttachment(input,CFSTR("com.ikiraplus.instafakecam.sample"),NULL)) {
+        CFRetain(input);
+        return input;
+    }
     [self.lock lock];
     // NEVER stop replacing frames merely because the clip ended:
     // otherwise the live camera would become visible before hangup completes.
@@ -547,6 +555,10 @@ static void IFShowMessage(NSString *title, NSString *message) {
                                                   desc,&timing,&outputBuffer);
     }
     if(desc) CFRelease(desc);
+    if(outputBuffer) {
+        CMSetAttachment(outputBuffer,CFSTR("com.ikiraplus.instafakecam.sample"),
+                        kCFBooleanTrue,kCMAttachmentMode_ShouldNotPropagate);
+    }
     if(status!=noErr) NSLog(@"[InstaFakeCam v%@] output frame status=%d",kIFVersion,(int)status);
     if(self.playing && self.duration>0 && CMTIME_IS_NUMERIC(elapsed) &&
        CMTimeGetSeconds(elapsed)>=self.duration && !self.finished) {
