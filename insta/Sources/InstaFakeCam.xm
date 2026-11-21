@@ -94,6 +94,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 - (void)arm:(NSURL *)url;
 - (void)beginPlayback;
 - (void)stop;
+- (CFTimeInterval)decodedSeconds;
 - (CMSampleBufferRef)copyAudioForInput:(CMSampleBufferRef)input;
 @end
 @implementation IFAudioEngine
@@ -172,6 +173,12 @@ static void IFShowMessage(NSString *title, NSString *message) {
     self.samples=nil; self.selectedURL=nil; self.playing=NO; self.origin=kCMTimeInvalid;
     self.capturedAudio=NO;
     [self.lock unlock];
+}
+- (CFTimeInterval)decodedSeconds {
+    [self.lock lock];
+    CFTimeInterval sec=(CFTimeInterval)self.samples.length / (sizeof(float)*48000.0);
+    [self.lock unlock];
+    return sec;
 }
 - (CMSampleBufferRef)copyAudioForInput:(CMSampleBufferRef)input {
     if(!input) return NULL;
@@ -659,6 +666,72 @@ static void IFShowMessage(NSString *title, NSString *message) {
 }
 @end
 
+// Local-only diagnostic overlay, always pass-through, to identify whether
+// this Instagram version delivers moving capture / RTC / audio callbacks.
+// No logs or images are uploaded anywhere.
+@interface IFDebugOverlay : NSObject
+@property (nonatomic, strong) IFRemoteWindow *window;
+@property (nonatomic, strong) UILabel *label;
++ (instancetype)shared;
+- (void)show;
+- (void)refreshConnected:(BOOL)connected duration:(CFTimeInterval)duration;
+- (void)hide;
+@end
+@implementation IFDebugOverlay
++ (instancetype)shared {
+    static IFDebugOverlay *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s=[IFDebugOverlay new]; });
+    return s;
+}
+- (void)show {
+    [self hide];
+    UIWindow *main=IFMainWindow();
+    if(!main || !main.windowScene) return;
+    IFRemoteWindow *w=[[IFRemoteWindow alloc] initWithWindowScene:main.windowScene];
+    w.windowLevel=UIWindowLevelAlert-2;
+    w.frame=main.bounds;
+    w.backgroundColor=UIColor.clearColor;
+    w.userInteractionEnabled=NO;
+    UIViewController *root=[UIViewController new];
+    root.view.backgroundColor=UIColor.clearColor;
+    root.view.userInteractionEnabled=NO;
+    w.rootViewController=root;
+    CGFloat top=MAX(77,main.safeAreaInsets.top+26);
+    UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(9,top,main.bounds.size.width-18,66)];
+    label.font=[UIFont monospacedDigitSystemFontOfSize:10 weight:UIFontWeightMedium];
+    label.numberOfLines=3;
+    label.textAlignment=NSTextAlignmentCenter;
+    label.adjustsFontSizeToFitWidth=YES;
+    label.minimumScaleFactor=0.7;
+    label.textColor=UIColor.whiteColor;
+    label.backgroundColor=[[UIColor blackColor] colorWithAlphaComponent:0.73];
+    label.layer.cornerRadius=8;
+    label.clipsToBounds=YES;
+    [root.view addSubview:label];
+    w.hidden=NO;
+    self.window=w; self.label=label;
+}
+- (void)refreshConnected:(BOOL)connected duration:(CFTimeInterval)duration {
+    if(!self.label) return;
+    NSString *mirror=gIFCaptureMirrorKnown?(gIFCaptureMirrored?@"YES":@"NO"):@"?";
+    self.label.text=[NSString stringWithFormat:
+       @"IF v%@ | %.1f / %.1f sec | connected=%d | mirrored=%@\n"
+        "video AV:%llu RTC:%llu decoded:%llu rebuild:%llu\n"
+        "audio AV:%llu RTC:%llu decoded file:%.1f sec",
+       kIFVersion,IFMediaElapsed(),duration,connected,mirror,
+       (unsigned long long)gIFVideoAVCallbacks,(unsigned long long)gIFVideoRTCCallbacks,
+       (unsigned long long)gIFDecodedFrames,(unsigned long long)gIFReaderRebuilds,
+       (unsigned long long)gIFAudioAVCallbacks,(unsigned long long)gIFAudioRTCCallbacks,
+       [[IFAudioEngine shared] decodedSeconds]];
+}
+- (void)hide {
+    self.window.hidden=YES;
+    self.window=nil;
+    self.label=nil;
+}
+@end
+
 static BOOL IFIsEndCallButton(UIView *view) {
     if(![view isKindOfClass:[UIControl class]] || view.hidden || view.alpha<.10)
         return NO;
@@ -766,6 +839,7 @@ static BOOL IFActiveCallControlsVisible(void) {
     self.nativeContinuation=nil;
     self.outgoingURL=nil; self.incomingURL=nil;
     [[IFLocalRemotePreview shared] hide];
+    [[IFDebugOverlay shared] hide];
     [[IFFrameEngine shared] stop];
     [[IFFrameEngine rtc] stop];
     [[IFAudioEngine shared] stop];
@@ -863,6 +937,7 @@ static BOOL IFActiveCallControlsVisible(void) {
     // End even when capture frames stop (camera minimized/swapped) and even
     // if the one-shot timer was delayed by an Instagram UI interaction.
     CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
+    [[IFDebugOverlay shared] refreshConnected:self.callConnected duration:duration];
     if(duration>0 && IFMediaElapsed()>=duration &&
        (self.callConnected || gIFRingingPreviewEpoch>0))
         [self fakeClipFinished];
@@ -889,6 +964,7 @@ static BOOL IFActiveCallControlsVisible(void) {
     }
     if(self.requestedMode!=IFModeNormal) {
         gIFRingingPreviewEpoch=CACurrentMediaTime();
+        [[IFDebugOverlay shared] show];
         [[IFFrameEngine shared] beginRingingPreview];
         [[IFFrameEngine rtc] beginRingingPreview];
         // Even if the other party never answers, do not ring forever after
@@ -1116,6 +1192,35 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
         }
     }
     if(!submitted) {
+        // Recent IG renders the red hang-up glyph in an image/layer rather
+        // than a red UIView background. Probe the bottom-right control
+        // geometry (the same native control visible in the call screenshot).
+        for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if(![scene isKindOfClass:UIWindowScene.class]) continue;
+            for(UIWindow *win in ((UIWindowScene *)scene).windows) {
+                if(win.hidden || !win.rootViewController ||
+                   win.windowLevel>UIWindowLevelNormal+1) continue;
+                CGSize size=win.bounds.size;
+                CGPoint p=CGPointMake(size.width*0.875,size.height*0.912);
+                UIView *target=[win hitTest:p withEvent:nil];
+                while(target && ![target isKindOfClass:UIControl.class])
+                    target=target.superview;
+                if([target isKindOfClass:UIControl.class]) {
+                    CGRect frame=[target convertRect:target.bounds toView:win];
+                    if(frame.size.width>=30 && frame.size.width<=120 &&
+                       CGRectGetMidX(frame)>size.width*0.75 &&
+                       CGRectGetMidY(frame)>size.height*0.75) {
+                        [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
+                        NSLog(@"[InstaFakeCam] fallback: tapped native bottom-right call control");
+                        submitted=YES;
+                        break;
+                    }
+                }
+            }
+            if(submitted) break;
+        }
+    }
+    if(!submitted && self.hangupAttempts>=4) {
         IFShowMessage(@"Clip ended — hang up manually",
           @"This Instagram build has a different call-ending API. Camera replacement remains armed to prevent exposure.");
     }
