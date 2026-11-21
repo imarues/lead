@@ -9,9 +9,9 @@
 #import <objc/message.h>
 
 // Snow is a visual-only overlay, independent of Telegram calls/media handling.
-extern void LeadSnowInstall(void);
-extern void LeadSnowChatDidAppear(UIViewController *chat);
-extern void LeadSnowChatWillDisappear(UIViewController *chat);
+extern "C" void LeadSnowInstall(void);
+extern "C" void LeadSnowChatDidAppear(UIViewController *chat);
+extern "C" void LeadSnowChatWillDisappear(UIViewController *chat);
 
 @interface ASDisplayNode : NSObject
 @property (atomic, strong, readonly) CALayer *layer;
