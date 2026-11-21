@@ -726,6 +726,10 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     [LeadSection title:nil rows:@[
       [LeadRow toggle:kShowPeerInfo title:@"UI_PEER_INFO_TITLE" subtitle:@"UI_PEER_INFO_SUBTITLE" symbol:@"number.circle"],
     ]],
+    [LeadSection title:nil rows:@[
+      [LeadRow toggle:kLeadSnowEnabled title:@"UI_SNOW_ENABLED_TITLE" subtitle:@"UI_SNOW_ENABLED_SUBTITLE" symbol:@"snowflake"],
+      [LeadRow toggle:kLeadSnowHideInChats title:@"UI_SNOW_HIDE_CHATS_TITLE" subtitle:@"UI_SNOW_HIDE_CHATS_SUBTITLE" symbol:@"bubble.left.and.bubble.right"],
+    ]],
     [LeadSection title:nil rows:@[ fakeDevice, deviceName ]],
   ];
 
