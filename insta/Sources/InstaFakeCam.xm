@@ -14,6 +14,10 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <math.h>
+#import <dlfcn.h>
+#import <AudioUnit/AudioUnit.h>
+
+extern "C" void MSHookFunction(void *symbol, void *replace, void **result);
 
 typedef NS_ENUM(NSInteger, IFMode) {
     IFModeNormal = 0,
@@ -23,11 +27,12 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.6.0";
+static NSString *const kIFVersion = @"0.7.0";
 
 // Device-only diagnostic counters: no media, names, or calls leave the device.
 static volatile uint64_t gIFVideoAVCallbacks=0, gIFVideoRTCCallbacks=0;
 static volatile uint64_t gIFAudioAVCallbacks=0, gIFAudioRTCCallbacks=0;
+static volatile uint64_t gIFAudioUnitCallbacks=0, gIFAudioUnitInjected=0, gIFAudioUnitUnsupported=0;
 static volatile uint64_t gIFDecodedFrames=0, gIFReaderRebuilds=0;
 static BOOL gIFCaptureMirrored=NO;
 static BOOL gIFCaptureMirrorKnown=NO;
@@ -95,6 +100,9 @@ static void IFShowMessage(NSString *title, NSString *message) {
 - (void)beginPlayback;
 - (void)stop;
 - (CFTimeInterval)decodedSeconds;
+- (BOOL)replaceAudioUnitBuffers:(AudioBufferList *)buffers
+                        format:(const AudioStreamBasicDescription *)format
+                        frames:(UInt32)frames;
 - (CMSampleBufferRef)copyAudioForInput:(CMSampleBufferRef)input;
 @end
 @implementation IFAudioEngine
@@ -179,6 +187,53 @@ static void IFShowMessage(NSString *title, NSString *message) {
     CFTimeInterval sec=(CFTimeInterval)self.samples.length / (sizeof(float)*48000.0);
     [self.lock unlock];
     return sec;
+}
+// WebRTC usually pulls the iPhone microphone through VoiceProcessingIO on
+// AudioUnit input bus 1, bypassing both legacy Instagram and AVCaptureAudio hooks.
+- (BOOL)replaceAudioUnitBuffers:(AudioBufferList *)buffers
+                        format:(const AudioStreamBasicDescription *)asbd
+                        frames:(UInt32)frames {
+    if(!buffers || !asbd || !frames || frames>8192 ||
+       buffers->mNumberBuffers==0 || buffers->mNumberBuffers>8 ||
+       asbd->mFormatID!=kAudioFormatLinearPCM ||
+       asbd->mSampleRate<8000 || asbd->mSampleRate>192000 ||
+       asbd->mChannelsPerFrame==0 || asbd->mChannelsPerFrame>2) return NO;
+    BOOL isFloat=(asbd->mFormatFlags & kAudioFormatFlagIsFloat)!=0;
+    BOOL planar=(asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved)!=0;
+    BOOL bigEndian=(asbd->mFormatFlags & kAudioFormatFlagIsBigEndian)!=0;
+    unsigned bits=asbd->mBitsPerChannel;
+    if(bigEndian || !((bits==32 && isFloat) || (bits==16 && !isFloat))) return NO;
+    unsigned bytesPerSample=bits/8;
+    unsigned channels=asbd->mChannelsPerFrame;
+    if(planar && buffers->mNumberBuffers<channels) return NO;
+    [self.lock lock];
+    const float *samples=(const float *)self.samples.bytes;
+    NSUInteger available=self.samples.length/sizeof(float);
+    CFTimeInterval epoch=IFMediaElapsed();
+    for(UInt32 b=0;b<buffers->mNumberBuffers;b++) {
+        AudioBuffer *buffer=&buffers->mBuffers[b];
+        if(!buffer->mData) { [self.lock unlock]; return NO; }
+        unsigned count=planar?1:channels;
+        size_t needed=(size_t)frames*count*bytesPerSample;
+        if(needed>buffer->mDataByteSize) { [self.lock unlock]; return NO; }
+        for(UInt32 i=0;i<frames;i++) {
+            NSUInteger sampleIndex=(NSUInteger)((epoch+(double)i/asbd->mSampleRate)*48000.0);
+            float value=(self.playing && samples && sampleIndex<available)?samples[sampleIndex]:0.0f;
+            if(!isfinite(value)) value=0;
+            value=fmaxf(-1.0f,fminf(1.0f,value));
+            for(unsigned ch=0;ch<count;ch++) {
+                uint8_t *dest=(uint8_t *)buffer->mData+
+                    ((size_t)i*count+ch)*bytesPerSample;
+                if(isFloat) memcpy(dest,&value,sizeof(float));
+                else {
+                    int16_t v=(int16_t)lrintf(value*32767.0f);
+                    memcpy(dest,&v,sizeof(int16_t));
+                }
+            }
+        }
+    }
+    [self.lock unlock];
+    return YES;
 }
 - (CMSampleBufferRef)copyAudioForInput:(CMSampleBufferRef)input {
     if(!input) return NULL;
@@ -523,7 +578,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
         CGAffineTransformConcat(CGAffineTransformMakeScale(scale,scale),normalized));
     // The front camera connection often horizontally mirrors its local preview.
     // Invert the source once so preview text and faces remain readable.
-    if(gIFCaptureMirrorKnown && gIFCaptureMirrored) {
+    if(gIFCaptureMirrorKnown && !gIFCaptureMirrored) {
         CGAffineTransform flip=CGAffineTransformMake(-1,0,0,1,(CGFloat)w,0);
         xform=CGAffineTransformConcat(flip,xform);
     }
@@ -666,6 +721,41 @@ static void IFShowMessage(NSString *title, NSString *message) {
 }
 @end
 
+// VoiceProcessingIO mic input path for WebRTC builds that do not send audio
+// via AVCaptureAudioDataOutput or IGVideoCallCaptureCoordinator. Restrict to
+// AudioUnitRender input bus 1 while a virtual call is armed.
+typedef OSStatus (*IFAudioUnitRenderFunc)(AudioUnit, AudioUnitRenderActionFlags *,
+                const AudioTimeStamp *, UInt32, UInt32, AudioBufferList *);
+static IFAudioUnitRenderFunc gIFOriginalAudioUnitRender=NULL;
+static OSStatus IFAudioUnitRenderHook(AudioUnit unit, AudioUnitRenderActionFlags *flags,
+         const AudioTimeStamp *timestamp, UInt32 bus, UInt32 frames, AudioBufferList *buffers) {
+    if(!gIFOriginalAudioUnitRender) return kAudio_ParamError;
+    OSStatus status=gIFOriginalAudioUnitRender(unit,flags,timestamp,bus,frames,buffers);
+    if(status!=noErr || bus!=1 || !buffers || ![[IFFrameEngine shared] isArmed])
+        return status;
+    __sync_add_and_fetch(&gIFAudioUnitCallbacks,1);
+    AudioStreamBasicDescription asbd={0};
+    UInt32 size=sizeof(asbd);
+    OSStatus fmtStatus=AudioUnitGetProperty(unit,kAudioUnitProperty_StreamFormat,
+                                             kAudioUnitScope_Output,1,&asbd,&size);
+    BOOL substituted=fmtStatus==noErr &&
+        [[IFAudioEngine shared] replaceAudioUnitBuffers:buffers format:&asbd frames:frames];
+    if(substituted) __sync_add_and_fetch(&gIFAudioUnitInjected,1);
+    else {
+        __sync_add_and_fetch(&gIFAudioUnitUnsupported,1);
+        // Fail closed: never forward raw microphone data while fake clip is armed.
+        if(buffers->mNumberBuffers<=8) {
+            for(UInt32 i=0;i<buffers->mNumberBuffers;i++) {
+                AudioBuffer *b=&buffers->mBuffers[i];
+                if(b->mData && b->mDataByteSize<1024*1024) memset(b->mData,0,b->mDataByteSize);
+            }
+        }
+    }
+    return status;
+}
+
+static BOOL IFOutgoingCallStillRinging(void);
+
 // Local-only diagnostic overlay, always pass-through, to identify whether
 // this Instagram version delivers moving capture / RTC / audio callbacks.
 // No logs or images are uploaded anywhere.
@@ -698,9 +788,9 @@ static void IFShowMessage(NSString *title, NSString *message) {
     root.view.userInteractionEnabled=NO;
     w.rootViewController=root;
     CGFloat top=MAX(77,main.safeAreaInsets.top+26);
-    UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(9,top,main.bounds.size.width-18,66)];
+    UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(9,top,main.bounds.size.width-18,81)];
     label.font=[UIFont monospacedDigitSystemFontOfSize:10 weight:UIFontWeightMedium];
-    label.numberOfLines=3;
+    label.numberOfLines=4;
     label.textAlignment=NSTextAlignmentCenter;
     label.adjustsFontSizeToFitWidth=YES;
     label.minimumScaleFactor=0.7;
@@ -718,12 +808,15 @@ static void IFShowMessage(NSString *title, NSString *message) {
     self.label.text=[NSString stringWithFormat:
        @"IF v%@ | %.1f / %.1f sec | connected=%d | mirrored=%@\n"
        @"video AV:%llu RTC:%llu decoded:%llu rebuild:%llu\n"
-       @"audio AV:%llu RTC:%llu decoded file:%.1f sec",
+       @"audio AV:%llu RTC:%llu AU:%llu inj:%llu bad:%llu\n"
+       @"file audio:%.1f sec | UI ringing=%d",
        kIFVersion,IFMediaElapsed(),duration,connected,mirror,
        (unsigned long long)gIFVideoAVCallbacks,(unsigned long long)gIFVideoRTCCallbacks,
        (unsigned long long)gIFDecodedFrames,(unsigned long long)gIFReaderRebuilds,
        (unsigned long long)gIFAudioAVCallbacks,(unsigned long long)gIFAudioRTCCallbacks,
-       [[IFAudioEngine shared] decodedSeconds]];
+       (unsigned long long)gIFAudioUnitCallbacks,(unsigned long long)gIFAudioUnitInjected,
+       (unsigned long long)gIFAudioUnitUnsupported,
+       [[IFAudioEngine shared] decodedSeconds],IFOutgoingCallStillRinging()];
 }
 - (void)hide {
     self.window.hidden=YES;
@@ -782,9 +875,16 @@ static UIControl *IFFindHangup(UIView *view) {
 static BOOL IFViewHasRingingText(UIView *root, NSInteger depth, NSUInteger *visited) {
     if(!root || root.hidden || root.alpha<.02 || depth>22 || (*visited)++>2200)
         return NO;
-    NSString *value=nil;
-    if([root isKindOfClass:UILabel.class]) value=((UILabel *)root).text;
-    if(value.length) {
+    NSMutableArray<NSString *> *texts=[NSMutableArray array];
+    if(root.accessibilityLabel.length) [texts addObject:root.accessibilityLabel];
+    if(root.accessibilityValue.length) [texts addObject:root.accessibilityValue];
+    if([root isKindOfClass:UILabel.class] && ((UILabel *)root).text.length)
+        [texts addObject:((UILabel *)root).text];
+    if([root isKindOfClass:UITextView.class] && ((UITextView *)root).text.length)
+        [texts addObject:((UITextView *)root).text];
+    if([root isKindOfClass:UIButton.class] && ((UIButton *)root).currentTitle.length)
+        [texts addObject:((UIButton *)root).currentTitle];
+    for(NSString *value in texts) {
         NSString *label=value.lowercaseString;
         for(NSString *needle in @[@"calling...",@"calling…",@"ringing...",
                     @"ringing…",@"connecting...",@"connecting…",
@@ -797,10 +897,35 @@ static BOOL IFViewHasRingingText(UIView *root, NSInteger depth, NSUInteger *visi
     return NO;
 }
 static BOOL IFOutgoingCallStillRinging(void) {
-    UIWindow *window=IFMainWindow();
     NSUInteger visited=0;
-    return window.rootViewController ?
-           IFViewHasRingingText(window.rootViewController.view,0,&visited) : NO;
+    for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if(![scene isKindOfClass:UIWindowScene.class]) continue;
+        for(UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if(window.hidden || window.windowLevel>UIWindowLevelNormal+1 ||
+               !window.rootViewController) continue;
+            if(IFViewHasRingingText(window.rootViewController.view,0,&visited)) return YES;
+        }
+    }
+    return NO;
+}
+
+// CallKit's public CXCallObserver sometimes reports Instagram VoIP call
+// acceptance even when older Instagram callback selectors are absent.
+static id gIFCallObserver=nil;
+static BOOL IFCallKitConnected(void) {
+    if(!gIFCallObserver) return NO;
+    NSArray *calls=[gIFCallObserver respondsToSelector:@selector(calls)] ?
+        [gIFCallObserver valueForKey:@"calls"] : nil;
+    for(id call in calls) {
+        if([call respondsToSelector:@selector(hasConnected)] &&
+           [call respondsToSelector:@selector(hasEnded)] &&
+           [call respondsToSelector:@selector(isOutgoing)] &&
+           ((BOOL(*)(id,SEL))objc_msgSend)(call,@selector(isOutgoing)) &&
+           ((BOOL(*)(id,SEL))objc_msgSend)(call,@selector(hasConnected)) &&
+           !((BOOL(*)(id,SEL))objc_msgSend)(call,@selector(hasEnded)))
+            return YES;
+    }
+    return NO;
 }
 
 // Require a visible native hang-up control before trusting the fallback.
@@ -831,18 +956,26 @@ static BOOL IFActiveCallControlsVisible(void) {
     gIFRingingPreviewEpoch=0;
     gIFVideoAVCallbacks=0; gIFVideoRTCCallbacks=0;
     gIFAudioAVCallbacks=0; gIFAudioRTCCallbacks=0;
+    gIFAudioUnitCallbacks=0; gIFAudioUnitInjected=0; gIFAudioUnitUnsupported=0;
     gIFDecodedFrames=0; gIFReaderRebuilds=0;
     gIFCaptureMirrored=NO; gIFCaptureMirrorKnown=NO;
     self.callSession=nil; self.callManager=nil;
     self.requestedMode=IFModeNormal;
     self.pickerStep=0;
     self.nativeContinuation=nil;
+    NSURL *outgoingToDelete=self.outgoingURL, *incomingToDelete=self.incomingURL;
     self.outgoingURL=nil; self.incomingURL=nil;
     [[IFLocalRemotePreview shared] hide];
     [[IFDebugOverlay shared] hide];
     [[IFFrameEngine shared] stop];
     [[IFFrameEngine rtc] stop];
     [[IFAudioEngine shared] stop];
+    NSString *base=[NSTemporaryDirectory() stringByAppendingPathComponent:@"InstaFakeCam/"];
+    for(NSURL *url in @[outgoingToDelete?:[NSNull null],incomingToDelete?:[NSNull null]]) {
+        if(![url isKindOfClass:NSURL.class]) continue;
+        if([url.path hasPrefix:base])
+            [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
+    }
 }
 - (void)callDidEnd {
     if(!NSThread.isMainThread) {
@@ -915,16 +1048,20 @@ static BOOL IFActiveCallControlsVisible(void) {
     BOOL answered=NO;
     if(session && [session respondsToSelector:@selector(isAnswered)])
         answered=((BOOL(*)(id,SEL))objc_msgSend)(session,@selector(isAnswered));
-    if(answered || self.participantJoined) {
+    if(answered || self.participantJoined || IFCallKitConnected()) {
+        NSLog(@"[InstaFakeCam] received affirmative call-answer indicator");
         [self markConnected];
         return;
     }
     // New Instagram variants can omit legacy IGVideoCallSession/isAnswered
     // and participantDidJoin. Require observed ringing, a stable transition,
     // and a LIVE hangup button, rather than relying on elapsed dial time.
-    if(self.sawRinging && IFActiveCallControlsVisible()) {
-        if(++self.clearedRingingPolls>=3) {
-            NSLog(@"[InstaFakeCam v%@] answer recognized via ringing->call UI",kIFVersion);
+    if(self.sawRinging && gIFVideoRTCCallbacks>10) {
+        // We observed an actual ringing view that later disappeared while
+        // active RTC video callbacks continued. Do not insist the hangup
+        // control be a UIControl (modern IG often uses custom layer controls).
+        if(++self.clearedRingingPolls>=4) {
+            NSLog(@"[InstaFakeCam v%@] answer recognized via ringing->RTC transition",kIFVersion);
             [self markConnected];
         }
     } else {
@@ -957,6 +1094,11 @@ static BOOL IFActiveCallControlsVisible(void) {
     void (^continuation)(void)=[self.nativeContinuation copy];
     self.nativeContinuation=nil;
     gIFCallMenuVisible=NO;
+    if(self.requestedMode!=IFModeNormal && !gIFCallObserver) {
+        dlopen("/System/Library/Frameworks/CallKit.framework/CallKit",RTLD_NOW|RTLD_GLOBAL);
+        Class cls=NSClassFromString(@"CXCallObserver");
+        if(cls) gIFCallObserver=[[cls alloc] init];
+    }
     if(continuation) {
         gIFResumingNativeCall=YES;
         continuation();
@@ -1067,7 +1209,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
                                    completionHandler:^(NSURL *temporary, NSError *error) {
             NSURL *saved=nil;
             if(temporary && !error) {
-                NSString *dir=[NSHomeDirectory() stringByAppendingPathComponent:@"Documents/InstaFakeCam"];
+                NSString *dir=[NSTemporaryDirectory() stringByAppendingPathComponent:@"InstaFakeCam"];
                 [[NSFileManager defaultManager] createDirectoryAtPath:dir
                     withIntermediateDirectories:YES attributes:nil error:NULL];
                 NSString *ext=temporary.pathExtension.length?temporary.pathExtension:@"mov";
@@ -1094,7 +1236,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.6.0"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.7.0"
                       message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
@@ -1153,12 +1295,18 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
         if(vc.presentedViewController) [controllers addObject:vc.presentedViewController];
         [controllers addObjectsFromArray:vc.childViewControllers];
         NSString *className=NSStringFromClass(vc.class);
-        if([className containsString:@"IGVideoCallViewController"] &&
+        if([className containsString:@"IGVideoCall"] &&
            [vc respondsToSelector:@selector(_leaveCallWithReason:)]) {
             ((void(*)(id,SEL,long long))objc_msgSend)(vc,@selector(_leaveCallWithReason:),0);
             NSLog(@"[InstaFakeCam] requested hangup via %@ _leaveCallWithReason:",className);
-            submitted=YES;
-            break;
+            submitted=YES; break;
+        }
+        if([className containsString:@"IGVideoCall"] &&
+           [vc respondsToSelector:@selector(videoCallControlsViewDidTapHangUpButton:)]) {
+            ((void(*)(id,SEL,id))objc_msgSend)(vc,
+                @selector(videoCallControlsViewDidTapHangUpButton:),nil);
+            NSLog(@"[InstaFakeCam] requested hangup via %@ controls callback",className);
+            submitted=YES; break;
         }
     }
     id manager=self.callManager;
@@ -1404,6 +1552,14 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.6.0",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.7.0",kIFVersion);
+        void *symbol=dlsym(RTLD_DEFAULT,"AudioUnitRender");
+        if(symbol) {
+            MSHookFunction(symbol,(void *)&IFAudioUnitRenderHook,(void **)&gIFOriginalAudioUnitRender);
+            NSLog(@"[InstaFakeCam] installed VoiceProcessingIO AudioUnitRender hook=%d",
+                  gIFOriginalAudioUnitRender!=NULL);
+        } else {
+            NSLog(@"[InstaFakeCam] AudioUnitRender unavailable");
+        }
     }
 }
