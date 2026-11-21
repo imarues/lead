@@ -23,13 +23,16 @@ typedef NS_ENUM(NSInteger, IFMode) {
 
 static BOOL gIFResumingNativeCall = NO;
 static BOOL gIFCallMenuVisible = NO;
-static NSString *const kIFVersion = @"0.5.0";
+static NSString *const kIFVersion = @"0.5.1";
 
 // Shared monotonic clock: RTC capture buffers can use disjoint/rebased PTS.
 // Starting this ONLY when the remote call is answered keeps video and audio in sync.
 static CFTimeInterval gIFPlaybackEpoch = 0;
+static CFTimeInterval gIFRingingPreviewEpoch = 0;
 static CFTimeInterval IFMediaElapsed(void) {
-    CFTimeInterval epoch=gIFPlaybackEpoch;
+    // During ringing the outgoing local camera shows moving footage. Once
+    // answered, reset to t=0 so the remote receives the COMPLETE clip.
+    CFTimeInterval epoch=gIFPlaybackEpoch>0 ? gIFPlaybackEpoch : gIFRingingPreviewEpoch;
     return epoch>0 ? MAX(0.0,CACurrentMediaTime()-epoch) : 0.0;
 }
 
@@ -357,6 +360,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
 @property (nonatomic, assign) BOOL started;
 @property (nonatomic, assign) BOOL playing;
 - (void)arm:(NSURL *)url;
+- (void)beginRingingPreview;
 - (void)beginPlayback;
 - (BOOL)isArmed;
 - (CFTimeInterval)clipDuration;
@@ -427,14 +431,26 @@ static void IFShowMessage(NSString *title, NSString *message) {
 - (CFTimeInterval)clipDuration {
     [self.lock lock]; CFTimeInterval result=self.duration; [self.lock unlock]; return result;
 }
-- (void)beginPlayback {
+- (void)beginRingingPreview {
     [self.lock lock];
-    if(self.url && !self.playing) {
-        // First frame starts ONLY after the remote participant joins.
+    if(self.url) {
         self.playing=YES;
         self.finished=NO;
         self.origin=kCMTimeInvalid;
-        NSLog(@"[InstaFakeCam] remote answered; starting video clock from frame zero");
+        // prepareForWidth: will initialize reader on the capture queue.
+    }
+    [self.lock unlock];
+}
+- (void)beginPlayback {
+    [self.lock lock];
+    if(self.url) {
+        // Native RTC starts after ringing: seek/reopen so it receives frame 0
+        // rather than whatever was playing in the caller's local preview.
+        [self clearReaderLocked];
+        self.playing=YES;
+        self.finished=NO;
+        self.origin=kCMTimeInvalid;
+        NSLog(@"[InstaFakeCam] remote answered; replaying from first video frame");
     }
     [self.lock unlock];
 }
@@ -457,7 +473,7 @@ static void IFShowMessage(NSString *title, NSString *message) {
     // negative translation. Normalize the transformed pixel bounds first,
     // then scale and center in OUTPUT coordinates, not source coordinates.
     CGRect oriented=CGRectStandardize(CGRectApplyAffineTransform(
-        (CGRect){CGPointZero,track.naturalSize},track.preferredTransform));
+        CGRectMake(0,0,track.naturalSize.width,track.naturalSize.height),track.preferredTransform));
     CGSize natural=oriented.size;
     if(!isfinite(natural.width)||!isfinite(natural.height)||
        natural.width<=0||natural.height<=0) {
@@ -695,6 +711,7 @@ static BOOL IFActiveCallControlsVisible(void) {
     self.clearedRingingPolls=0;
     self.hangupRequested=NO;
     gIFPlaybackEpoch=0;
+    gIFRingingPreviewEpoch=0;
     self.callSession=nil; self.callManager=nil;
     self.requestedMode=IFModeNormal;
     self.pickerStep=0;
@@ -738,6 +755,7 @@ static BOOL IFActiveCallControlsVisible(void) {
 - (void)markConnected {
     if(self.callConnected || self.requestedMode==IFModeNormal || self.hangupRequested) return;
     self.callConnected=YES;
+    gIFRingingPreviewEpoch=0;
     gIFPlaybackEpoch=CACurrentMediaTime();
     NSLog(@"[InstaFakeCam v%@] remote connected; host media clock starts now",kIFVersion);
     [[IFFrameEngine shared] beginPlayback];
@@ -797,8 +815,9 @@ static BOOL IFActiveCallControlsVisible(void) {
     // End even when capture frames stop (camera minimized/swapped) and even
     // if the one-shot timer was delayed by an Instagram UI interaction.
     CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
-    if(self.callConnected && !self.hangupRequested && duration>0 &&
-       IFMediaElapsed()>=duration) [self fakeClipFinished];
+    if(!self.hangupRequested && duration>0 && IFMediaElapsed()>=duration &&
+       (self.callConnected || gIFRingingPreviewEpoch>0))
+        [self fakeClipFinished];
     id manager=self.callManager;
     if(manager && [manager respondsToSelector:@selector(hasActiveCall)]) {
         BOOL active=((BOOL(*)(id,SEL))objc_msgSend)(manager,@selector(hasActiveCall));
@@ -817,10 +836,25 @@ static BOOL IFActiveCallControlsVisible(void) {
         gIFResumingNativeCall=NO;
     }
     if(self.requestedMode!=IFModeNormal) {
+        gIFRingingPreviewEpoch=CACurrentMediaTime();
+        [[IFFrameEngine shared] beginRingingPreview];
+        [[IFFrameEngine rtc] beginRingingPreview];
+        // Even if the other party never answers, do not ring forever after
+        // the selected video has reached its real duration.
+        CFTimeInterval duration=[[IFFrameEngine shared] clipDuration];
+        if(duration>0) {
+            [self.endTimer invalidate];
+            self.endTimer=[NSTimer timerWithTimeInterval:duration
+                              target:self selector:@selector(fakeClipFinished)
+                              userInfo:nil repeats:NO];
+            [[NSRunLoop mainRunLoop] addTimer:self.endTimer forMode:NSRunLoopCommonModes];
+        }
         [self.stateTimer invalidate];
-        self.stateTimer=[NSTimer scheduledTimerWithTimeInterval:0.25
+        self.stateTimer=[NSTimer timerWithTimeInterval:0.25
                    target:self selector:@selector(pollConnection:)
                    userInfo:nil repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.stateTimer forMode:NSRunLoopCommonModes];
+        NSLog(@"[InstaFakeCam v%@] local preview playing during ringing",kIFVersion);
     }
 }
 - (void)beginPicking {
@@ -932,7 +966,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     gIFCallMenuVisible=YES;
     [self reset];
     self.nativeContinuation=nativeContinuation;
-    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.0"
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"InstaFakeCam v0.5.1"
                       message:@"Real video-frame conversion · Photos gallery"
                       preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf=self;
@@ -962,7 +996,8 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [host presentViewController:menu animated:YES completion:nil];
 }
 - (void)fakeClipFinished {
-    if(self.requestedMode==IFModeNormal || !self.callConnected || self.hangupRequested) return;
+    if(self.requestedMode==IFModeNormal || self.hangupRequested ||
+       (!self.callConnected && gIFRingingPreviewEpoch<=0)) return;
     self.hangupRequested=YES;
     [self.endTimer invalidate]; self.endTimer=nil;
     NSLog(@"[InstaFakeCam] selected clip reached its duration; requesting hangup");
@@ -1197,6 +1232,6 @@ static const void *kIFCaptureProxyKey=&kIFCaptureProxyKey;
 
 %ctor {
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.burbn.instagram"]) {
-        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.0",kIFVersion);
+        NSLog(@"[InstaFakeCam v%@] injected into Instagram; menu must show v0.5.1",kIFVersion);
     }
 }
