@@ -1,0 +1,82 @@
+name: Build Instagram FakeCam
+
+on:
+  push:
+    branches:
+      - insta
+    paths:
+      - "insta/**"
+      - ".github/workflows/insta-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: insta-fakecam-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Theos
+        uses: waruhachi/theos-action@v2.4.6
+        with:
+          theos-src: waruhachi/theos
+          theos-branch: main
+          sdks-src: waruhachi/sdks
+          sdks-branch: main
+
+      - name: Install dpkg
+        run: brew install dpkg
+
+      - name: Build Instagram tweak
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C insta clean package FINALPACKAGE=1
+          mkdir -p insta/packages
+          ARM64=$(find insta/.theos/obj -type f -path '*/arm64/InstaFakeCam.dylib' | head -n1)
+          ARM64E=$(find insta/.theos/obj -type f -path '*/arm64e/InstaFakeCam.dylib' | head -n1)
+          if [ -n "$ARM64" ] && [ -n "$ARM64E" ]; then
+            lipo -create "$ARM64" "$ARM64E" -output insta/packages/InstaFakeCam.dylib
+          elif [ -n "$ARM64" ]; then
+            cp "$ARM64" insta/packages/InstaFakeCam.dylib
+          else
+            echo "::error::No built dylib found" && exit 1
+          fi
+          file insta/packages/InstaFakeCam.dylib
+          test -s insta/packages/InstaFakeCam.dylib
+
+      - name: Upload InstaFakeCam artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InstaFakeCam-build
+          path: |
+            insta/packages/InstaFakeCam.dylib
+            insta/packages/*.deb
+
+      - name: Publish direct Dylib
+        if: github.ref == 'refs/heads/insta'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -s insta/packages/InstaFakeCam.dylib
+          if ! gh api "repos/${GITHUB_REPOSITORY}/branches/compiled-insta" >/dev/null 2>&1; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref='refs/heads/compiled-insta' -f sha="${GITHUB_SHA}" >/dev/null
+          fi
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/InstaFakeCam.dylib?ref=compiled-insta" --jq .sha 2>/dev/null || true)"
+          base64 < insta/packages/InstaFakeCam.dylib | tr -d '\n' > "${RUNNER_TEMP}/insta.b64"
+          jq -n --rawfile encoded "${RUNNER_TEMP}/insta.b64" \
+            --arg message "Build InstaFakeCam.dylib from ${GITHUB_SHA}" \
+            --arg branch compiled-insta --arg sha "${current_sha}" \
+            '{message:$message,branch:$branch,content:$encoded} +
+              (if $sha == "" then {} else {sha:$sha} end)' > "${RUNNER_TEMP}/insta-payload.json"
+          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/InstaFakeCam.dylib" \
+            --input "${RUNNER_TEMP}/insta-payload.json" >/dev/null
+          echo "Direct dylib: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/compiled-insta/InstaFakeCam.dylib"
