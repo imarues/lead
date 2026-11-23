@@ -46,7 +46,7 @@ static NSMutableDictionary<NSString *, NSString *> *sCdnAliases;
 static dispatch_queue_t sQueue;
 static AVAudioPlayer *sAudio;
 static BOOL sAudioOwnsSession;
-static UIBackgroundTaskIdentifier sBackgroundTask = UIBackgroundTaskInvalid;
+static UIBackgroundTaskIdentifier sBackgroundTask = (UIBackgroundTaskIdentifier)NSUIntegerMax;
 static BOOL sInBackground;
 static BOOL sInstalled;
 
@@ -345,14 +345,14 @@ static BOOL sInstalled;
                    usingBlock:^(__unused NSNotification *note) {
         [self backgroundStateRefresh];
     }];
-    // Stop when an unfinished transfer has gone quiet (a hook cannot observe cancellation).
-    __block void (^poll)(void);
-    poll = ^{
-        [self backgroundStateRefresh];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                       dispatch_get_main_queue(), poll);
-    };
+    // Poll via class method instead of a self-retaining recursive block.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), poll);
+                   dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
+}
+
++ (void)pollForDownloads {
+    [self backgroundStateRefresh];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
 }
 @end
