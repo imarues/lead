@@ -71,6 +71,23 @@ def main():
         }
         with open(widget_plist, "wb") as f:
             plistlib.dump(wi, f)
+        # Some redistributed IPAs ship the host executable with 0644 mode.
+        # Restore execute permissions for every bundled app/extension executable;
+        # also ensure the inserted dylib and WidgetKit binary are executable.
+        for bundle in [app] + list(app.rglob("*.appex")):
+            bp = bundle / "Info.plist"
+            if not bp.is_file():
+                continue
+            with open(bp, "rb") as handle:
+                bi = plistlib.load(handle)
+            executable = bi.get("CFBundleExecutable")
+            if executable:
+                binary = bundle / executable
+                if binary.is_file():
+                    binary.chmod(binary.stat().st_mode | 0o111)
+        for dylib in app.rglob("*.dylib"):
+            if dylib.is_file():
+                dylib.chmod(dylib.stat().st_mode | 0o111)
         # Codesigning must run again: strip invalid stale signatures.
         for directory in (app, dest):
             shutil.rmtree(directory / "_CodeSignature", ignore_errors=True)
