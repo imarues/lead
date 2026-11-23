@@ -8,6 +8,7 @@ static const int32_t kLeadGetFile = -1101843010;
 static const int32_t kLeadGetCdnFile = 962554330;
 static const uint32_t kLeadUploadFile = 0x096a18d5;
 static const uint32_t kLeadUploadCdnFile = 0xa99fca4f;
+static const uint32_t kLeadCdnRedirect = 0xf18cda44;
 static const uint32_t kLeadDocumentLocation = 0xbad07584;
 static NSString *const kLeadProgressKey = @"LeadShowDownloadProgress";
 static NSString *const kLeadAudioKey = @"LeadDownloadBackgroundAudio";
@@ -41,6 +42,7 @@ static NSUInteger LeadFileChunkBytes(NSData *data) {
 
 static NSMutableDictionary<NSString *, NSMutableDictionary *> *sTasks;
 static NSMutableDictionary<NSString *, NSDictionary *> *sMetadata;
+static NSMutableDictionary<NSString *, NSString *> *sCdnAliases;
 static dispatch_queue_t sQueue;
 static AVAudioPlayer *sAudio;
 static BOOL sAudioOwnsSession;
@@ -55,6 +57,7 @@ static BOOL sInstalled;
     sQueue = dispatch_queue_create("lead.download.progress", DISPATCH_QUEUE_SERIAL);
     sTasks = [NSMutableDictionary new];
     sMetadata = [NSMutableDictionary new];
+    sCdnAliases = [NSMutableDictionary new];
 }
 
 + (NSString *)tokenForPayload:(NSData *)payload functionID:(int32_t)functionID {
@@ -64,9 +67,23 @@ static BOOL sInstalled;
     NSUInteger locationLen = payload.length - locationStart - 12;
     if (locationLen < 4 || locationLen > 2048) return nil;
     if (functionID == kLeadGetFile && LeadU32(b + locationStart) == kLeadDocumentLocation &&
-        locationLen >= 12) {
-        int64_t document = (int64_t)LeadU64(b + locationStart + 4);
-        return [NSString stringWithFormat:@"doc:%lld", (long long)document];
+        locationLen >= 24) {
+        // A document's thumbnail has the SAME ID, but must not be counted
+        // against the full document's filesize. Skip thumb_size != "".
+        NSUInteger fileRef = locationStart + 20;
+        if (fileRef < locationStart + locationLen) {
+            uint8_t first = b[fileRef];
+            NSUInteger head = first == 254 ? 4 : 1;
+            NSUInteger len = first == 254 && fileRef + 4 <= locationStart+locationLen
+                ? ((NSUInteger)b[fileRef+1] | ((NSUInteger)b[fileRef+2] << 8) | ((NSUInteger)b[fileRef+3] << 16))
+                : (first < 254 ? first : 0);
+            NSUInteger padded = (head + len + 3) & ~(NSUInteger)3;
+            NSUInteger thumb = fileRef + padded;
+            if (first != 255 && thumb < locationStart + locationLen && b[thumb] == 0) {
+                int64_t document = (int64_t)LeadU64(b + locationStart + 4);
+                return [NSString stringWithFormat:@"doc:%lld", (long long)document];
+            }
+        }
     }
     // FNV-1a over the *location*, excluding the changing offset and limit.
     // Supports photo/video locations and CDN tokens without guessing filenames.
@@ -82,6 +99,31 @@ static BOOL sInstalled;
     if (!token || !response || payload.length < 16 ||
         ![[NSUserDefaults standardUserDefaults] boolForKey:kLeadProgressKey]) return;
     NSUInteger chunk = LeadFileChunkBytes(response);
+    // A CDN redirect maps the original document location to a CDN token.
+    // Both tokens use identical TL byte encodings, so they can share progress.
+    if (functionID == kLeadGetFile && response.length >= 12 &&
+        LeadU32(response.bytes) == kLeadCdnRedirect) {
+        const uint8_t *r = response.bytes;
+        NSUInteger start = 8;
+        uint8_t first = r[start];
+        NSUInteger head = first == 254 ? 4 : 1;
+        NSUInteger size = first == 254 && response.length >= 12
+            ? ((NSUInteger)r[9] | ((NSUInteger)r[10] << 8) | ((NSUInteger)r[11] << 16))
+            : (first < 254 ? first : 0);
+        NSUInteger padded = (head + size + 3) & ~(NSUInteger)3;
+        if (first != 255 && padded && start+padded <= response.length) {
+            uint64_t hash = 14695981039346656037ULL;
+            for (NSUInteger i=start; i<start+padded; i++)
+                hash = (hash ^ r[i]) * 1099511628211ULL;
+            NSString *cdn = [NSString stringWithFormat:@"loc:%016llx", (unsigned long long)hash];
+            dispatch_async(sQueue, ^{
+                sCdnAliases[cdn] = token;
+                if (sCdnAliases.count > 2000)
+                    [sCdnAliases removeObjectForKey:sCdnAliases.allKeys.firstObject];
+            });
+        }
+        return;
+    }
     if (!chunk) return;
     const uint8_t *p = payload.bytes;
     uint64_t offset = LeadU64(p + payload.length - 12);
@@ -93,11 +135,12 @@ static BOOL sInstalled;
             NSDictionary *item = sTasks[key];
             if (now - [item[@"last"] doubleValue] > 45) [sTasks removeObjectForKey:key];
         }
-        NSMutableDictionary *entry = sTasks[token];
+        NSString *resolvedToken = sCdnAliases[token] ?: token;
+        NSMutableDictionary *entry = sTasks[resolvedToken];
         if (!entry) {
-            entry = [@{@"token": token, @"received": @0, @"last": @(now),
+            entry = [@{@"token": resolvedToken, @"received": @0, @"last": @(now),
                        @"parts": [NSMutableDictionary new], @"completed": @NO} mutableCopy];
-            sTasks[token] = entry;
+            sTasks[resolvedToken] = entry;
         }
         NSMutableDictionary<NSNumber *, NSNumber *> *parts = entry[@"parts"];
         NSNumber *offKey = @(offset);
@@ -107,7 +150,7 @@ static BOOL sInstalled;
             parts[offKey] = @(chunk);
         }
         entry[@"last"] = @(now);
-        NSDictionary *meta = sMetadata[token];
+        NSDictionary *meta = sMetadata[resolvedToken];
         if (meta) {
             entry[@"name"] = meta[@"name"];
             entry[@"total"] = meta[@"size"];
