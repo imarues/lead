@@ -11,6 +11,7 @@ all embedded extensions after this step.
 """
 import argparse
 import os
+import subprocess
 import plistlib
 import shutil
 import tempfile
@@ -33,8 +34,9 @@ def main():
         parser.error("Output must not overwrite input")
     with tempfile.TemporaryDirectory(prefix="lead-downloads-") as td:
         root = Path(td)
-        with zipfile.ZipFile(args.ipa) as z:
-            z.extractall(root)
+        # unzip preserves UNIX executable bits and symbolic links in iOS frameworks.
+        # zipfile.extractall() does NOT reliably preserve them and can break the app.
+        subprocess.run(["unzip", "-q", str(args.ipa.resolve()), "-d", str(root)], check=True)
         apps = list((root / "Payload").glob("*.app"))
         if len(apps) != 1:
             raise SystemExit("Expected exactly one app in Payload")
@@ -62,6 +64,11 @@ def main():
         with open(widget_plist, "rb") as f:
             wi = plistlib.load(f)
         wi["CFBundleIdentifier"] = parent_bundle + ".LeadDownloadIsland"
+        # XcodeGen's extension Info.plist sometimes loses NSExtension.
+        # A WidgetKit .appex without this cannot register with iOS.
+        wi["NSExtension"] = {
+            "NSExtensionPointIdentifier": "com.apple.widgetkit-extension"
+        }
         with open(widget_plist, "wb") as f:
             plistlib.dump(wi, f)
         # Codesigning must run again: strip invalid stale signatures.
@@ -69,11 +76,9 @@ def main():
             shutil.rmtree(directory / "_CodeSignature", ignore_errors=True)
             (directory / "embedded.mobileprovision").unlink(missing_ok=True)
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(args.output, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for current, dirs, files in os.walk(root):
-                for filename in files:
-                    p = Path(current) / filename
-                    z.write(p, p.relative_to(root))
+        # zip -y stores symbolic links as links, and -r preserves executable modes.
+        subprocess.run(["zip", "-qry", str(args.output.resolve()), "Payload"],
+                       cwd=str(root), check=True)
         print(f"Unsigned IPA: {args.output}")
         print(f"Host bundle: {parent_bundle}")
         print(f"Widget bundle: {wi['CFBundleIdentifier']}")
