@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Prepare an UNSIGNED Telegram IPA for Lead's iOS 17+ download widget.
+
+Usage:
+  python3 tools/prepare_download_ipa.py Telegram.ipa --widget LeadDownloadIsland.appex \
+      --output Telegram-Downloads-unsigned.ipa
+
+This step only bundles an already-built widget and adds declarations. It
+cannot create a provisioning profile or entitlements: sign the main app AND
+all embedded extensions after this step.
+"""
+import argparse
+import os
+import plistlib
+import shutil
+import tempfile
+import zipfile
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("ipa", type=Path)
+    parser.add_argument("--widget", type=Path, required=True,
+                        help="Un-signed LeadDownloadIsland.appex built by Xcode")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if not args.ipa.is_file():
+        parser.error("Input IPA does not exist")
+    if not args.widget.is_dir():
+        parser.error("Widget .appex directory does not exist")
+    if args.output.resolve() == args.ipa.resolve():
+        parser.error("Output must not overwrite input")
+    with tempfile.TemporaryDirectory(prefix="lead-downloads-") as td:
+        root = Path(td)
+        with zipfile.ZipFile(args.ipa) as z:
+            z.extractall(root)
+        apps = list((root / "Payload").glob("*.app"))
+        if len(apps) != 1:
+            raise SystemExit("Expected exactly one app in Payload")
+        app = apps[0]
+        plist_path = app / "Info.plist"
+        with open(plist_path, "rb") as f:
+            info = plistlib.load(f)
+        parent_bundle = info.get("CFBundleIdentifier")
+        if not parent_bundle:
+            raise SystemExit("Host IPA has no CFBundleIdentifier")
+        modes = list(info.get("UIBackgroundModes", []))
+        if "audio" not in modes:
+            modes.append("audio")
+        info["UIBackgroundModes"] = modes
+        info["NSSupportsLiveActivities"] = True
+        with open(plist_path, "wb") as f:
+            plistlib.dump(info, f)
+        plugins = app / "PlugIns"
+        plugins.mkdir(exist_ok=True)
+        dest = plugins / "LeadDownloadIsland.appex"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(args.widget, dest)
+        widget_plist = dest / "Info.plist"
+        with open(widget_plist, "rb") as f:
+            wi = plistlib.load(f)
+        wi["CFBundleIdentifier"] = parent_bundle + ".LeadDownloadIsland"
+        with open(widget_plist, "wb") as f:
+            plistlib.dump(wi, f)
+        # Codesigning must run again: strip invalid stale signatures.
+        for directory in (app, dest):
+            shutil.rmtree(directory / "_CodeSignature", ignore_errors=True)
+            (directory / "embedded.mobileprovision").unlink(missing_ok=True)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(args.output, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            for current, dirs, files in os.walk(root):
+                for filename in files:
+                    p = Path(current) / filename
+                    z.write(p, p.relative_to(root))
+        print(f"Unsigned IPA: {args.output}")
+        print(f"Host bundle: {parent_bundle}")
+        print(f"Widget bundle: {wi['CFBundleIdentifier']}")
+        print("Sign main app and widget extension together; UIBackgroundModes=audio is experimental.")
+
+
+if __name__ == "__main__":
+    main()
