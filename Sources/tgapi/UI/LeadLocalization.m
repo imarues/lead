@@ -142,6 +142,13 @@ NSString *LeadBundlePath(void) {
   static dispatch_once_t sOnce;
   dispatch_once(&sOnce, ^{
     sBuiltinEnglish = @{
+      /* Telegram download monitor — iOS 17+ */
+      @"LEAD_DOWNLOAD_SECTION" : @"Downloads",
+      @"LEAD_DOWNLOAD_STATUS" : @"Current download",
+      @"LEAD_DOWNLOAD_PROGRESS" : @"Live download progress",
+      @"LEAD_DOWNLOAD_PROGRESS_DESC" : @"Show downloaded bytes and percentage when Telegram provides a total. Dynamic Island requires a widget extension.",
+      @"LEAD_DOWNLOAD_BACKGROUND" : @"Try background downloads",
+      @"LEAD_DOWNLOAD_BACKGROUND_DESC" : @"Experimental quiet audio while downloading in background. Requires an IPA signed with audio background mode; iOS may still pause it.",
       /* Sections */
       @"GHOST_MODE_SECTION_HEADER" : @"Ghost Mode",
       @"READ_RECEIPT_SECTION_HEADER" : @"Read Receipts",
