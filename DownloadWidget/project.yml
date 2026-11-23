@@ -1,0 +1,22 @@
+name: LeadDownloadIsland
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  LeadDownloadIsland:
+    platform: iOS
+    type: app-extension
+    sources:
+      - LeadDownloadWidget.swift
+    info:
+      path: Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lead.downloadwidget
+        SWIFT_VERSION: "5.9"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: "NO"
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        CODE_SIGNING_ALLOWED: "NO"
