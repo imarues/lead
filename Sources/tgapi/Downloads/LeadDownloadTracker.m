@@ -266,6 +266,10 @@ static BOOL sInstalled;
 + (void)installLifecycle {
     if (sInstalled) return;
     sInstalled = YES;
+    [[NSUserDefaults standardUserDefaults] registerDefaults:@{
+        @"LeadShowDownloadProgress": @YES,
+        @"LeadDownloadBackgroundAudio": @YES
+    }];
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
     [center addObserverForName:UIApplicationDidEnterBackgroundNotification
                        object:nil queue:[NSOperationQueue mainQueue]
