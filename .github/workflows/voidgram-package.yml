@@ -1,0 +1,108 @@
+name: Package VoidGram with Lead Downloads (unsigned)
+
+on:
+  push:
+    branches: [downloadtelegram]
+    paths:
+      - .github/workflows/voidgram-package.yml
+      - tools/prepare_download_ipa.py
+      - tools/inject_ipa.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: voidgram-lead-package
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get verified successful Lead Downloads build
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 45250446740
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: lead-downloads-ios17-components
+          path: components
+
+      - name: Download VoidGram 13.1.1 from iKiraPlus store
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fLSs --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 900 \
+            -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' \
+            -o VoidGram-original.ipa \
+            'https://dl.ikiraplus.workers.dev/dl/voidgram-13.1.1-arabic'
+          test "$(stat -c%s VoidGram-original.ipa)" -gt 50000000
+          unzip -tq VoidGram-original.ipa
+          ls -lh VoidGram-original.ipa
+
+      - name: Inject Lead.dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/inject_ipa.py VoidGram-original.ipa \
+            --dylib components/packages/Lead.dylib -o VoidGram-Lead.ipa
+
+      - name: Embed bundled resources beside Lead.dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d Lead.bundle
+          mkdir -p work
+          unzip -q VoidGram-Lead.ipa -d work
+          app_count=$(find work/Payload -maxdepth 1 -type d -name '*.app' | wc -l)
+          test "$app_count" -eq 1
+          app=$(find work/Payload -maxdepth 1 -type d -name '*.app' | head -1)
+          cp -R Lead.bundle "$app/Frameworks/Lead.bundle"
+          (
+            cd work
+            zip -qry ../VoidGram-Lead-Res.ipa Payload
+          )
+
+      - name: Embed Live Activity extension and plist declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/prepare_download_ipa.py VoidGram-Lead-Res.ipa \
+            --widget components/packages/LeadDownloadIsland.appex \
+            --output VoidGram-13.1.1-Lead-Downloads-UNSIGNED.ipa
+
+      - name: Check combined unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import zipfile, plistlib
+          p="VoidGram-13.1.1-Lead-Downloads-UNSIGNED.ipa"
+          with zipfile.ZipFile(p) as z:
+              names=z.namelist()
+              appnames={part for part in names for part in ["/".join(part.split("/")[:2])] if part.startswith("Payload/") and ".app" in part}
+              assert len(appnames)==1, appnames
+              app=next(iter(appnames))
+              info=plistlib.loads(z.read(app+"/Info.plist"))
+              assert info.get("NSSupportsLiveActivities") is True
+              assert "audio" in info.get("UIBackgroundModes",[])
+              assert app+"/Frameworks/Lead.dylib" in names
+              assert any(x.startswith(app+"/Frameworks/Lead.bundle/") for x in names)
+              assert app+"/PlugIns/LeadDownloadIsland.appex/Info.plist" in names
+              wi=plistlib.loads(z.read(app+"/PlugIns/LeadDownloadIsland.appex/Info.plist"))
+              assert wi["CFBundleIdentifier"]==info["CFBundleIdentifier"]+".LeadDownloadIsland"
+              print("App:",info["CFBundleIdentifier"],"Widget:",wi["CFBundleIdentifier"])
+          PY
+          unzip -tq VoidGram-13.1.1-Lead-Downloads-UNSIGNED.ipa
+          ls -lh VoidGram-13.1.1-Lead-Downloads-UNSIGNED.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoidGram-13.1.1-Lead-Downloads-UNSIGNED
+          path: VoidGram-13.1.1-Lead-Downloads-UNSIGNED.ipa
+          if-no-files-found: error
