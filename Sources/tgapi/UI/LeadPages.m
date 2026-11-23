@@ -3,6 +3,7 @@
 #import "Icons.h"
 #import "../Calls/LeadCallRecording.h"
 #import "../Headers.h"
+#import "../Downloads/LeadDownloadTracker.h"
 
 #pragma mark - Model
 
@@ -650,12 +651,41 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     return sFilePickerCacheSize;
   };
 
+  LeadRow *downloadStatus = [LeadRow link:@"LEAD_DOWNLOAD_STATUS"
+      symbol:@"arrow.down.circle" tap:^(UIViewController *host) {
+    NSDictionary *snapshot = [LeadDownloadTracker currentDownload];
+    NSString *name = snapshot[@"name"] ?: @"No active download";
+    NSNumber *percent = snapshot[@"percent"];
+    NSString *details = percent && percent.integerValue >= 0
+        ? [NSString stringWithFormat:@"%@ — %@%%", name, percent]
+        : name;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Telegram downloads"
+        message:details preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [host presentViewController:alert animated:YES completion:nil];
+  }];
+  downloadStatus.valueBlock = ^NSString * {
+    NSDictionary *item = [LeadDownloadTracker currentDownload];
+    if (!item.count) return @"Idle";
+    NSInteger percent = [item[@"percent"] integerValue];
+    if (percent >= 0) return [NSString stringWithFormat:@"%ld%%", (long)percent];
+    return [NSByteCountFormatter stringFromByteCount:[item[@"received"] longLongValue]
+        countStyle:NSByteCountFormatterCountStyleFile];
+  };
+
   LeadPage *media = [LeadPage new];
   media.titleKey = @"UI_PAGE_MEDIA";
   media.symbol = @"paperclip";
   media.sections = @[
     [LeadSection title:nil rows:@[
       [LeadRow toggle:kSendAsVoice title:@"UI_SEND_AS_VOICE_TITLE" subtitle:@"UI_SEND_AS_VOICE_SUBTITLE" symbol:@"waveform"],
+    ]],
+    [LeadSection title:@"LEAD_DOWNLOAD_SECTION" rows:@[
+      [LeadRow toggle:@"LeadShowDownloadProgress" title:@"LEAD_DOWNLOAD_PROGRESS"
+          subtitle:@"LEAD_DOWNLOAD_PROGRESS_DESC" symbol:@"percent"],
+      [LeadRow toggle:@"LeadDownloadBackgroundAudio" title:@"LEAD_DOWNLOAD_BACKGROUND"
+          subtitle:@"LEAD_DOWNLOAD_BACKGROUND_DESC" symbol:@"waveform.path"],
+      downloadStatus,
     ]],
     [LeadSection title:@"UI_FILE_PICKER" rows:@[
       [LeadRow toggle:FILE_PICKER_FIX_KEY title:@"FIX_FILE_PICKER_TITLE" subtitle:@"FIX_FILE_PICKER_SUBTITLE" symbol:@"folder"],
