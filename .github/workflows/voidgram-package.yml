@@ -95,6 +95,11 @@ jobs:
               assert app+"/PlugIns/LeadDownloadIsland.appex/Info.plist" in names
               wi=plistlib.loads(z.read(app+"/PlugIns/LeadDownloadIsland.appex/Info.plist"))
               assert wi["CFBundleIdentifier"]==info["CFBundleIdentifier"]+".LeadDownloadIsland"
+              assert wi["NSExtension"]["NSExtensionPointIdentifier"]=="com.apple.widgetkit-extension"
+              app_exe=app+"/"+info["CFBundleExecutable"]
+              widget_exe=app+"/PlugIns/LeadDownloadIsland.appex/"+wi["CFBundleExecutable"]
+              assert z.getinfo(app_exe).external_attr >> 16 & 0o111, "Main executable permissions lost"
+              assert z.getinfo(widget_exe).external_attr >> 16 & 0o111, "Widget executable permissions lost"
               print("App:",info["CFBundleIdentifier"],"Widget:",wi["CFBundleIdentifier"])
           PY
           unzip -tq VoidGram-13.1.1-Lead-Downloads-UNSIGNED.ipa
