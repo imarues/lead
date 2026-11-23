@@ -1,0 +1,58 @@
+name: Build Lead Downloads (iOS 17+)
+
+on:
+  push:
+    branches:
+      - downloadtelegram
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lead-downloads-only
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Theos
+        uses: waruhachi/theos-action@v2.4.6
+        with:
+          theos-src: 'waruhachi/theos'
+          theos-branch: 'main'
+          sdks-src: 'waruhachi/sdks'
+          sdks-branch: 'main'
+
+      - name: Install build dependencies
+        run: brew install dpkg xcodegen
+
+      - name: Compile Lead dylib
+        run: make clean package FINALPACKAGE=1
+
+      - name: Generate widget Xcode project
+        run: xcodegen generate --spec DownloadWidget/project.yml
+
+      - name: Build unsigned iOS 17 Dynamic Island extension
+        run: |
+          xcodebuild -project DownloadWidget/LeadDownloadIsland.xcodeproj \
+            -scheme LeadDownloadIsland -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/widget-build" \
+            CODE_SIGNING_ALLOWED=NO build
+          test -d "$RUNNER_TEMP/widget-build/Build/Products/Release-iphoneos/LeadDownloadIsland.appex"
+          mkdir -p packages
+          cp -R "$RUNNER_TEMP/widget-build/Build/Products/Release-iphoneos/LeadDownloadIsland.appex" packages/
+
+      - name: Upload unsigned components
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-downloads-ios17-components
+          path: |
+            packages/Lead.dylib
+            packages/LeadDownloadIsland.appex/**
+            tools/prepare_download_ipa.py
+          if-no-files-found: error
