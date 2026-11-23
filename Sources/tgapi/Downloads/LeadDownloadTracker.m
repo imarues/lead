@@ -96,7 +96,7 @@ static BOOL sInstalled;
         NSMutableDictionary *entry = sTasks[token];
         if (!entry) {
             entry = [@{@"token": token, @"received": @0, @"last": @(now),
-                       @"parts": [NSMutableSet new], @"completed": @NO} mutableCopy];
+                       @"parts": [NSMutableDictionary new], @"completed": @NO} mutableCopy];
             sTasks[token] = entry;
         }
         NSMutableDictionary<NSNumber *, NSNumber *> *parts = entry[@"parts"];
@@ -277,6 +277,20 @@ static BOOL sInstalled;
                        object:nil queue:[NSOperationQueue mainQueue]
                    usingBlock:^(__unused NSNotification *note) {
         sInBackground = NO;
+        [self backgroundStateRefresh];
+    }];
+    [center addObserverForName:@"LeadDownloadDocumentMetadata"
+                       object:nil queue:nil
+                   usingBlock:^(NSNotification *note) {
+        NSNumber *doc = note.userInfo[@"id"], *size = note.userInfo[@"size"];
+        if (doc && size) [self registerDocumentId:doc.longLongValue size:size.longLongValue
+                                              name:note.userInfo[@"name"]];
+    }];
+    [center addObserverForName:UIApplicationWillResignActiveNotification
+                       object:nil queue:[NSOperationQueue mainQueue]
+                   usingBlock:^(__unused NSNotification *note) {
+        // Pre-arm playback while foreground; starting it after suspension may fail.
+        sInBackground = YES;
         [self backgroundStateRefresh];
     }];
     [center addObserverForName:@"LeadSettingsDidChangeNotification"
