@@ -1,4 +1,6 @@
 #import "Headers.h"
+#import "Downloads/LeadDownloadTracker.h"
+#import <objc/message.h>
 #include <zlib.h>
 
 // Forward declaration — defined later in this file, used inside hooked_block
@@ -176,9 +178,22 @@ static __weak id sLeadRequestService;
   id (^hooked_block)(NSData *) = ^(NSData *inputData) {
     // File chunks hold nothing to patch; don't copy and scan up to 1 MB per part.
     BOOL inExtension = LeadIsNotificationExtensionProcess();
-    if (functionID == kUploadGetFile || functionID == kUploadGetCdnFile ||
-        (inExtension && inputData.length > kLeadExtensionPatchLimit)) {
+    if (functionID == kUploadGetFile || functionID == kUploadGetCdnFile) {
+      if (!inExtension) {
+        NSString *token = [LeadDownloadTracker tokenForPayload:payload functionID:functionID];
+        [LeadDownloadTracker receivedResponse:inputData forToken:token payload:payload functionID:functionID];
+      }
       return responseParser(inputData);
+    }
+    if (inExtension && inputData.length > kLeadExtensionPatchLimit) {
+      return responseParser(inputData);
+    }
+    if (!inExtension && [[NSUserDefaults standardUserDefaults] boolForKey:@"LeadShowDownloadProgress"]) {
+      Class metadata = NSClassFromString(@"LeadDownloadMetadata");
+      SEL observe = NSSelectorFromString(@"observeResponse:");
+      if (metadata && [metadata respondsToSelector:observe]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(metadata, observe, inputData);
+      }
     }
 
     NSNumber *functionIDNumber = [NSNumber numberWithUnsignedInt:functionID];
@@ -744,6 +759,7 @@ extern "C" BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result,
   if (inExtension) {
     return;
   }
+  [LeadDownloadTracker installLifecycle];
 
   // The extension reads what the app last wrote, and hands back what it saw.
   void (^sync)(NSNotification *) = ^(__unused NSNotification *note) {
