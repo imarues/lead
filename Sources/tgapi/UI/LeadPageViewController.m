@@ -9,6 +9,7 @@ static NSString *const kHeaderId = @"LeadHeader";
 @property (nonatomic, strong) LeadPage *page;
 @property (nonatomic, assign) BOOL didAnimateIn;
 @property (nonatomic, assign) NSInteger appearOrder;
+@property (nonatomic, assign) CFAbsoluteTime lastDownloadRefresh;
 @end
 
 @implementation LeadPageViewController
@@ -37,6 +38,7 @@ static NSString *const kHeaderId = @"LeadHeader";
   NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
   [center addObserver:self selector:@selector(externalChange:) name:LeadSettingsDidChangeNotification object:nil];
   [center addObserver:self selector:@selector(externalChange:) name:@"LeadLocationChanged" object:nil];
+  [center addObserver:self selector:@selector(downloadChange:) name:@"LeadDownloadStatusDidChange" object:nil];
 }
 
 - (void)dealloc {
@@ -51,6 +53,14 @@ static NSString *const kHeaderId = @"LeadHeader";
 // Values like counts or coordinates may change on another screen; update in place
 // so switches don't jump mid-animation.
 - (void)externalChange:(NSNotification *)note {
+  [self refreshVisibleRows];
+}
+
+- (void)downloadChange:(NSNotification *)note {
+  if (![self.page.titleKey isEqualToString:@"UI_PAGE_MEDIA"]) return;
+  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if (now - self.lastDownloadRefresh < 0.8) return;
+  self.lastDownloadRefresh = now;
   [self refreshVisibleRows];
 }
 
