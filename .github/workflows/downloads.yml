@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/inject_ipa.py VoidGram-original.ipa \
-            --dylib components/packages/Lead.dylib -o VoidGram-Lead.ipa
+            --dylib components/packages/Lead.dylib --remove KiraAdd.dylib -o VoidGram-Lead.ipa
 
       - name: Embed bundled resources beside Lead.dylib
         shell: bash
@@ -99,6 +99,7 @@ jobs:
           app_count=$(find work/Payload -maxdepth 1 -type d -name '*.app' | wc -l)
           test "$app_count" -eq 1
           app=$(find work/Payload -maxdepth 1 -type d -name '*.app' | head -1)
+          rm -f "$app/Frameworks/KiraAdd.dylib"
           cp -R Lead.bundle "$app/Frameworks/Lead.bundle"
           (
             cd work
@@ -111,7 +112,7 @@ jobs:
           set -euo pipefail
           python3 tools/prepare_download_ipa.py VoidGram-Lead-Res.ipa \
             --widget components/packages/LeadDownloadIsland.appex \
-            --output VoidGram-13.1.1-Lead-Downloads-v2-UNSIGNED.ipa
+            --output VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
 
       - name: Check combined unsigned IPA
         shell: bash
@@ -119,7 +120,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import zipfile, plistlib
-          p="VoidGram-13.1.1-Lead-Downloads-v2-UNSIGNED.ipa"
+          p="VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa"
           with zipfile.ZipFile(p) as z:
               names=z.namelist()
               appnames={part for part in names for part in ["/".join(part.split("/")[:2])] if part.startswith("Payload/") and ".app" in part}
@@ -130,6 +131,7 @@ jobs:
               assert info.get("NSSupportsLiveActivitiesFrequentUpdates") is True
               assert "audio" in info.get("UIBackgroundModes",[])
               assert app+"/Frameworks/Lead.dylib" in names
+              assert not any(n.endswith("/KiraAdd.dylib") for n in names), "Duplicate Lead tweak"
               assert any(x.startswith(app+"/Frameworks/Lead.bundle/") for x in names)
               assert app+"/PlugIns/LeadDownloadIsland.appex/Info.plist" in names
               wi=plistlib.loads(z.read(app+"/PlugIns/LeadDownloadIsland.appex/Info.plist"))
@@ -141,12 +143,12 @@ jobs:
               assert z.getinfo(widget_exe).external_attr >> 16 & 0o111, "Widget executable permissions lost"
               print("App:",info["CFBundleIdentifier"],"Widget:",wi["CFBundleIdentifier"])
           PY
-          unzip -tq VoidGram-13.1.1-Lead-Downloads-v2-UNSIGNED.ipa
-          ls -lh VoidGram-13.1.1-Lead-Downloads-v2-UNSIGNED.ipa
+          unzip -tq VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
+          ls -lh VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: VoidGram-13.1.1-Lead-Downloads-v2-UNSIGNED
-          path: VoidGram-13.1.1-Lead-Downloads-v2-UNSIGNED.ipa
+          name: VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED
+          path: VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
           if-no-files-found: error

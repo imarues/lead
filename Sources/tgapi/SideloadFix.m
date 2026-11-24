@@ -271,6 +271,16 @@ static NSURL *LeadResolveContainer(id self, SEL _cmd, NSString *group) {
   return client;
 }
 
+// Notify the download monitor of the actual resolved app-group root.
+static void LeadObserveMediaContainer(NSURL *url) {
+  if (!url || LeadIsAppExtension()) return;
+  Class tracker = NSClassFromString(@"LeadDownloadTracker");
+  SEL selector = NSSelectorFromString(@"registerMediaRoot:");
+  if (tracker && [tracker respondsToSelector:selector]) {
+    IMP imp = [tracker methodForSelector:selector];
+    ((void (*)(id, SEL, NSString *))imp)(tracker, selector, url.path);
+  }
+}
 static NSURL *LeadContainerURL(id self, SEL _cmd, NSString *group) {
   if (![group isKindOfClass:[NSString class]] || group.length == 0) {
     return sOrigContainerURL(self, _cmd, group);
@@ -278,13 +288,14 @@ static NSURL *LeadContainerURL(id self, SEL _cmd, NSString *group) {
   os_unfair_lock_lock(&sResolvedLock);
   NSURL *cached = sResolvedGroups[group];
   os_unfair_lock_unlock(&sResolvedLock);
-  if (cached) return cached;
+  if (cached) { LeadObserveMediaContainer(cached); return cached; }
 
   NSURL *url = LeadResolveContainer(self, _cmd, group);
   if (url) {
     os_unfair_lock_lock(&sResolvedLock);
     sResolvedGroups[group] = url;
     os_unfair_lock_unlock(&sResolvedLock);
+    LeadObserveMediaContainer(url);
   }
   return url;
 }

@@ -1,13 +1,12 @@
 name: Package VoidGram with Lead Downloads (unsigned)
 
 on:
-  push:
-    branches: [downloadtelegram]
-    paths:
-      - .github/workflows/voidgram-package.yml
-      - tools/prepare_download_ipa.py
-      - tools/inject_ipa.py
   workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Lead Downloads build run ID
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -27,7 +26,7 @@ jobs:
       - name: Get verified successful Lead Downloads build
         uses: actions/download-artifact@v4
         with:
-          run-id: 45250446740
+          run-id: ${{ inputs.build_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           name: lead-downloads-ios17-components
           path: components
@@ -49,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/inject_ipa.py VoidGram-original.ipa \
-            --dylib components/packages/Lead.dylib -o VoidGram-Lead.ipa
+            --dylib components/packages/Lead.dylib --remove KiraAdd.dylib -o VoidGram-Lead.ipa
 
       - name: Embed bundled resources beside Lead.dylib
         shell: bash
@@ -61,6 +60,7 @@ jobs:
           app_count=$(find work/Payload -maxdepth 1 -type d -name '*.app' | wc -l)
           test "$app_count" -eq 1
           app=$(find work/Payload -maxdepth 1 -type d -name '*.app' | head -1)
+          rm -f "$app/Frameworks/KiraAdd.dylib"
           cp -R Lead.bundle "$app/Frameworks/Lead.bundle"
           (
             cd work

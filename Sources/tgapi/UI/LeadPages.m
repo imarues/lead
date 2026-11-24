@@ -659,7 +659,13 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     NSString *details = percent && percent.integerValue >= 0
         ? [NSString stringWithFormat:@"%@ — %@%%", name, percent]
         : name;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Telegram downloads"
+    if (snapshot.count) {
+      details = [details stringByAppendingFormat:@"\nSource: %@\nReceived: %@ / %@",
+        snapshot[@"source"] ?: @"MTProto",
+        [NSByteCountFormatter stringFromByteCount:[snapshot[@"received"] longLongValue] countStyle:NSByteCountFormatterCountStyleBinary],
+        [NSByteCountFormatter stringFromByteCount:[snapshot[@"total"] longLongValue] countStyle:NSByteCountFormatterCountStyleBinary]];
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Telegram downloads V3"
         message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [host presentViewController:alert animated:YES completion:nil];

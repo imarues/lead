@@ -12,7 +12,8 @@ FOUNDATION_EXPORT NSString *const LeadDownloadStatusDidChange;
 + (void)receivedResponse:(NSData *)response forToken:(NSString *)token
                 payload:(NSData *)payload functionID:(int32_t)functionID;
 + (void)registerDocumentId:(int64_t)documentId size:(int64_t)size
-                       name:(NSString *)name;
+                       name:(NSString *)name datacenter:(NSInteger)dc;
++ (void)registerMediaRoot:(NSString *)root;
 + (NSDictionary *)currentDownload;
 + (NSUInteger)activeDownloadCount;
 + (void)installLifecycle;

@@ -1,6 +1,8 @@
 #import "LeadDownloadTracker.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <zlib.h>
+#import <sys/stat.h>
 
 NSString *const LeadDownloadStatusDidChange = @"LeadDownloadStatusDidChange";
 
@@ -53,6 +55,11 @@ static BOOL sInstalled;
 static BOOL sPublishScheduled;
 static NSDictionary *sLastPublished;
 static NSString *sSelectedToken;
+static NSMutableSet<NSString *> *sMediaRoots;
+static NSArray<NSString *> *sMediaDirectories;
+static CFAbsoluteTime sLastDirectoryRefresh;
+static CFAbsoluteTime sLastCachePoll;
+static CFAbsoluteTime sLastPublishTime;
 static const NSTimeInterval kLeadDownloadIdle = 45.0;
 static const NSTimeInterval kLeadFinishHold = 5.0;
 
@@ -77,6 +84,43 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
     return (uint64_t)(hi-lo) - oldCoverage;
 }
 
+
+// Telegram's MediaBoxFileMap stores verified received intervals in _partial.meta.
+// Read-only, checksum validated; file length alone is NOT download progress
+// because out-of-order writes can make the partial file sparse.
+static BOOL LeadReadMediaMap(NSString *path, uint64_t *received, int64_t *total) {
+    struct stat st;
+    if (stat(path.fileSystemRepresentation, &st) != 0 ||
+        st.st_size < 12 || st.st_size > 1024 * 1024) return NO;
+    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:nil];
+    if (data.length < 12 || data.length > 1024 * 1024) return NO;
+    const uint8_t *p = data.bytes;
+    BOOL wide = LeadU32(p) == 0x7bac1487;
+    NSUInteger header = wide ? 12 : 8, width = wide ? 8 : 4;
+    if (data.length < header + width) return NO;
+    uint32_t expectedCRC = LeadU32(p + (wide ? 4 : 0));
+    int32_t count = (int32_t)LeadU32(p + (wide ? 8 : 4));
+    if (count < 0 || (NSUInteger)count > (data.length-header-width)/(2*width)) return NO;
+    NSUInteger payloadSize = width + (NSUInteger)count*2*width;
+    if ((uint32_t)crc32(0, p+header, (uInt)payloadSize) != expectedCRC) return NO;
+    int64_t truncation = wide ? (int64_t)LeadU64(p+header) : (int64_t)(int32_t)LeadU32(p+header);
+    uint64_t sum = 0, previousEnd = 0;
+    for (int32_t i=0; i<count; i++) {
+        const uint8_t *r = p+header+width+(NSUInteger)i*2*width;
+        int64_t start = wide ? (int64_t)LeadU64(r) : (int64_t)(int32_t)LeadU32(r);
+        int64_t length = wide ? (int64_t)LeadU64(r+width) : (int64_t)(int32_t)LeadU32(r+width);
+        if (start < 0 || length <= 0 || (uint64_t)start < previousEnd ||
+            (uint64_t)length > INT64_MAX-(uint64_t)start ||
+            (uint64_t)length > INT64_MAX-sum) return NO;
+        previousEnd = (uint64_t)start + (uint64_t)length;
+        sum += (uint64_t)length;
+    }
+    if (truncation > 0 && previousEnd > (uint64_t)truncation) return NO;
+    *received = sum;
+    *total = truncation;
+    return YES;
+}
+
 @implementation LeadDownloadTracker
 
 + (void)initialize {
@@ -85,6 +129,98 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
     sTasks = [NSMutableDictionary new];
     sMetadata = [NSMutableDictionary new];
     sCdnAliases = [NSMutableDictionary new];
+    sMediaRoots = [NSMutableSet new];
+    sMediaDirectories = @[];
+}
+
++ (void)registerMediaRoot:(NSString *)root {
+    if (!root.length) return;
+    dispatch_async(sQueue, ^{
+        if (sMediaRoots.count < 32 && ![sMediaRoots containsObject:root]) {
+            [sMediaRoots addObject:root];
+            sLastDirectoryRefresh = 0;
+        }
+    });
+}
+
++ (void)refreshMediaDirectoriesLocked {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sLastDirectoryRefresh < 8) return;
+    sLastDirectoryRefresh = now;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableSet<NSString *> *roots = [sMediaRoots mutableCopy];
+    NSString *documents = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    [roots addObject:documents];
+    NSString *fallback = [documents stringByAppendingPathComponent:@"AppGroup"];
+    [roots addObject:fallback];
+    NSString *clients = [fallback stringByAppendingPathComponent:@"Lead"];
+    for (NSString *client in [fm contentsOfDirectoryAtPath:clients error:nil] ?: @[]) {
+        if (![client hasPrefix:@"_"]) [roots addObject:[clients stringByAppendingPathComponent:client]];
+    }
+    NSMutableSet<NSString *> *directories = [NSMutableSet new];
+    for (NSString *root in roots) {
+        NSString *dataPath = [root stringByAppendingPathComponent:@"telegram-data"];
+        for (NSString *account in [fm contentsOfDirectoryAtPath:dataPath error:nil] ?: @[]) {
+            if (![account hasPrefix:@"account-"]) continue;
+            NSString *media = [[dataPath stringByAppendingPathComponent:account]
+                                stringByAppendingPathComponent:@"postbox/media"];
+            BOOL isDirectory = NO;
+            if ([fm fileExistsAtPath:media isDirectory:&isDirectory] && isDirectory)
+                [directories addObject:media];
+        }
+    }
+    sMediaDirectories = directories.allObjects;
+}
+
++ (void)refreshDiskProgressLocked {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sLastCachePoll < 0.45) return;
+    sLastCachePoll = now;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kLeadProgressKey]) return;
+    [self refreshMediaDirectoriesLocked];
+    if (!sMediaDirectories.count) return;
+    // Only examine known documents already observed by the download hook.
+    // No recursive scan or file-content access. Map data contains byte ranges only.
+    for (NSString *token in sTasks.allKeys) {
+        NSMutableDictionary *entry = sTasks[token];
+        NSDictionary *meta = sMetadata[token];
+        if (!meta || ![token hasPrefix:@"doc:"] ||
+            [entry[@"completed"] boolValue] ||
+            now - [entry[@"last"] doubleValue] > kLeadDownloadIdle) continue;
+        long long expected = [meta[@"size"] longLongValue];
+        NSInteger dc = [meta[@"dc"] integerValue];
+        if (expected <= 0 || dc <= 0) continue;
+        NSString *file = [NSString stringWithFormat:@"telegram-cloud-document-%ld-%@",
+                          (long)dc, [token substringFromIndex:4]];
+        uint64_t best = 0;
+        BOOL found = NO;
+        for (NSString *dir in sMediaDirectories) {
+            NSString *base = [dir stringByAppendingPathComponent:file];
+            struct stat st;
+            if (stat(base.fileSystemRepresentation, &st) == 0 &&
+                S_ISREG(st.st_mode) && st.st_size == expected) {
+                best = (uint64_t)expected;
+                found = YES;
+                break;
+            }
+            uint64_t bytes = 0;
+            int64_t truncation = -1;
+            if (LeadReadMediaMap([base stringByAppendingString:@"_partial.meta"], &bytes, &truncation) &&
+                bytes <= (uint64_t)expected && (truncation <= 0 || truncation == expected)) {
+                found = YES;
+                best = MAX(best, bytes);
+            }
+        }
+        if (!found) continue;
+        uint64_t previous = [entry[@"received"] unsignedLongLongValue];
+        entry[@"source"] = @"MediaBox";
+        entry[@"received"] = @(best);
+        if (best > previous) entry[@"last"] = @(now);
+        if (best == (uint64_t)expected) {
+            entry[@"completed"] = @YES;
+            entry[@"finishedAt"] = @(now);
+        }
+    }
 }
 
 + (NSString *)tokenForPayload:(NSData *)payload functionID:(int32_t)functionID {
@@ -158,6 +294,7 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
     dispatch_async(sQueue, ^{
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         // Keep the same file selected during brief pauses and discard old transfers.
+        [self refreshDiskProgressLocked];
         for (NSString *key in [sTasks allKeys]) {
             NSDictionary *item = sTasks[key];
             if (now - [item[@"last"] doubleValue] > kLeadDownloadIdle) [sTasks removeObjectForKey:key];
@@ -166,7 +303,7 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
         NSMutableDictionary *entry = sTasks[resolvedToken];
         if (!entry) {
             entry = [@{@"token": resolvedToken, @"received": @0, @"last": @(now),
-                       @"ranges": [NSMutableArray new], @"completed": @NO} mutableCopy];
+                       @"ranges": [NSMutableArray new], @"networkBytes": @0, @"source": @"MTProto", @"completed": @NO} mutableCopy];
             sTasks[resolvedToken] = entry;
         }
         if ([entry[@"completed"] boolValue]) return;
@@ -180,7 +317,8 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
         NSMutableArray<NSValue *> *ranges = entry[@"ranges"];
         uint64_t added = LeadMergeRange(ranges, offset, cappedChunk);
         if (added > 0) {
-            entry[@"received"] = @([entry[@"received"] unsignedLongLongValue] + added);
+            entry[@"networkBytes"] = @([entry[@"networkBytes"] unsignedLongLongValue] + added);
+            if (![entry[@"source"] isEqual:@"MediaBox"]) entry[@"received"] = entry[@"networkBytes"];
         }
         entry[@"last"] = @(now);
         NSDictionary *meta = sMetadata[resolvedToken];
@@ -198,12 +336,12 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
     });
 }
 
-+ (void)registerDocumentId:(int64_t)documentId size:(int64_t)size name:(NSString *)name {
++ (void)registerDocumentId:(int64_t)documentId size:(int64_t)size name:(NSString *)name datacenter:(NSInteger)dc {
     if (documentId == 0 || size <= 0) return;
     NSString *token = [NSString stringWithFormat:@"doc:%lld", (long long)documentId];
     NSString *safeName = name.length ? [name lastPathComponent] : @"Telegram file";
     dispatch_async(sQueue, ^{
-        sMetadata[token] = @{@"size": @(size), @"name": safeName};
+        sMetadata[token] = @{@"size": @(size), @"name": safeName, @"dc": @(dc)};
         if (sMetadata.count > 2000) [sMetadata removeObjectForKey:sMetadata.allKeys.firstObject];
         NSMutableDictionary *task = sTasks[token];
         if (task) {
@@ -248,7 +386,8 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
     NSInteger percent = total > 0 ? (NSInteger)MIN(100, (received * 100.0 / total)) : -1;
     return @{@"name": best[@"name"] ?: @"Telegram file",
              @"received": @(received), @"total": @(total),
-             @"percent": @(percent), @"token": best[@"token"] ?: @""};
+             @"percent": @(percent), @"token": best[@"token"] ?: @"",
+             @"source": best[@"source"] ?: @"MTProto"};
 }
 
 + (NSDictionary *)currentDownload {
@@ -350,7 +489,12 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), sQueue, ^{
         sPublishScheduled = NO;
         NSDictionary *snapshot = [self snapshotLocked];
-        if ([sLastPublished isEqualToDictionary:snapshot]) return;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        // A periodic resend also recovers an activity that iOS dismissed or
+        // didn't display after the first submission, without inventing progress.
+        if ([sLastPublished isEqualToDictionary:snapshot] &&
+            (!snapshot.count || now - sLastPublishTime < 5.0)) return;
+        sLastPublishTime = now;
         sLastPublished = [snapshot copy];
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:LeadDownloadStatusDidChange
@@ -399,7 +543,8 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
                    usingBlock:^(NSNotification *note) {
         NSNumber *doc = note.userInfo[@"id"], *size = note.userInfo[@"size"];
         if (doc && size) [self registerDocumentId:doc.longLongValue size:size.longLongValue
-                                              name:note.userInfo[@"name"]];
+                                              name:note.userInfo[@"name"]
+                                         datacenter:[note.userInfo[@"dc"] integerValue]];
     }];
     [center addObserverForName:UIApplicationWillResignActiveNotification
                        object:nil queue:[NSOperationQueue mainQueue]
@@ -421,7 +566,10 @@ static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offse
 
 + (void)pollForDownloads {
     [self backgroundStateRefresh];
-    dispatch_async(sQueue, ^{ [self announceLocked]; });
+    dispatch_async(sQueue, ^{
+        [self refreshDiskProgressLocked];
+        [self announceLocked];
+    });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
 }

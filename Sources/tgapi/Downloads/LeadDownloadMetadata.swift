@@ -35,7 +35,7 @@ final class LeadDownloadMetadata: NSObject {
                     name: Notification.Name("LeadDownloadDocumentMetadata"), object: nil,
                     userInfo: ["id": NSNumber(value: doc.id),
                                "size": NSNumber(value: doc.size),
-                               "name": name])
+                               "name": name, "dc": NSNumber(value: doc.dcId)])
             }
             return
         }
