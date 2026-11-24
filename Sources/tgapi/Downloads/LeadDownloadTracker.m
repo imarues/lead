@@ -60,7 +60,8 @@ static NSArray<NSString *> *sMediaDirectories;
 static CFAbsoluteTime sLastDirectoryRefresh;
 static CFAbsoluteTime sLastCachePoll;
 static CFAbsoluteTime sLastPublishTime;
-static const NSTimeInterval kLeadDownloadIdle = 45.0;
+static dispatch_source_t sProgressTimer;
+static const NSTimeInterval kLeadDownloadIdle = 120.0;
 static const NSTimeInterval kLeadFinishHold = 5.0;
 
 // Merge sorted byte intervals. Overlapping/retried chunks must not count twice.
@@ -213,9 +214,11 @@ static BOOL LeadReadMediaMap(NSString *path, uint64_t *received, int64_t *total)
         }
         if (!found) continue;
         uint64_t previous = [entry[@"received"] unsignedLongLongValue];
-        entry[@"source"] = @"MediaBox";
-        entry[@"received"] = @(best);
-        if (best > previous) entry[@"last"] = @(now);
+        uint64_t network = [entry[@"networkBytes"] unsignedLongLongValue];
+        uint64_t combined = MAX(best, network);
+        entry[@"source"] = best >= network ? @"MediaBox" : @"MTProto";
+        entry[@"received"] = @(combined);
+        if (combined > previous) entry[@"last"] = @(now);
         if (best == (uint64_t)expected) {
             entry[@"completed"] = @YES;
             entry[@"finishedAt"] = @(now);
@@ -318,7 +321,10 @@ static BOOL LeadReadMediaMap(NSString *path, uint64_t *received, int64_t *total)
         uint64_t added = LeadMergeRange(ranges, offset, cappedChunk);
         if (added > 0) {
             entry[@"networkBytes"] = @([entry[@"networkBytes"] unsignedLongLongValue] + added);
-            if (![entry[@"source"] isEqual:@"MediaBox"]) entry[@"received"] = entry[@"networkBytes"];
+            if ([entry[@"networkBytes"] unsignedLongLongValue] > [entry[@"received"] unsignedLongLongValue]) {
+                entry[@"source"] = @"MTProto";
+                entry[@"received"] = entry[@"networkBytes"];
+            }
         }
         entry[@"last"] = @(now);
         NSDictionary *meta = sMetadata[resolvedToken];
@@ -486,7 +492,7 @@ static BOOL LeadReadMediaMap(NSString *path, uint64_t *received, int64_t *total)
     // Never enqueue one expensive main-thread UI update per network chunk.
     if (sPublishScheduled) return;
     sPublishScheduled = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), sQueue, ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), sQueue, ^{
         sPublishScheduled = NO;
         NSDictionary *snapshot = [self snapshotLocked];
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -496,6 +502,12 @@ static BOOL LeadReadMediaMap(NSString *path, uint64_t *received, int64_t *total)
             (!snapshot.count || now - sLastPublishTime < 5.0)) return;
         sLastPublishTime = now;
         sLastPublished = [snapshot copy];
+        if (snapshot.count) {
+            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+            [d setObject:[NSDate date] forKey:@"LeadDownloadV4SampleAt"];
+            [d setObject:snapshot[@"received"] forKey:@"LeadDownloadV4SampleBytes"];
+            [d setObject:snapshot[@"source"] forKey:@"LeadDownloadV4SampleSource"];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:LeadDownloadStatusDidChange
                                                                 object:nil userInfo:snapshot];
@@ -558,19 +570,17 @@ static BOOL LeadReadMediaMap(NSString *path, uint64_t *received, int64_t *total)
                    usingBlock:^(__unused NSNotification *note) {
         [self backgroundStateRefresh];
     }];
-    // Poll even if no new chunk arrives: publish the trailing/latest state and
-    // close an inactive/completed download. No fabricated percentage increments.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
-}
-
-+ (void)pollForDownloads {
-    [self backgroundStateRefresh];
-    dispatch_async(sQueue, ^{
+    // Use a serial dispatch timer rather than the UI run loop, so reads continue
+    // while the process is executing in the background even if UIKit is busy.
+    sProgressTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, sQueue);
+    dispatch_source_set_timer(sProgressTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              (uint64_t)(0.75 * NSEC_PER_SEC), (uint64_t)(0.1 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(sProgressTimer, ^{
         [self refreshDiskProgressLocked];
         [self announceLocked];
+        dispatch_async(dispatch_get_main_queue(), ^{ [self backgroundStateRefresh]; });
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
+    dispatch_resume(sProgressTimer);
 }
+
 @end

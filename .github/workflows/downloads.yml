@@ -112,7 +112,7 @@ jobs:
           set -euo pipefail
           python3 tools/prepare_download_ipa.py VoidGram-Lead-Res.ipa \
             --widget components/packages/LeadDownloadIsland.appex \
-            --output VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
+            --output VoidGram-13.1.1-Lead-Downloads-v4-UNSIGNED.ipa
 
       - name: Check combined unsigned IPA
         shell: bash
@@ -120,7 +120,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import zipfile, plistlib
-          p="VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa"
+          p="VoidGram-13.1.1-Lead-Downloads-v4-UNSIGNED.ipa"
           with zipfile.ZipFile(p) as z:
               names=z.namelist()
               appnames={part for part in names for part in ["/".join(part.split("/")[:2])] if part.startswith("Payload/") and ".app" in part}
@@ -143,12 +143,12 @@ jobs:
               assert z.getinfo(widget_exe).external_attr >> 16 & 0o111, "Widget executable permissions lost"
               print("App:",info["CFBundleIdentifier"],"Widget:",wi["CFBundleIdentifier"])
           PY
-          unzip -tq VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
-          ls -lh VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
+          unzip -tq VoidGram-13.1.1-Lead-Downloads-v4-UNSIGNED.ipa
+          ls -lh VoidGram-13.1.1-Lead-Downloads-v4-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED
-          path: VoidGram-13.1.1-Lead-Downloads-v3-UNSIGNED.ipa
+          name: VoidGram-13.1.1-Lead-Downloads-v4-UNSIGNED
+          path: VoidGram-13.1.1-Lead-Downloads-v4-UNSIGNED.ipa
           if-no-files-found: error

@@ -27,6 +27,7 @@ final class LeadDownloadActivityBridge: NSObject {
     @MainActor private static var lastSent: LeadDownloadAttributes.ContentState?
     @MainActor private static var draining = false
     @MainActor private static var lastWrite: TimeInterval = 0
+    @MainActor private static var retryScheduled = false
 
     @objc(updateWithName:received:total:)
     static func update(name: String, received: NSNumber, total: NSNumber) {
@@ -38,6 +39,10 @@ final class LeadDownloadActivityBridge: NSObject {
             received: size > 0 ? min(size, downloaded) : downloaded,
             total: size)
         Task { @MainActor in
+            if !name.isEmpty {
+                UserDefaults.standard.set(Date(), forKey: "LeadDownloadV4BridgeReceivedAt")
+                UserDefaults.standard.set(state.received, forKey: "LeadDownloadV4BridgeBytes")
+            }
             enqueue(name.isEmpty ? .idle : .progress(state))
         }
     }
@@ -55,14 +60,37 @@ final class LeadDownloadActivityBridge: NSObject {
     }
 
     @available(iOS 16.2, *)
+    private static func percent(_ state: LeadDownloadAttributes.ContentState) -> Int {
+        guard state.total > 0 else { return -1 }
+        return min(100, Int(Double(state.received) * 100 / Double(state.total)))
+    }
+
+    @available(iOS 16.2, *)
     @MainActor private static func drain() async {
-        while pending != nil {
-            let elapsed = ProcessInfo.processInfo.systemUptime - lastWrite
-            if elapsed < 1.0 {
-                try? await Task.sleep(nanoseconds: UInt64((1.0 - elapsed) * 1_000_000_000))
+        while let event = pending {
+            // Match the old DataManager hook: changed percent is sent immediately.
+            // Byte-only changes are coalesced, never discarded.
+            if case .progress(let next) = event, let sent = lastSent,
+               next.fileName == sent.fileName, next.total == sent.total,
+               percent(next) == percent(sent), current != nil,
+               next.received < next.total {
+                let elapsed = ProcessInfo.processInfo.systemUptime - lastWrite
+                if elapsed < 1.0 {
+                    draining = false
+                    if !retryScheduled {
+                        retryScheduled = true
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            retryScheduled = false
+                            if !draining && pending != nil {
+                                draining = true
+                                await drain()
+                            }
+                        }
+                    }
+                    return
+                }
             }
-            // Read only after sleeping, to send the newest real byte count.
-            guard let event = pending else { break }
             pending = nil
             await publish(event)
         }
@@ -90,11 +118,15 @@ final class LeadDownloadActivityBridge: NSObject {
                 current = nil
                 lastSent = nil
             }
-            if state == lastSent && current != nil { return }
+            if state == lastSent && current != nil &&
+                ProcessInfo.processInfo.systemUptime - lastWrite < 30 { return }
             let finished = state.total > 0 && state.received >= state.total
-            let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(45))
+            let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(120))
             if let activity = current {
+                UserDefaults.standard.set(Date(), forKey: "LeadDownloadV4UpdateStartedAt")
                 await activity.update(content)
+                UserDefaults.standard.set(Date(), forKey: "LeadDownloadV4UpdateReturnedAt")
+                UserDefaults.standard.set(state.received, forKey: "LeadDownloadV4SubmittedBytes")
                 lastSent = state
                 lastWrite = ProcessInfo.processInfo.systemUptime
                 if finished {
@@ -107,6 +139,8 @@ final class LeadDownloadActivityBridge: NSObject {
                     current = try Activity<LeadDownloadAttributes>.request(
                         attributes: LeadDownloadAttributes(source: "Telegram"),
                         content: content, pushType: nil)
+                    UserDefaults.standard.set(Date(), forKey: "LeadDownloadV4UpdateReturnedAt")
+                    UserDefaults.standard.set(state.received, forKey: "LeadDownloadV4SubmittedBytes")
                     lastSent = state
                     lastWrite = ProcessInfo.processInfo.systemUptime
                 } catch {

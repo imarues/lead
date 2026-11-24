@@ -665,7 +665,19 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
         [NSByteCountFormatter stringFromByteCount:[snapshot[@"received"] longLongValue] countStyle:NSByteCountFormatterCountStyleBinary],
         [NSByteCountFormatter stringFromByteCount:[snapshot[@"total"] longLongValue] countStyle:NSByteCountFormatterCountStyleBinary]];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Telegram downloads V3"
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSDate *sampleAt = [d objectForKey:@"LeadDownloadV4SampleAt"];
+    NSDate *bridgeAt = [d objectForKey:@"LeadDownloadV4BridgeReceivedAt"];
+    NSDate *submittedAt = [d objectForKey:@"LeadDownloadV4UpdateReturnedAt"];
+    NSDate *startedAt = [d objectForKey:@"LeadDownloadV4UpdateStartedAt"];
+    NSNumber *sample = [d objectForKey:@"LeadDownloadV4SampleBytes"];
+    NSNumber *sent = [d objectForKey:@"LeadDownloadV4SubmittedBytes"];
+    if (sampleAt) details = [details stringByAppendingFormat:@"\nTracker: %@ bytes (%0.1fs ago)", sample, -[sampleAt timeIntervalSinceNow]];
+    if (bridgeAt) details = [details stringByAppendingFormat:@"\nBridge: %0.1fs ago", -[bridgeAt timeIntervalSinceNow]];
+    if (submittedAt) details = [details stringByAppendingFormat:@"\nActivityKit: %@ bytes (%0.1fs ago)", sent, -[submittedAt timeIntervalSinceNow]];
+    if (startedAt && (!submittedAt || [startedAt compare:submittedAt] == NSOrderedDescending))
+        details = [details stringByAppendingFormat:@"\nActivityKit update pending: %0.1fs", -[startedAt timeIntervalSinceNow]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Telegram downloads V4"
         message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [host presentViewController:alert animated:YES completion:nil];
