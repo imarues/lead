@@ -3288,6 +3288,7 @@ extension TLParser {
     private struct VoiceUpload {
         let duration: Int32
         let waveform: Data?
+        let viewOnce: Bool
         let registeredAt: TimeInterval
     }
 
@@ -3302,6 +3303,7 @@ extension TLParser {
         guard !fileName.isEmpty else { return }
         let entry = VoiceUpload(duration: Int32(max(1, duration)),
                                 waveform: waveform as Data?,
+                                viewOnce: fileName.hasPrefix("lead_once_"),
                                 registeredAt: Date().timeIntervalSince1970)
         // Must complete registration before TGMediaAssetsController returns
         // the file description. An asynchronous barrier raced the MTProto send.
@@ -3331,7 +3333,8 @@ extension TLParser {
             let now = Date().timeIntervalSince1970
             let candidates = _voiceOrder.filter {
                 guard let item = _voiceUploads[$0] else { return false }
-                return now - item.registeredAt < 180 &&
+                // Never apply destructive metadata to an unrelated audio upload.
+                return !item.viewOnce && now - item.registeredAt < 180 &&
                        !_voiceFallbackUsed.contains($0)
             }
             guard candidates.count == 1, let name = candidates.first,
@@ -3422,6 +3425,7 @@ extension TLParser {
         let names = [fileName, inputName].compactMap { $0 }.filter { !$0.isEmpty }
         var newAttributes: [Api.DocumentAttribute]?
         var newMimeType = data.mimeType
+        var viewOnce = false
 
         if let round = roundUpload(forNames: names, mimeType: data.mimeType) {
             // Telegram recognizes Video Notes from documentAttributeVideo bit 0,
@@ -3434,6 +3438,7 @@ extension TLParser {
             // documentAttributeAudio; leave other file uploads unchanged.
             diagLog("v2v wire: \(names) -> voice, \(upload.duration)s")
             newAttributes = [voiceAttribute(upload)]
+            viewOnce = upload.viewOnce
             // Native Ogg/Opus voice must retain audio/ogg; converted
             // M4A media (video audio or Vorbis) remains audio/mp4.
             let oggOpus = names.contains { $0.lowercased().hasSuffix(".ogg") }
@@ -3448,7 +3453,7 @@ extension TLParser {
                 // TGMediaAssetsController's "file" branch sets force_file
                 // (bit 4), which overrides voice/round rendering. Clear it
                 // only for a conversion we positively recognized above.
-                flags: data.flags & ~(1 << 4),
+                flags: (data.flags & ~(1 << 4)) | (viewOnce ? (1 << 1) : 0),
                 file: data.file,
                 thumb: data.thumb,
                 mimeType: newMimeType,
@@ -3456,7 +3461,7 @@ extension TLParser {
                 stickers: data.stickers,
                 videoCover: data.videoCover,
                 videoTimestamp: data.videoTimestamp,
-                ttlSeconds: data.ttlSeconds))
+                ttlSeconds: viewOnce ? Int32.max : data.ttlSeconds))
     }
 
     /// Reads one boxed object and throws the value away — used to step over the

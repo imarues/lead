@@ -62,6 +62,12 @@ static BOOL mxVideoToVoiceEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kVideoToVoice];
 }
 
+static NSString * const kMxVoiceOnceKey = @"LeadVideoToVoiceOnce";
+
+static BOOL mxVideoToVoiceOnceEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kMxVoiceOnceKey];
+}
+
 static BOOL mxVideoToNoteEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kVideoToNote];
 }
@@ -77,7 +83,7 @@ static NSString *mxVoiceCacheRoot(void) {
 // The file name carries a random suffix as well, because it is the only thing
 // that identifies this extraction once the request reaches the MTProto layer —
 // two clips called IMG_0740 would otherwise share one waveform.
-static NSURL *mxNewOutputURL(NSString *baseName) {
+static NSURL *mxNewOutputURL(NSString *baseName, BOOL once) {
     NSString *dir = [mxVoiceCacheRoot()
         stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     NSError *error = nil;
@@ -91,7 +97,8 @@ static NSURL *mxNewOutputURL(NSString *baseName) {
     }
     NSString *stem = baseName.length ? [baseName stringByDeletingPathExtension] : @"voice";
     NSString *tag = [[[NSUUID UUID] UUIDString] substringToIndex:8];
-    NSString *name = [NSString stringWithFormat:@"%@_%@.m4a", stem, tag];
+    NSString *name = once ? [NSString stringWithFormat:@"lead_once_%@.m4a", [[NSUUID UUID] UUIDString]]
+                          : [NSString stringWithFormat:@"%@_%@.m4a", stem, tag];
     return [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]];
 }
 
@@ -287,14 +294,14 @@ static CMTimeRange mxTrimRange(id editingContext, id item, AVAsset *asset) {
 
 /// Exports the audio track as m4a. Returns nil and leaves the video untouched
 /// on any failure, including a video that has no audio at all.
-static NSURL *mxExtractAudio(AVAsset *asset, CMTimeRange range, NSString *baseName) {
+static NSURL *mxExtractAudio(AVAsset *asset, CMTimeRange range, NSString *baseName, BOOL once) {
     if ([asset tracksWithMediaType:AVMediaTypeAudio].count == 0) {
         mxDiag("v2v: source has no audio track");
         MxShowToast([MxLocalization localizedStringForKey:@"VIDEO_TO_VOICE_NO_AUDIO"]);
         return nil;
     }
 
-    NSURL *output = mxNewOutputURL(baseName);
+    NSURL *output = mxNewOutputURL(baseName, once);
     if (!output) return nil;
 
     AVAssetExportSession *session =
@@ -353,7 +360,7 @@ static NSURL *mxExtractAudio(AVAsset *asset, CMTimeRange range, NSString *baseNa
 
 /// Turns a video item description into an audio-file item description.
 /// Returns nil when the item is not a video we can handle, meaning "send as-is".
-static NSDictionary *mxRewriteToVoice(id anyDict, id editingContext) {
+static NSDictionary *mxRewriteToVoice(id anyDict, id editingContext, BOOL once) {
     if (![anyDict isKindOfClass:[NSDictionary class]]) return nil;
     NSDictionary *dict = anyDict;
 
@@ -376,7 +383,7 @@ static NSDictionary *mxRewriteToVoice(id anyDict, id editingContext) {
     if ([item respondsToSelector:@selector(fileName)]) baseName = [item fileName];
     if (!baseName.length) baseName = dict[@"fileName"];
 
-    NSURL *audioURL = mxExtractAudio(asset, range, baseName);
+    NSURL *audioURL = mxExtractAudio(asset, range, baseName, once);
     if (!audioURL) return nil;
 
     NSMutableDictionary *rewritten = [dict mutableCopy];
@@ -384,6 +391,12 @@ static NSDictionary *mxRewriteToVoice(id anyDict, id editingContext) {
     rewritten[@"tempFileUrl"] = audioURL;
     rewritten[@"mimeType"] = @"audio/mp4";
     rewritten[@"fileName"] = audioURL.lastPathComponent;
+    if (once) {
+        // View-once voice must be a standalone send, never an album.
+        [rewritten removeObjectForKey:@"groupedId"];
+        [rewritten removeObjectForKey:@"price"];
+        rewritten[@"timer"] = @2147483647;
+    }
     // Keys that only mean something for a video would otherwise steer the
     // generator back into its video branch.
     [rewritten removeObjectForKey:@"asset"];
@@ -642,6 +655,7 @@ static NSDictionary *mxRewriteToRoundVideo(id anyDict, id editingContext,
 
 #define kMxVoiceButtonTag 8877
 #define kMxNoteButtonTag 8878
+#define kMxVoiceOnceButtonTag 8879
 static const CGFloat kMxVoiceButtonSide = 40.0;
 
 static const void *kMxItemIsVideoKey = &kMxItemIsVideoKey;
@@ -674,6 +688,16 @@ static void mxStyleVoiceButton(UIButton *button, BOOL enabled) {
                                      : [UIColor colorWithWhite:0.0 alpha:0.5];
 }
 
+static void mxStyleVoiceOnceButton(UIButton *button, BOOL enabled) {
+    if (!button) return;
+    UIImage *icon = [UIImage systemImageNamed:@"1.circle"];
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:21 weight:UIImageSymbolWeightSemibold];
+    if (cfg && icon) icon = [icon imageByApplyingSymbolConfiguration:cfg];
+    [button setImage:icon forState:UIControlStateNormal];
+    button.tintColor = UIColor.whiteColor;
+    button.backgroundColor = enabled ? UIColor.systemBlueColor : [UIColor colorWithWhite:0.0 alpha:0.5];
+}
+
 static void mxStyleNoteButton(UIButton *button, BOOL enabled) {
     if (!button) return;
     UIImage *icon = [UIImage systemImageNamed:@"video.circle"];
@@ -704,9 +728,11 @@ static void mxStyleNoteButton(UIButton *button, BOOL enabled) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     BOOL enabled = ![defaults boolForKey:kVideoToVoice];
     [defaults setBool:enabled forKey:kVideoToVoice];
+    [defaults setBool:NO forKey:kMxVoiceOnceKey];
     [defaults setBool:NO forKey:kVideoToNote];
     mxStoreNoteCrop(CGPointMake(0.5, 0.5), 1.0, nil);
     mxStyleVoiceButton(sender, enabled);
+    mxStyleVoiceOnceButton((UIButton *)[sender.superview viewWithTag:kMxVoiceOnceButtonTag], NO);
     mxStyleNoteButton((UIButton *)[sender.superview viewWithTag:kMxNoteButtonTag], NO);
     mxDiag("v2v: preview toggle -> %d", enabled);
 
@@ -715,6 +741,22 @@ static void mxStyleNoteButton(UIButton *button, BOOL enabled) {
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc]
         initWithStyle:UIImpactFeedbackStyleMedium];
+    [haptic impactOccurred];
+}
+
+- (void)handleVoiceOnceTap:(UIButton *)sender {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL enabled = !mxVideoToVoiceOnceEnabled();
+    [defaults setBool:enabled forKey:kMxVoiceOnceKey];
+    [defaults setBool:NO forKey:kVideoToVoice];
+    [defaults setBool:NO forKey:kVideoToNote];
+    mxStoreNoteCrop(CGPointMake(0.5, 0.5), 1.0, nil);
+    mxStyleVoiceOnceButton(sender, enabled);
+    mxStyleVoiceButton((UIButton *)[sender.superview viewWithTag:kMxVoiceButtonTag], NO);
+    mxStyleNoteButton((UIButton *)[sender.superview viewWithTag:kMxNoteButtonTag], NO);
+    BOOL ar = [[NSLocale preferredLanguages].firstObject hasPrefix:@"ar"];
+    MxShowToast(enabled ? (ar ? @"فويس للاستماع مرة واحدة" : @"View-once voice enabled") : (ar ? @"تم إلغاء الفويس لمرة واحدة" : @"View-once voice disabled"));
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [haptic impactOccurred];
 }
 
@@ -739,9 +781,11 @@ static void mxStyleNoteButton(UIButton *button, BOOL enabled) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         [defaults setBool:YES forKey:kVideoToNote];
         [defaults setBool:NO forKey:kVideoToVoice];
+        [defaults setBool:NO forKey:kMxVoiceOnceKey];
         UIView *view = weakGallery;
         mxStyleNoteButton((UIButton *)[view viewWithTag:kMxNoteButtonTag], YES);
         mxStyleVoiceButton((UIButton *)[view viewWithTag:kMxVoiceButtonTag], NO);
+        mxStyleVoiceOnceButton((UIButton *)[view viewWithTag:kMxVoiceOnceButtonTag], NO);
         MxShowToast([MxLocalization localizedStringForKey:@"VIDEO_TO_NOTE_ON_TOAST"]);
         UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc]
             initWithStyle:UIImpactFeedbackStyleMedium];
@@ -831,10 +875,12 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
     BOOL isVideo = [objc_getAssociatedObject(interfaceView, kMxItemIsVideoKey) boolValue];
     UIButton *button = (UIButton *)[interfaceView viewWithTag:kMxVoiceButtonTag];
     UIButton *noteButton = (UIButton *)[interfaceView viewWithTag:kMxNoteButtonTag];
+    UIButton *onceButton = (UIButton *)[interfaceView viewWithTag:kMxVoiceOnceButtonTag];
 
     if (!isVideo) {
         button.hidden = YES;
         noteButton.hidden = YES;
+        onceButton.hidden = YES;
         return;
     }
 
@@ -847,6 +893,16 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
                    action:@selector(handleTap:)
          forControlEvents:UIControlEventTouchUpInside];
         [interfaceView addSubview:button];
+    }
+
+    if (!onceButton) {
+        onceButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        onceButton.tag = kMxVoiceOnceButtonTag;
+        onceButton.layer.cornerRadius = kMxVoiceButtonSide / 2.0;
+        onceButton.clipsToBounds = YES;
+        onceButton.accessibilityLabel = [[NSLocale preferredLanguages].firstObject hasPrefix:@"ar"] ? @"تحويل الفيديو إلى فويس لمرة واحدة" : @"Convert video to view-once voice";
+        [onceButton addTarget:[MxVoiceToggleTarget shared] action:@selector(handleVoiceOnceTap:) forControlEvents:UIControlEventTouchUpInside];
+        [interfaceView addSubview:onceButton];
     }
 
     if (!noteButton) {
@@ -863,18 +919,22 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
 
     button.hidden = NO;
     noteButton.hidden = NO;
+    onceButton.hidden = NO;
+    mxStyleVoiceOnceButton(onceButton, mxVideoToVoiceOnceEnabled());
     mxStyleVoiceButton(button, mxVideoToVoiceEnabled());
     mxStyleNoteButton(noteButton, mxVideoToNoteEnabled());
     CGRect voiceFrame = mxVoiceButtonFrame(interfaceView);
-    CGRect noteFrame = CGRectOffset(voiceFrame, 0, kMxVoiceButtonSide + 8.0);
+    CGFloat step = kMxVoiceButtonSide + 8.0;
     UIEdgeInsets safe = interfaceView.safeAreaInsets;
-    if (CGRectGetMaxY(noteFrame) > CGRectGetHeight(interfaceView.bounds) - safe.bottom - 8.0) {
-        noteFrame.origin.y = MAX(safe.top + 5.0,
-                                CGRectGetMinY(voiceFrame) - kMxVoiceButtonSide - 8.0);
+    CGFloat bottom = CGRectGetHeight(interfaceView.bounds) - safe.bottom - 8.0;
+    if (CGRectGetMaxY(voiceFrame) + 2 * step > bottom) {
+        voiceFrame.origin.y = MAX(safe.top + 5.0, bottom - kMxVoiceButtonSide - 2 * step);
     }
     button.frame = voiceFrame;
-    noteButton.frame = noteFrame;
+    onceButton.frame = CGRectOffset(voiceFrame, 0, step);
+    noteButton.frame = CGRectOffset(voiceFrame, 0, 2 * step);
     [interfaceView bringSubviewToFront:button];
+    [interfaceView bringSubviewToFront:onceButton];
     [interfaceView bringSubviewToFront:noteButton];
 
 #if MX_DIAG
@@ -903,6 +963,7 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
     if (!objc_getAssociatedObject(self, kMxGalleryModeInitializedKey)) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         [defaults setBool:NO forKey:kVideoToVoice];
+        [defaults setBool:NO forKey:kMxVoiceOnceKey];
         [defaults setBool:NO forKey:kVideoToNote];
         objc_setAssociatedObject(self, kMxGalleryModeInitializedKey, @YES,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -914,6 +975,7 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
         (!previousKey.length || ![previousKey isEqualToString:newKey])) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         [defaults setBool:NO forKey:kVideoToVoice];
+        [defaults setBool:NO forKey:kMxVoiceOnceKey];
         [defaults setBool:NO forKey:kVideoToNote];
         mxStoreNoteCrop(CGPointMake(0.5, 0.5), 1.0, nil);
     }
@@ -939,6 +1001,9 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
 // Only points genuinely inside the button are claimed here; everything else
 // goes to the original.
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIButton *onceButton = (UIButton *)[self viewWithTag:kMxVoiceOnceButtonTag];
+    if (onceButton && !onceButton.hidden && onceButton.alpha > 0.01 &&
+        [onceButton pointInside:[self convertPoint:point toView:onceButton] withEvent:event]) return onceButton;
     UIButton *noteButton = (UIButton *)[self viewWithTag:kMxNoteButtonTag];
     if (noteButton && !noteButton.hidden && noteButton.alpha > 0.01) {
         if ([noteButton pointInside:[self convertPoint:point toView:noteButton] withEvent:event]) {
@@ -967,7 +1032,8 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
                          descriptionGenerator:(MxDescriptionGenerator)descriptionGenerator
                              saveEditedPhotos:(bool)saveEditedPhotos {
     BOOL noteMode = mxVideoToNoteEnabled();
-    BOOL voiceMode = mxVideoToVoiceEnabled();
+    BOOL onceMode = mxVideoToVoiceOnceEnabled();
+    BOOL voiceMode = mxVideoToVoiceEnabled() || onceMode;
     if ((!voiceMode && !noteMode) || !descriptionGenerator) return %orig;
     // Freeze mode and crop for this send; the gallery may close while exporting.
     NSDictionary *noteSelection = noteMode ? mxNoteCropSnapshot() : nil;
@@ -982,11 +1048,15 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
             @try {
                 rewritten = noteMode
                     ? mxRewriteToRoundVideo(dict, editingContext, crop, zoom, chosenAsset)
-                    : mxRewriteToVoice(dict, editingContext);
+                    : mxRewriteToVoice(dict, editingContext, onceMode);
             } @catch (NSException *e) {
                 mxDiag("v2v: rewrite threw — %{public}s", e.reason.UTF8String ?: "?");
             }
-            return descriptionGenerator(rewritten ?: dict, caption, hash, uniqueId);
+            if (onceMode && !rewritten) {
+                // Do not silently send the original video if extraction fails.
+                return descriptionGenerator(@{}, nil, hash, uniqueId);
+            }
+            return descriptionGenerator(rewritten ?: dict, onceMode ? nil : caption, hash, uniqueId);
         };
 
     return %orig(selectionContext, editingContext, intent, currentItem, storeAssets,
