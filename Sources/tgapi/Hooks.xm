@@ -1,6 +1,7 @@
 #import "Headers.h"
 #include <zlib.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 static char kLeadPromoParserKey;
 
 // Forward declaration — defined later in this file, used inside hooked_block
@@ -58,6 +59,25 @@ static CFAbsoluteTime sLeadLoadTime = 0;
 // Auto proxy (UI/LeadAutoProxy.m).
 extern "C" id LeadAutoProxyCurrentSettings(void);
 extern "C" void LeadAutoProxyRememberContext(id context);
+extern "C" BOOL LeadCallSignalingBegin(id service);
+extern "C" void LeadCallSignalingEnd(void);
+static char kLeadCallRequestPrepared;
+
+static BOOL LeadIsCallStartRPC(uint32_t f, id metadata) {
+  switch (f) {
+    case 0x42ff96ed: case 0x3bd2b4a0: case 0x2efe1722:
+    case 0x48cdc6d8: case 0x8fb53057: case 0xcbea6bc4: return YES;
+  }
+  NSString *name = [metadata description];
+  return [name containsString:@"phone.requestCall"] || [name containsString:@"phone.acceptCall"] ||
+         [name containsString:@"phone.confirmCall"] || [name containsString:@"phone.joinGroupCall"] ||
+         [name containsString:@"phone.createGroupCall"];
+}
+static BOOL LeadIsCallEndRPC(uint32_t f, id metadata) {
+  if (f == 0xb2cbc1c0 || f == 0x500377f9 || f == 0x7a777135) return YES;
+  NSString *name = [metadata description];
+  return [name containsString:@"phone.discardCall"] || ([name containsString:@"phone.leaveGroupCall"] && ![name containsString:@"Presentation"]) || [name containsString:@"phone.discardGroupCall"];
+}
 
 extern "C" long long LeadNetworkHookActivity(void) {
   return sLeadNetworkRequests;
@@ -167,6 +187,7 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
 // one, is returned untouched; otherwise the Auto Proxy choice (nil when it is off).
 - (id)socksProxySettings {
   id original = %orig;
+  if ([NSThread.currentThread.threadDictionary[@"LeadRawProxyRead"] boolValue]) return original;
   return original ?: LeadAutoProxyCurrentSettings();
 }
 
@@ -351,6 +372,48 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
   // File transfers have services of their own, on other data centers, and those can't
   // take account calls. Online status comes only from the account in use.
   int32_t requestFunction = request.functionID.intValue;
+  uint32_t callFunction = (uint32_t)requestFunction;
+  BOOL startCall = LeadIsCallStartRPC(callFunction, request.metadata);
+  // Scheduled group creation is not a live join.
+  if (callFunction == 0x48cdc6d8 && request.payload.length >= 8) {
+    uint32_t flags = 0;
+    [request.payload getBytes:&flags range:NSMakeRange(4, 4)];
+    if (flags & 2) startCall = NO;
+  }
+  if (startCall && !objc_getAssociatedObject(request, &kLeadCallRequestPrepared)) {
+    objc_setAssociatedObject(request, &kLeadCallRequestPrepared, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (LeadCallSignalingBegin(self)) {
+      void (^finish)(id, MTRequestResponseInfo *, MTRpcError *) = request.completed;
+      request.completed = ^(id result, MTRequestResponseInfo *info, MTRpcError *error) {
+        if (error) LeadCallSignalingEnd();
+        if (finish) finish(result, info, error);
+      };
+      // MTContext publishes new environments asynchronously. Its queued update
+      // enqueues MTProto's reset before we enqueue the first call request.
+      Class contextClass = NSClassFromString(@"MTContext");
+      SEL queueSelector = NSSelectorFromString(@"contextQueue");
+      SEL dispatchSelector = NSSelectorFromString(@"dispatchOnQueue:");
+      if ([contextClass respondsToSelector:queueSelector]) {
+        id contextQueue = ((id (*)(id, SEL))objc_msgSend)(contextClass, queueSelector);
+        if ([contextQueue respondsToSelector:dispatchSelector]) {
+          __weak MTRequestMessageService *service = self;
+          void (^submit)(void) = ^{
+            [service addRequest:request];
+          };
+          ((void (*)(id, SEL, id))objc_msgSend)(contextQueue, dispatchSelector, submit);
+          return;
+        }
+      }
+    }
+  }
+  if (LeadIsCallEndRPC(callFunction, request.metadata) && !objc_getAssociatedObject(request, &kLeadCallRequestPrepared)) {
+    objc_setAssociatedObject(request, &kLeadCallRequestPrepared, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    void (^finish)(id, MTRequestResponseInfo *, MTRpcError *) = request.completed;
+    request.completed = ^(id result, MTRequestResponseInfo *info, MTRpcError *error) {
+      LeadCallSignalingEnd();
+      if (finish) finish(result, info, error);
+    };
+  }
   if (requestFunction == kHelpGetPromoData && request.completed && request.responseParser) {
     NSString *proxy = LeadListedProxyForService(self);
     if (proxy) {

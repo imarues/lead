@@ -70,7 +70,13 @@ static void LeadDetachGroupProxy(id context) {
       }
     }
   }
-  return %orig(version, customParameters, queue, proxy, networkType, dataSaving, derivedState, key, isOutgoing, connections, maxLayer, allowP2P, allowTCP, enableStunMarking, logPath, statsLogPath, sendSignalingData, videoCapturer, preferredVideoCodec, audioInputDeviceId, audioDevice, directConnection);
+  id context = %orig(version, customParameters, queue, proxy, networkType, dataSaving, derivedState, key, isOutgoing, connections, maxLayer, allowP2P, allowTCP, enableStunMarking, logPath, statsLogPath, sendSignalingData, videoCapturer, preferredVideoCodec, audioInputDeviceId, audioDevice, directConnection);
+  if (context) LeadAttachGroupProxy(context);
+  return context;
+}
+- (void)stop:(id)completion {
+  %orig(completion);
+  LeadDetachGroupProxy(self);
 }
 %end
 %end

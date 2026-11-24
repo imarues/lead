@@ -286,11 +286,9 @@ static NSString *LeadProxyFirstReachable(NSArray<NSString *> *links) {
   return LeadProxyReachableLinks(links).firstObject;
 }
 
-// Called by the native VoIP initializer, not by MtProtoKit. No blocking I/O.
-// Advance to another server on each new call; prefer the last probed reachable pool.
-NSDictionary *LeadCallProxyNext(void) {
+// Both signaling and native media must use the same selected server during a call.
+static NSDictionary *LeadCallProxyChoose(void) {
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-  if (![defaults boolForKey:kAutoProxy]) return nil;
   NSArray<NSString *> *configured = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
   if (!configured.count) return nil;
   NSMutableArray<NSString *> *reachable = [NSMutableArray array];
@@ -323,6 +321,16 @@ static NSObject *LeadProxyLock(void) {
 // Temporary managed signaling override for native group calls; never persisted.
 static id sLeadGroupProxySettings = nil;
 static NSUInteger sLeadGroupProxyUsers = 0;
+static BOOL sLeadCallRPCActive = NO;
+static NSUInteger sLeadCallEpoch = 0;
+static NSDictionary *sLeadCallProxyInfo = nil;
+// Keep manual settings for each context, including an explicit nil.
+static NSMapTable *sLeadCallPrevious = nil;
+NSDictionary *LeadCallProxyNext(void) {
+  @synchronized(LeadProxyLock()) {
+    return sLeadCallProxyInfo ?: LeadCallProxyChoose();
+  }
+}
 static id sLeadProxySettings = nil;               // MTSocksProxySettings in use, nil = off
 static NSString *sLeadProxyLink = nil;            // canonical link behind it
 static NSDictionary *sLeadProxyInfo = nil;        // parsed form of that link
@@ -370,7 +378,6 @@ static BOOL LeadProxyActivate(NSString *link) {
 
 static void LeadProxyDeactivate(void) {
   @synchronized(LeadProxyLock()) {
-    sLeadGroupProxySettings = nil;
     sLeadProxySettings = nil;
     sLeadProxyLink = nil;
     sLeadProxyInfo = nil;
@@ -387,7 +394,7 @@ static void LeadProxyActivateCached(void) {
 
 id LeadAutoProxyCurrentSettings(void) {
   @synchronized(LeadProxyLock()) {
-    return sLeadGroupProxySettings ?: sLeadProxySettings;
+    return sLeadProxySettings;
   }
 }
 
@@ -419,8 +426,9 @@ void LeadAutoProxyRememberContext(id context) {
 
 NSString *LeadAutoProxySummary(void) {
   @synchronized(LeadProxyLock()) {
-    NSDictionary *p = sLeadProxyInfo;
-    return p ? [NSString stringWithFormat:@"%@:%@", p[@"server"], p[@"port"]] : nil;
+    NSDictionary *p = sLeadCallProxyInfo ?: sLeadProxyInfo;
+    if (!p) return nil;
+    return [NSString stringWithFormat:@"%@%@:%@", sLeadCallProxyInfo ? @"Call · " : @"", p[@"server"], p[@"port"]];
   }
 }
 
@@ -436,46 +444,112 @@ static BOOL LeadProxyPushToContexts(void) {
     if (![context respondsToSelector:update]) continue;
     id (^block)(id) = ^id(id environment) {
       if (!environment || ![environment respondsToSelector:withProxy]) return nil;
-      id ours = LeadAutoProxyCurrentSettings();
+      // Read the real property, not the fallback injected by Hooks.xm.
+      NSMutableDictionary *thread = NSThread.currentThread.threadDictionary;
+      id oldFlag = thread[@"LeadRawProxyRead"];
+      thread[@"LeadRawProxyRead"] = @YES;
       id current = nil;
-      @try { current = [environment valueForKey:@"socksProxySettings"]; } @catch (__unused NSException *e) { return nil; }
-      BOOL currentIsOurs;
-      @synchronized(LeadProxyLock()) { currentIsOurs = current && [sLeadProxyOwn containsObject:current]; }
-      // A proxy Telegram set up itself is the user's choice; leave it alone.
-      if (current && !currentIsOurs) return nil;
-      return ((id (*)(id, SEL, id))objc_msgSend)(environment, withProxy, ours);
+      @try { current = [environment valueForKey:@"socksProxySettings"]; }
+      @catch (__unused NSException *e) { return nil; }
+      @finally {
+        if (oldFlag) thread[@"LeadRawProxyRead"] = oldFlag;
+        else [thread removeObjectForKey:@"LeadRawProxyRead"];
+      }
+      id desired = nil;
+      @synchronized(LeadProxyLock()) {
+        BOOL currentIsOurs = current && [sLeadProxyOwn containsObject:current];
+        if (sLeadGroupProxySettings) {
+          if (!sLeadCallPrevious) sLeadCallPrevious = [NSMapTable weakToStrongObjectsMapTable];
+          if (![sLeadCallPrevious objectForKey:context]) {
+            [sLeadCallPrevious setObject:(current && !currentIsOurs ? current : NSNull.null) forKey:context];
+          }
+          desired = sLeadGroupProxySettings;
+        } else {
+          id previous = [sLeadCallPrevious objectForKey:context];
+          if (previous) {
+            [sLeadCallPrevious removeObjectForKey:context];
+            // Restore explicit manual choice; otherwise the current ordinary auto choice.
+            desired = previous == NSNull.null ? sLeadProxySettings : previous;
+          } else {
+            if (current && !currentIsOurs) return nil;
+            desired = sLeadProxySettings;
+          }
+        }
+      }
+      if (current == desired || (current && [current isEqual:desired])) return nil;
+      return ((id (*)(id, SEL, id))objc_msgSend)(environment, withProxy, desired);
     };
     ((void (*)(id, SEL, id))objc_msgSend)(context, update, block);
   }
   return YES;
 }
 
-// Lifecycle is serialized on the main queue. The normal proxy remains in its
-// own slot, and is restored on the last group context stopping/deallocating.
-// This only reroutes managed MTProto signaling and broadcast parts, NOT the
-// independent group WebRTC media sockets. A manually configured Telegram
-// proxy remains untouched, as in the rest of Auto Proxy.
-void LeadGroupCallProxyBegin(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{
-    if (++sLeadGroupProxyUsers != 1 || !LeadProxyEnabled()) return;
-    NSDictionary *p = LeadCallProxyNext();
+// RPC entry points run before the outgoing request; native contexts keep the
+// same selected server alive. Only normal MTProto routing is restored afterward.
+static BOOL LeadEnsureCallProxy(void) {
+  @synchronized(LeadProxyLock()) {
+    if (sLeadGroupProxySettings) return YES;
+    NSDictionary *p = LeadCallProxyChoose();
     id settings = p ? LeadProxyMakeSettings(p) : nil;
-    if (!settings) return;
-    @synchronized(LeadProxyLock()) {
-      if (!sLeadProxyOwn) sLeadProxyOwn = [NSHashTable weakObjectsHashTable];
-      [sLeadProxyOwn addObject:settings];
-      sLeadGroupProxySettings = settings;
+    if (!settings) return NO;
+    if (!sLeadProxyOwn) sLeadProxyOwn = [NSHashTable weakObjectsHashTable];
+    [sLeadProxyOwn addObject:settings];
+    sLeadGroupProxySettings = settings;
+    sLeadCallProxyInfo = p;
+    NSLog(@"[Kira] Call route SOCKS5 %@:%@", p[@"server"], p[@"port"]);
+    return YES;
+  }
+}
+static void LeadRestoreCallProxyIfIdle(void) {
+  BOOL changed = NO;
+  @synchronized(LeadProxyLock()) {
+    if (!sLeadCallRPCActive && !sLeadGroupProxyUsers && sLeadGroupProxySettings) {
+      sLeadGroupProxySettings = nil;
+      sLeadCallProxyInfo = nil;
+      changed = YES;
     }
-    LeadProxyPushToContexts();
-    NSLog(@"[Kira] Group signaling SOCKS5 %@:%@", p[@"server"], p[@"port"]);
+  }
+  if (changed) LeadProxyPushToContexts();
+}
+BOOL LeadCallSignalingBegin(id service) {
+  @try {
+    id context = [service valueForKey:@"context"];
+    if (context) LeadAutoProxyRememberContext(context);
+  } @catch (__unused NSException *e) {}
+  NSUInteger epoch;
+  @synchronized(LeadProxyLock()) {
+    if (!LeadEnsureCallProxy()) return NO;
+    sLeadCallRPCActive = YES;
+    epoch = ++sLeadCallEpoch;
+  }
+  LeadProxyPushToContexts();
+  // An abandoned pre-connect attempt must not leave a SOCKS5 override forever.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150LL * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    @synchronized(LeadProxyLock()) {
+      if (epoch != sLeadCallEpoch || sLeadGroupProxyUsers) return;
+      sLeadCallRPCActive = NO;
+    }
+    LeadRestoreCallProxyIfIdle();
   });
+  return YES;
+}
+void LeadCallSignalingEnd(void) {
+  @synchronized(LeadProxyLock()) { sLeadCallRPCActive = NO; ++sLeadCallEpoch; }
+  LeadRestoreCallProxyIfIdle();
+}
+void LeadGroupCallProxyBegin(void) {
+  @synchronized(LeadProxyLock()) {
+    ++sLeadGroupProxyUsers;
+    if (!LeadEnsureCallProxy()) return;
+  }
+  LeadProxyPushToContexts();
 }
 void LeadGroupCallProxyEnd(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{
-    if (sLeadGroupProxyUsers == 0 || --sLeadGroupProxyUsers != 0) return;
-    @synchronized(LeadProxyLock()) { sLeadGroupProxySettings = nil; }
-    LeadProxyPushToContexts();
-  });
+  @synchronized(LeadProxyLock()) {
+    if (sLeadGroupProxyUsers) --sLeadGroupProxyUsers;
+    if (!sLeadGroupProxyUsers) { sLeadCallRPCActive = NO; ++sLeadCallEpoch; }
+  }
+  LeadRestoreCallProxyIfIdle();
 }
 
 #pragma mark - Refresh
