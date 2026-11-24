@@ -62,6 +62,15 @@ extern "C" void LeadAutoProxyRememberContext(id context);
 extern "C" BOOL LeadCallSignalingBegin(id service);
 extern "C" void LeadCallSignalingEnd(void);
 static char kLeadCallRequestPrepared;
+static char kLeadPendingCallRequests;
+static NSMapTable *LeadPendingCallMap(id service, BOOL create) {
+  NSMapTable *map = objc_getAssociatedObject(service, &kLeadPendingCallRequests);
+  if (!map && create) {
+    map = [NSMapTable strongToStrongObjectsMapTable];
+    objc_setAssociatedObject(service, &kLeadPendingCallRequests, map, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  return map;
+}
 
 static BOOL LeadIsCallStartRPC(uint32_t f, id metadata) {
   switch (f) {
@@ -362,6 +371,21 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
         // Manager which handles requests
         %hook MTRequestMessageService
 
+- (void)removeRequestByInternalId:(id)internalId askForReconnectionOnDrop:(bool)reconnect {
+  BOOL cancelled = NO;
+  if (internalId) {
+    @synchronized(self) {
+      NSMapTable *pending = LeadPendingCallMap(self, NO);
+      if ([pending objectForKey:internalId]) {
+        [pending removeObjectForKey:internalId];
+        cancelled = YES;
+      }
+    }
+  }
+  if (cancelled) LeadCallSignalingEnd();
+  %orig(internalId, reconnect);
+}
+
     - (void)addRequest : (MTRequest *)request {
   if (LeadIsNotificationExtensionProcess()) {
     %orig;
@@ -396,12 +420,24 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
       if ([contextClass respondsToSelector:queueSelector]) {
         id contextQueue = ((id (*)(id, SEL))objc_msgSend)(contextClass, queueSelector);
         if ([contextQueue respondsToSelector:dispatchSelector]) {
-          __weak MTRequestMessageService *service = self;
-          void (^submit)(void) = ^{
-            [service addRequest:request];
-          };
-          ((void (*)(id, SEL, id))objc_msgSend)(contextQueue, dispatchSelector, submit);
-          return;
+          id requestId = nil;
+          @try { requestId = [request valueForKey:@"internalId"]; } @catch (__unused NSException *e) {}
+          if (requestId) {
+            @synchronized(self) { [LeadPendingCallMap(self, YES) setObject:request forKey:requestId]; }
+            __weak MTRequestMessageService *service = self;
+            void (^submit)(void) = ^{
+              MTRequestMessageService *strongService = service;
+              if (!strongService) { LeadCallSignalingEnd(); return; }
+              @synchronized(strongService) {
+                NSMapTable *pending = LeadPendingCallMap(strongService, NO);
+                if ([pending objectForKey:requestId] != request) return;
+                [pending removeObjectForKey:requestId];
+                [strongService addRequest:request];
+              }
+            };
+            ((void (*)(id, SEL, id))objc_msgSend)(contextQueue, dispatchSelector, submit);
+            return;
+          }
         }
       }
     }
