@@ -776,15 +776,14 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   LeadRow *warp = [LeadRow link:@"UI_WARP_BYPASS" symbol:@"lock.shield" tap:^(UIViewController *host) {
     LeadWarpShow(host);
   }];
-  warp.style = LeadRowStyleAction;
+  warp.style = LeadRowStyleLink;
   warp.valueBlock = ^NSString * { return LeadWarpStatus(); };
-  LeadSection *proxySection = [LeadSection title:nil rows:@[ autoProxy, proxyStatus, proxyRotate ]];
-  LeadSection *warpSection = [LeadSection title:nil rows:@[ warp ]];
+  LeadSection *proxySection = [LeadSection title:nil rows:@[ warp, autoProxy, proxyStatus, proxyRotate ]];
 
   LeadPage *proxy = [LeadPage new];
   proxy.titleKey = @"UI_PAGE_PROXY";
   proxy.symbol = @"network";
-  proxy.sections = @[ proxySection, warpSection ];
+  proxy.sections = @[ proxySection ];
 
   // Direct-launch page: independent of the existing Anti-Edit / message log.
   LeadPage *discovery = [LeadPage new];
