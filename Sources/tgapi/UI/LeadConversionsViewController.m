@@ -1,4 +1,4 @@
-// Lead Conversions: Photos -> PDF, and PDF -> high quality images.
+// Kira Conversions: Photos -> PDF, and PDF -> high quality images.
 // Local-only conversion; explicit sharing or Saved Messages upload by user.
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
@@ -432,7 +432,7 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
         @autoreleasepool {
             NSString *failed=nil;
             UIGraphicsBeginPDFContextToFile(dest.path,page,@{
-                (__bridge NSString *)kCGPDFContextCreator:@"Lead Conversions"
+                (__bridge NSString *)kCGPDFContextCreator:@"Kira Conversions"
             });
             for(NSURL *url in images) {
                 @autoreleasepool {

@@ -1,5 +1,3 @@
-# Build request
+# Kira build
 
-Build the latest `feature/virtual-media-call-test` source (including direct Saved Messages upload, virtual video media and call recording) with the existing GitHub Actions Build workflow.
-
-This file only requests a build and does not change application behavior. The updated audio C++ atomics import is included in the branch.
+`main` is the full call-recording branch snapshot, with virtual call video/audio injection removed. Normal calls and manually initiated call recording are preserved. Build with the existing workflow; the product is `Kira.dylib`.

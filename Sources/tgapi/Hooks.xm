@@ -617,7 +617,7 @@ static NSData *stripIosRestrictionRules(NSData *data) {
   if (data && data.length >= 4) {
     int32_t ctor = 0;
     memcpy(&ctor, data.bytes, 4);
-    // customLog2(@"[Lead] parseMessage: len=%lu ctor=0x%08X", (unsigned
+    // customLog2(@"[Kira] parseMessage: len=%lu ctor=0x%08X", (unsigned
     // long)data.length, (uint32_t)ctor);
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -666,7 +666,7 @@ static NSData *stripIosRestrictionRules(NSData *data) {
       NSData *strippedData =
           [NSClassFromString(@"TLParser") stripAntiSelfDestruct:uncompressed];
       if (strippedData) {
-        customLog2(@"[Lead] parseMessage: PATCHED UPDATE PAYLOAD");
+        customLog2(@"[Kira] parseMessage: PATCHED UPDATE PAYLOAD");
         if ([TLParser diagEnabled]) {
           [TLParser diagLog:[NSString stringWithFormat:@"UPDATE patched len=%lu", (unsigned long)uncompressed.length]];
         }

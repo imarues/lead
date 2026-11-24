@@ -248,7 +248,7 @@ static BOOL leadGroupHooksInstalled=NO;
     }
     if(![[NSUserDefaults standardUserDefaults] boolForKey:LeadCallRecordingEnabledKey]) {
         UIAlertController *off=[UIAlertController alertControllerWithTitle:@"تسجيل المكالمات"
-         message:@"فعّل تسجيل المكالمات من Lead ← المكالمات أولاً."
+         message:@"فعّل تسجيل المكالمات من Kira ← المكالمات أولاً."
          preferredStyle:UIAlertControllerStyleAlert];
         [off addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
         [LeadTopPresenter() presentViewController:off animated:YES completion:nil];

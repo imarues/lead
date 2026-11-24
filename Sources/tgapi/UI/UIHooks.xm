@@ -583,7 +583,7 @@ void showUI() {
     UIView *pv = parent.view;
     if (pv && ![pv.gestureRecognizers containsObject:parent.leadLongPressGesture]) {
         [pv addGestureRecognizer:parent.leadLongPressGesture];
-        customLog2(@"[Lead] gesture attached: %@", label);
+        customLog2(@"[Kira] gesture attached: %@", label);
     }
 }
 
@@ -674,9 +674,9 @@ void showUI() {
 //         cv.clipsToBounds = NO;
 // 
 //         [cv addSubview:leadBtn];
-//         customLog2(@"[Lead] shield button injected h=%.0f", h);
+//         customLog2(@"[Kira] shield button injected h=%.0f", h);
 //     } @catch (NSException *e) {
-//         customLog2(@"[Lead] shield inject error: %@", e);
+//         customLog2(@"[Kira] shield inject error: %@", e);
 //     }
 // }
 // 
@@ -731,12 +731,12 @@ static void injectBadgeToNode(ASDisplayNode *textNode, ASDisplayNode *headerNode
 
         // Add your IDs here
         if (peerId == 5576711589 || peerId == 7846965839) {
-            prefix = @"👑 Lead Owner";
+            prefix = @"👑 Kira Owner";
             badgeColor = [UIColor colorWithRed:1.0 green:0.75 blue:0.0 alpha:1.0]; // Gold
         } else {
             NSNumber *currId = [NSClassFromString(@"TLParser") performSelector:@selector(getCurrentUserId)];
             if (currId && [currId longLongValue] == peerId) {
-                prefix = @"✨ Lead User";
+                prefix = @"✨ Kira User";
             }
         }
         
@@ -1656,7 +1656,7 @@ static void LeadInterceptPeerInfoPress(id node,SEL selector,IMP original) {
         }
     };
     if(LeadPresentCallChoice(title,YES,dial)) {
-        NSLog(@"[Lead] intercepted Telegram profile video call button: %@",title);
+        NSLog(@"[Kira] intercepted Telegram profile video call button: %@",title);
         return;
     }
     ((void(*)(id,SEL))original)(node,selector);
@@ -1674,7 +1674,7 @@ static BOOL LeadInstallOneProfileButtonHook(const char *swiftClassName,
     SEL selector=NSSelectorFromString(@"buttonPressed");
     Method method=class_getInstanceMethod(cls,selector);
     if(!method) {
-        NSLog(@"[Lead] profile call button class has no buttonPressed: %s",swiftClassName);
+        NSLog(@"[Kira] profile call button class has no buttonPressed: %s",swiftClassName);
         return NO;
     }
     IMP current=method_getImplementation(method);
@@ -1682,7 +1682,7 @@ static BOOL LeadInstallOneProfileButtonHook(const char *swiftClassName,
     // It is an instance method implemented by this exact Swift class, not
     // an inherited generic UIKit sendAction method.
     *original=method_setImplementation(method,replacement);
-    NSLog(@"[Lead] intercepted Swift profile button selector: %s",swiftClassName);
+    NSLog(@"[Kira] intercepted Swift profile button selector: %s",swiftClassName);
     return *original!=NULL;
 }
 static void LeadInstallPeerInfoCallHooks(void) {
@@ -1798,23 +1798,23 @@ static void hook() {
     if ([identity containsString:@"notificationservice"] ||
         [identity containsString:@"notificationcontent"] ||
         [identity containsString:@"com.apple.usernotifications.service"]) {
-        NSLog(@"[Lead] Skipping UI hooks inside notification extension");
+        NSLog(@"[Kira] Skipping UI hooks inside notification extension");
         return;
     }
 
-    NSLog(@"[Lead] Tweak initializing...");
+    NSLog(@"[Kira] Tweak initializing...");
     
     @try {
         [[NSBundle bundleWithPath:@"/System/Library/Frameworks/Intents.framework"] load];
         Class inPreferencesClass = objc_getClass("INPreferences");
         if (inPreferencesClass) {
             %init(SiriBypassHooks, INPreferences = inPreferencesClass);
-            NSLog(@"[Lead] SiriBypassHooks initialized immediately");
+            NSLog(@"[Kira] SiriBypassHooks initialized immediately");
         } else {
-            NSLog(@"[Lead] SiriBypassHooks init failed: INPreferences class not found");
+            NSLog(@"[Kira] SiriBypassHooks init failed: INPreferences class not found");
         }
     } @catch (NSException *e) {
-        NSLog(@"[Lead] SiriBypassHooks init failed: %@", e);
+        NSLog(@"[Kira] SiriBypassHooks init failed: %@", e);
     }
     
     [LeadAntiRevokeUpdater shared];
@@ -1907,11 +1907,11 @@ static void hook() {
                     dispatch_get_main_queue(),^{LeadInstallPeerInfoCallHooks();});
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(7*NSEC_PER_SEC)),
                     dispatch_get_main_queue(),^{LeadInstallPeerInfoCallHooks();});
-                NSLog(@"[Lead] CallConfirmHooks initialized, profile=%d action=%d",
+                NSLog(@"[Kira] CallConfirmHooks initialized, profile=%d action=%d",
                       gLeadPeerInfoHookInstalled,gLeadPeerInfoActionHookInstalled);
             }
         } @catch (NSException *e) {
-            NSLog(@"[Lead] CallConfirmHooks init failed: %@", e);
+            NSLog(@"[Kira] CallConfirmHooks init failed: %@", e);
         }
 
 

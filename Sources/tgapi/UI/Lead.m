@@ -30,7 +30,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   };
 }
 
-@interface Kira () <UISearchResultsUpdating, UIScrollViewDelegate>
+@interface Lead () <UISearchResultsUpdating, UIScrollViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, strong) NSArray<LeadPage *> *pages;
@@ -49,14 +49,14 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 @property (nonatomic, assign) NSInteger appearOrder;
 @end
 
-@implementation Kira
+@implementation Lead
 
 + (void)presentMenu {
   UIViewController *root = LeadTopPresenter();
   if (!root) return;
   // Already open (and actually on screen) — nothing to do.
   if ([root isKindOfClass:[LeadNavigationController class]] && root.view.window) return;
-  LeadNavigationController *nav = [[LeadNavigationController alloc] initWithRootViewController:[Kira new]];
+  LeadNavigationController *nav = [[LeadNavigationController alloc] initWithRootViewController:[Lead new]];
   [root presentViewController:nav animated:YES completion:nil];
 }
 

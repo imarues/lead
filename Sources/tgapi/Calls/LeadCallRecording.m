@@ -256,7 +256,7 @@ static NSError *LeadRecorderError(NSString *detail) {
 }
 + (NSString *)recordingsDirectory {
     NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
-    NSString *folder=[[documents stringByAppendingPathComponent:@"Kira"] stringByAppendingPathComponent:@"Calls"];
+    NSString *folder=[[documents stringByAppendingPathComponent:@"Lead"] stringByAppendingPathComponent:@"Calls"];
     [[NSFileManager defaultManager] createDirectoryAtPath:folder
           withIntermediateDirectories:YES attributes:nil error:nil];
     return folder;
