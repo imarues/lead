@@ -336,7 +336,8 @@ static void LeadDetachCallControl(UIView *view) {
 }
 - (void)layoutSubviews {
     %orig;
-    if(self.window)LeadInstallCallControl((UIView *)self);
+    UIView *callView=(UIView *)self;
+    if(callView.window)LeadInstallCallControl(callView);
 }
 - (void)willMoveToWindow:(UIWindow *)window {
     if(!window)LeadDetachCallControl((UIView *)self);
@@ -379,7 +380,8 @@ static void LeadEnsureGroupControllerControl(UIViewController *controller) {
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig(animated);
-    if(self.isViewLoaded)LeadDetachCallControl(self.view);
+    UIViewController *controller=(UIViewController *)self;
+    if(controller.isViewLoaded)LeadDetachCallControl(controller.view);
 }
 %end
 %end
