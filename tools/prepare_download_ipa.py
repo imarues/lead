@@ -52,6 +52,7 @@ def main():
             modes.append("audio")
         info["UIBackgroundModes"] = modes
         info["NSSupportsLiveActivities"] = True
+        info["NSSupportsLiveActivitiesFrequentUpdates"] = True
         with open(plist_path, "wb") as f:
             plistlib.dump(info, f)
         plugins = app / "PlugIns"

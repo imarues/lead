@@ -49,6 +49,33 @@ static BOOL sAudioOwnsSession;
 static UIBackgroundTaskIdentifier sBackgroundTask = (UIBackgroundTaskIdentifier)NSUIntegerMax;
 static BOOL sInBackground;
 static BOOL sInstalled;
+// Queue-owned state: one pending publication, one selected file, real bytes only.
+static BOOL sPublishScheduled;
+static NSDictionary *sLastPublished;
+static NSString *sSelectedToken;
+static const NSTimeInterval kLeadDownloadIdle = 45.0;
+static const NSTimeInterval kLeadFinishHold = 5.0;
+
+// Merge sorted byte intervals. Overlapping/retried chunks must not count twice.
+static uint64_t LeadMergeRange(NSMutableArray<NSValue *> *ranges, uint64_t offset, NSUInteger count) {
+    if (offset > NSUIntegerMax - count) return 0;
+    NSUInteger lo = (NSUInteger)offset, hi = lo + count;
+    uint64_t oldCoverage = 0;
+    NSUInteger first = 0;
+    while (first < ranges.count && NSMaxRange(ranges[first].rangeValue) < lo) first++;
+    NSUInteger end = first;
+    while (end < ranges.count) {
+        NSRange r = ranges[end].rangeValue;
+        if (r.location > hi) break;
+        oldCoverage += r.length;
+        lo = MIN(lo, r.location);
+        hi = MAX(hi, NSMaxRange(r));
+        end++;
+    }
+    if (end > first) [ranges removeObjectsInRange:NSMakeRange(first, end - first)];
+    [ranges insertObject:[NSValue valueWithRange:NSMakeRange(lo, hi-lo)] atIndex:first];
+    return (uint64_t)(hi-lo) - oldCoverage;
+}
 
 @implementation LeadDownloadTracker
 
@@ -130,24 +157,30 @@ static BOOL sInstalled;
     if (offset > (uint64_t)INT64_MAX || chunk > 2 * 1024 * 1024) return;
     dispatch_async(sQueue, ^{
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        // Stale incomplete transfers disappear after 45 seconds without a response.
+        // Keep the same file selected during brief pauses and discard old transfers.
         for (NSString *key in [sTasks allKeys]) {
             NSDictionary *item = sTasks[key];
-            if (now - [item[@"last"] doubleValue] > 45) [sTasks removeObjectForKey:key];
+            if (now - [item[@"last"] doubleValue] > kLeadDownloadIdle) [sTasks removeObjectForKey:key];
         }
         NSString *resolvedToken = sCdnAliases[token] ?: token;
         NSMutableDictionary *entry = sTasks[resolvedToken];
         if (!entry) {
             entry = [@{@"token": resolvedToken, @"received": @0, @"last": @(now),
-                       @"parts": [NSMutableDictionary new], @"completed": @NO} mutableCopy];
+                       @"ranges": [NSMutableArray new], @"completed": @NO} mutableCopy];
             sTasks[resolvedToken] = entry;
         }
-        NSMutableDictionary<NSNumber *, NSNumber *> *parts = entry[@"parts"];
-        NSNumber *offKey = @(offset);
-        NSUInteger old = [parts[offKey] unsignedIntegerValue];
-        if (chunk > old) {
-            entry[@"received"] = @([entry[@"received"] unsignedLongLongValue] + chunk - old);
-            parts[offKey] = @(chunk);
+        if ([entry[@"completed"] boolValue]) return;
+        NSDictionary *known = sMetadata[resolvedToken];
+        uint64_t totalBytes = [known[@"size"] unsignedLongLongValue];
+        NSUInteger cappedChunk = chunk;
+        if (totalBytes > 0) {
+            if (offset >= totalBytes) return;
+            cappedChunk = (NSUInteger)MIN((uint64_t)chunk, totalBytes - offset);
+        }
+        NSMutableArray<NSValue *> *ranges = entry[@"ranges"];
+        uint64_t added = LeadMergeRange(ranges, offset, cappedChunk);
+        if (added > 0) {
+            entry[@"received"] = @([entry[@"received"] unsignedLongLongValue] + added);
         }
         entry[@"last"] = @(now);
         NSDictionary *meta = sMetadata[resolvedToken];
@@ -157,6 +190,7 @@ static BOOL sInstalled;
             long long total = [meta[@"size"] longLongValue];
             if (total > 0 && [entry[@"received"] longLongValue] >= total) {
                 entry[@"completed"] = @YES;
+                entry[@"finishedAt"] = @(now);
             }
         }
         // No percent when Telegram's document size hasn't been identified.
@@ -174,7 +208,10 @@ static BOOL sInstalled;
         NSMutableDictionary *task = sTasks[token];
         if (task) {
             task[@"name"] = safeName; task[@"total"] = @(size);
-            if ([task[@"received"] longLongValue] >= size) task[@"completed"] = @YES;
+            if ([task[@"received"] longLongValue] >= size && ![task[@"completed"] boolValue]) {
+                task[@"completed"] = @YES;
+                task[@"finishedAt"] = @(CFAbsoluteTimeGetCurrent());
+            }
             [self announceLocked];
         }
     });
@@ -182,14 +219,32 @@ static BOOL sInstalled;
 
 + (NSDictionary *)snapshotLocked {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    NSDictionary *best = nil;
-    for (NSDictionary *task in sTasks.allValues) {
-        if (now - [task[@"last"] doubleValue] > 45 || [task[@"completed"] boolValue]) continue;
-        if (!best || [task[@"last"] doubleValue] > [best[@"last"] doubleValue]) best = task;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kLeadProgressKey]) {
+        sSelectedToken = nil;
+        return @{};
+    }
+    NSDictionary *best = sSelectedToken ? sTasks[sSelectedToken] : nil;
+    if (best) {
+        BOOL completed = [best[@"completed"] boolValue];
+        BOOL expired = completed
+            ? now - [best[@"finishedAt"] doubleValue] > kLeadFinishHold
+            : now - [best[@"last"] doubleValue] > kLeadDownloadIdle;
+        if (expired) { best = nil; sSelectedToken = nil; }
+    }
+    // Only show identified documents: thumbnail/autoplay traffic must not replace
+    // the foreground file or make the Live Activity jump back to zero.
+    if (!best) {
+        for (NSDictionary *task in sTasks.allValues) {
+            if ([task[@"total"] longLongValue] <= 0 ||
+                [task[@"completed"] boolValue] ||
+                now - [task[@"last"] doubleValue] > kLeadDownloadIdle) continue;
+            if (!best || [task[@"last"] doubleValue] > [best[@"last"] doubleValue]) best = task;
+        }
+        sSelectedToken = best[@"token"];
     }
     if (!best) return @{};
-    long long received = [best[@"received"] longLongValue];
     long long total = [best[@"total"] longLongValue];
+    long long received = MIN(total, [best[@"received"] longLongValue]);
     NSInteger percent = total > 0 ? (NSInteger)MIN(100, (received * 100.0 / total)) : -1;
     return @{@"name": best[@"name"] ?: @"Telegram file",
              @"received": @(received), @"total": @(total),
@@ -288,21 +343,27 @@ static BOOL sInstalled;
 }
 
 + (void)announceLocked {
-    NSDictionary *snapshot = [self snapshotLocked];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:LeadDownloadStatusDidChange
-                                                            object:nil userInfo:snapshot];
-        // ActivityKit bridge is built only into IPA variants that also ship the
-        // companion Widget extension. Otherwise this is a harmless no-op.
-        Class bridge = NSClassFromString(@"LeadDownloadActivityBridge");
-        SEL sel = NSSelectorFromString(@"updateWithName:received:total:");
-        if (bridge && [bridge respondsToSelector:sel] &&
-            [[NSUserDefaults standardUserDefaults] boolForKey:kLeadProgressKey]) {
-            ((void (*)(id, SEL, id, id, id))objc_msgSend)(
-                bridge, sel, snapshot[@"name"] ?: @"", snapshot[@"received"] ?: @0,
-                snapshot[@"total"] ?: @0);
-        }
-        [self backgroundStateRefresh];
+    // Coalesce bursts on the tracker queue; always publish the newest snapshot.
+    // Never enqueue one expensive main-thread UI update per network chunk.
+    if (sPublishScheduled) return;
+    sPublishScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), sQueue, ^{
+        sPublishScheduled = NO;
+        NSDictionary *snapshot = [self snapshotLocked];
+        if ([sLastPublished isEqualToDictionary:snapshot]) return;
+        sLastPublished = [snapshot copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:LeadDownloadStatusDidChange
+                                                                object:nil userInfo:snapshot];
+            Class bridge = NSClassFromString(@"LeadDownloadActivityBridge");
+            SEL sel = NSSelectorFromString(@"updateWithName:received:total:");
+            if (bridge && [bridge respondsToSelector:sel]) {
+                ((void (*)(id, SEL, id, id, id))objc_msgSend)(
+                    bridge, sel, snapshot[@"name"] ?: @"", snapshot[@"received"] ?: @0,
+                    snapshot[@"total"] ?: @0);
+            }
+            [self backgroundStateRefresh];
+        });
     });
 }
 
@@ -319,6 +380,13 @@ static BOOL sInstalled;
                    usingBlock:^(__unused NSNotification *note) {
         sInBackground = YES;
         [self backgroundStateRefresh];
+    }];
+    [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                       object:nil queue:[NSOperationQueue mainQueue]
+                   usingBlock:^(__unused NSNotification *note) {
+        sInBackground = NO;
+        [self backgroundStateRefresh];
+        dispatch_async(sQueue, ^{ [self announceLocked]; });
     }];
     [center addObserverForName:UIApplicationWillEnterForegroundNotification
                        object:nil queue:[NSOperationQueue mainQueue]
@@ -345,14 +413,16 @@ static BOOL sInstalled;
                    usingBlock:^(__unused NSNotification *note) {
         [self backgroundStateRefresh];
     }];
-    // Poll via class method instead of a self-retaining recursive block.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+    // Poll even if no new chunk arrives: publish the trailing/latest state and
+    // close an inactive/completed download. No fabricated percentage increments.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
 }
 
 + (void)pollForDownloads {
     [self backgroundStateRefresh];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+    dispatch_async(sQueue, ^{ [self announceLocked]; });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{ [self pollForDownloads]; });
 }
 @end
