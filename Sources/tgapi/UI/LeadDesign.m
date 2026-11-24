@@ -7,22 +7,54 @@ NSString *const LeadSettingsDidChangeNotification = @"LeadSettingsDidChangeNotif
 
 static BOOL sLeadNeedsRestart = NO;
 
-UIColor *LeadThemeBackground(void) { return [UIColor colorWithRed:0.075 green:0.047 blue:0.14 alpha:1]; }
-UIColor *LeadThemeCard(void) { return [UIColor colorWithRed:0.16 green:0.105 blue:0.255 alpha:1]; }
-UIColor *LeadThemeAccent(void) { return [UIColor colorWithRed:0.70 green:0.59 blue:0.98 alpha:1]; }
-UIColor *LeadThemeInk(void) { return [UIColor colorWithRed:0.97 green:0.95 blue:1 alpha:1]; }
-UIColor *LeadThemeMuted(void) { return [UIColor colorWithRed:0.72 green:0.66 blue:0.82 alpha:1]; }
+// Kira violet palette, inspired by the brand artwork. Static Core Animation
+// gradients provide the sheen without live blur, timers or background effects.
+UIColor *LeadThemeBackground(void) { return [UIColor colorWithRed:0.145 green:0.105 blue:0.255 alpha:1]; }
+UIColor *LeadThemeCard(void) { return [UIColor colorWithRed:0.235 green:0.175 blue:0.365 alpha:1]; }
+UIColor *LeadThemeAccent(void) { return [UIColor colorWithRed:0.76 green:0.66 blue:1.0 alpha:1]; }
+UIColor *LeadThemeInk(void) { return [UIColor colorWithRed:0.99 green:0.98 blue:1 alpha:1]; }
+UIColor *LeadThemeMuted(void) { return [UIColor colorWithRed:0.82 green:0.77 blue:0.93 alpha:1]; }
+
+@interface LeadVioletSurface : UIView
+- (instancetype)initWithHero:(BOOL)hero;
+@end
+
+@implementation LeadVioletSurface
++ (Class)layerClass { return CAGradientLayer.class; }
+- (instancetype)initWithHero:(BOOL)hero {
+  if ((self = [super initWithFrame:CGRectZero])) {
+    self.userInteractionEnabled = NO;
+    CAGradientLayer *g = (CAGradientLayer *)self.layer;
+    UIColor *top = hero ? [UIColor colorWithRed:0.39 green:0.27 blue:0.62 alpha:1] :
+                          [UIColor colorWithRed:0.30 green:0.225 blue:0.46 alpha:1];
+    UIColor *bottom = hero ? [UIColor colorWithRed:0.235 green:0.16 blue:0.40 alpha:1] : LeadThemeCard();
+    g.colors = @[ (id)top.CGColor, (id)bottom.CGColor ];
+    g.startPoint = CGPointMake(0, 0);
+    g.endPoint = CGPointMake(1, 1);
+    if (hero) {
+      g.cornerRadius = 18;
+      g.cornerCurve = kCACornerCurveContinuous;
+      g.borderWidth = 1;
+      g.borderColor = [LeadThemeAccent() colorWithAlphaComponent:0.40].CGColor;
+    }
+  }
+  return self;
+}
+@end
 
 @implementation LeadThemeHeader
 + (Class)layerClass { return CAGradientLayer.class; }
 - (instancetype)initWithFrame:(CGRect)frame {
   if ((self = [super initWithFrame:frame])) {
     CAGradientLayer *gradient = (CAGradientLayer *)self.layer;
-    gradient.colors = @[(id)[UIColor colorWithRed:0.27 green:0.16 blue:0.43 alpha:1].CGColor,
-                        (id)LeadThemeBackground().CGColor];
+    gradient.colors = @[ (id)[UIColor colorWithRed:0.40 green:0.28 blue:0.65 alpha:1].CGColor,
+                         (id)[UIColor colorWithRed:0.25 green:0.17 blue:0.43 alpha:1].CGColor,
+                         (id)LeadThemeBackground().CGColor ];
+    gradient.locations = @[ @0, @0.48, @1 ];
     gradient.startPoint = CGPointMake(0, 0);
     gradient.endPoint = CGPointMake(0.9, 1);
     self.layer.cornerRadius = 28;
+    self.layer.cornerCurve = kCACornerCurveContinuous;
     self.layer.masksToBounds = YES;
   }
   return self;
@@ -260,6 +292,7 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   UILabel *_textLabel;
   BOOL _active;
   BOOL _templateImage;
+  CAGradientLayer *_sheen;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -268,6 +301,11 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
     _side = 30;
     self.layer.cornerCurve = kCACornerCurveContinuous;
     self.clipsToBounds = YES;
+    _sheen = [CAGradientLayer layer];
+    _sheen.startPoint = CGPointMake(0, 0);
+    _sheen.endPoint = CGPointMake(1, 1);
+    [self.layer addSublayer:_sheen];
+    self.layer.borderWidth = 0.75;
     _imageView = [UIImageView new];
     _imageView.contentMode = UIViewContentModeCenter;
     _imageView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -292,6 +330,10 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 - (void)layoutSubviews {
   [super layoutSubviews];
   self.layer.cornerRadius = self.bounds.size.width * 0.28;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  _sheen.frame = self.bounds;
+  [CATransaction commit];
 }
 
 - (void)setSymbol:(NSString *)symbol {
@@ -332,12 +374,18 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 }
 
 - (void)applyColors {
-  if (!_templateImage) {
-    self.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
-    return;
-  }
-  self.backgroundColor = _active ? LeadThemeAccent() : [LeadThemeAccent() colorWithAlphaComponent:0.14];
-  UIColor *ink = _active ? UIColor.systemBackgroundColor : LeadThemeInk();
+  self.backgroundColor = UIColor.clearColor;
+  UIColor *top = _active ? [UIColor colorWithRed:0.83 green:0.75 blue:1 alpha:1] :
+                           [UIColor colorWithRed:0.51 green:0.40 blue:0.77 alpha:1];
+  UIColor *bottom = _active ? [UIColor colorWithRed:0.62 green:0.47 blue:0.92 alpha:1] :
+                              [UIColor colorWithRed:0.33 green:0.24 blue:0.55 alpha:1];
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  _sheen.colors = @[ (id)top.CGColor, (id)bottom.CGColor ];
+  self.layer.borderColor = [LeadThemeAccent() colorWithAlphaComponent:_active ? 0.75 : 0.38].CGColor;
+  [CATransaction commit];
+  if (!_templateImage) return;
+  UIColor *ink = _active ? LeadThemeBackground() : LeadThemeInk();
   _imageView.tintColor = ink;
   _textLabel.textColor = ink;
 }
@@ -371,17 +419,19 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseIdentifier];
   if (self) {
     self.backgroundColor = LeadThemeCard();
+    self.backgroundView = [[LeadVioletSurface alloc] initWithHero:NO];
     self.tintColor = LeadThemeAccent();
     UIView *selected = [UIView new];
-    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
+    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.22];
     self.selectedBackgroundView = selected;
 
     _tile = [LeadIconTile new];
+    _tile.side = 36;
     _tile.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_tile];
 
     _titleLabel = [UILabel new];
-    _titleLabel.font = LeadFont(16, UIFontWeightRegular);
+    _titleLabel.font = LeadFont(16, UIFontWeightSemibold);
     _titleLabel.textColor = LeadThemeInk();
     _titleLabel.numberOfLines = 0;
     _subtitleLabel = [UILabel new];
@@ -395,6 +445,8 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
     [self.contentView addSubview:_textStack];
 
     _toggle = [UISwitch new];
+    _toggle.onTintColor = [UIColor colorWithRed:0.58 green:0.42 blue:0.89 alpha:1];
+    _toggle.thumbTintColor = LeadThemeInk();
     [_toggle addTarget:self action:@selector(toggleChanged) forControlEvents:UIControlEventValueChanged];
 
     _valueLabel = [UILabel new];
@@ -409,8 +461,8 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
     valueStack.alignment = UIStackViewAlignmentCenter;
     _valueAccessory = valueStack;
 
-    _tileSize[0] = [_tile.widthAnchor constraintEqualToConstant:30];
-    _tileSize[1] = [_tile.heightAnchor constraintEqualToConstant:30];
+    _tileSize[0] = [_tile.widthAnchor constraintEqualToConstant:36];
+    _tileSize[1] = [_tile.heightAnchor constraintEqualToConstant:36];
     [NSLayoutConstraint activateConstraints:@[
       _tileSize[0], _tileSize[1],
       [_tile.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
@@ -419,9 +471,9 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
       [_textStack.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-8],
       [_textStack.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:11],
       [_textStack.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-11],
-      [self.contentView.heightAnchor constraintGreaterThanOrEqualToConstant:52],
+      [self.contentView.heightAnchor constraintGreaterThanOrEqualToConstant:60],
     ]];
-    self.separatorInset = UIEdgeInsetsMake(0, 60, 0, 0);
+    self.separatorInset = UIEdgeInsetsMake(0, 66, 0, 16);
   }
   return self;
 }
@@ -497,10 +549,12 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
   self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseIdentifier];
   if (self) {
-    self.backgroundColor = LeadThemeCard();
+    self.backgroundColor = UIColor.clearColor;
+    self.backgroundView = [[LeadVioletSurface alloc] initWithHero:YES];
     self.tintColor = LeadThemeAccent();
     UIView *selected = [UIView new];
-    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
+    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.22];
+    selected.layer.cornerRadius = 18;
     self.selectedBackgroundView = selected;
 
     _tile = [LeadIconTile new];
@@ -511,6 +565,8 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
     _titleLabel = [UILabel new];
     _titleLabel.font = LeadRoundedFont(20, UIFontWeightSemibold);
+    _titleLabel.textColor = LeadThemeInk();
+    _titleLabel.numberOfLines = 0;
     _statusLabel = [UILabel new];
     _statusLabel.font = LeadFont(14, UIFontWeightRegular);
     _statusLabel.textColor = LeadThemeMuted();
@@ -522,6 +578,8 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
     [self.contentView addSubview:stack];
 
     _toggle = [UISwitch new];
+    _toggle.onTintColor = [UIColor colorWithRed:0.58 green:0.42 blue:0.89 alpha:1];
+    _toggle.thumbTintColor = LeadThemeInk();
     [_toggle addTarget:self action:@selector(toggleChanged) forControlEvents:UIControlEventValueChanged];
     self.accessoryView = _toggle;
 
@@ -605,19 +663,32 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   self = [super initWithReuseIdentifier:reuseIdentifier];
   if (self) {
     _label = [UILabel new];
-    _label.font = LeadFont(13, UIFontWeightSemibold);
-    _label.textColor = LeadThemeMuted();
+    _label.font = LeadRoundedFont(15, UIFontWeightBold);
+    _label.textColor = LeadThemeAccent();
+    _label.numberOfLines = 0;
     _label.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_label];
     _actionButton = [UIButton buttonWithType:UIButtonTypeSystem];
     _actionButton.titleLabel.font = LeadFont(13, UIFontWeightSemibold);
     _actionButton.tintColor = LeadThemeInk();
+    _actionButton.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.15];
+    _actionButton.layer.cornerRadius = 10;
+    _actionButton.contentEdgeInsets = UIEdgeInsetsMake(5, 10, 5, 10);
     _actionButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_actionButton addTarget:self action:@selector(actionTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.contentView addSubview:_actionButton];
     UILayoutGuide *margins = self.contentView.layoutMarginsGuide;
+    UIView *marker = [UIView new];
+    marker.backgroundColor = LeadThemeAccent();
+    marker.layer.cornerRadius = 1.5;
+    marker.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:marker];
     [NSLayoutConstraint activateConstraints:@[
-      [_label.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+      [marker.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+      [marker.centerYAnchor constraintEqualToAnchor:_label.centerYAnchor],
+      [marker.widthAnchor constraintEqualToConstant:3],
+      [marker.heightAnchor constraintEqualToConstant:14],
+      [_label.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor constant:12],
       [_label.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-7],
       [_label.topAnchor constraintGreaterThanOrEqualToAnchor:self.contentView.topAnchor constant:14],
       [_actionButton.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
@@ -722,6 +793,7 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   UINavigationBarAppearance *standard = [UINavigationBarAppearance new];
   [standard configureWithOpaqueBackground];
   standard.backgroundColor = LeadThemeBackground();
+  standard.shadowColor = [LeadThemeAccent() colorWithAlphaComponent:0.18];
   standard.titleTextAttributes = @{ NSFontAttributeName : LeadFont(17, UIFontWeightSemibold), NSForegroundColorAttributeName : LeadThemeInk() };
   edge.titleTextAttributes = standard.titleTextAttributes;
   self.navigationBar.standardAppearance = standard;
@@ -743,6 +815,8 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   UIVisualEffectView *pill = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
   pill.layer.cornerRadius = 26;
   pill.layer.cornerCurve = kCACornerCurveContinuous;
+  pill.layer.borderWidth = 1;
+  pill.layer.borderColor = [LeadThemeAccent() colorWithAlphaComponent:0.35].CGColor;
   pill.clipsToBounds = YES;
   pill.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -761,8 +835,8 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   UIButton *restart = [UIButton buttonWithType:UIButtonTypeCustom];
   [restart setTitle:LeadL(@"UI_RESTART") forState:UIControlStateNormal];
   restart.titleLabel.font = LeadFont(15, UIFontWeightSemibold);
-  [restart setTitleColor:UIColor.systemBackgroundColor forState:UIControlStateNormal];
-  restart.backgroundColor = LeadThemeInk();
+  [restart setTitleColor:LeadThemeBackground() forState:UIControlStateNormal];
+  restart.backgroundColor = LeadThemeAccent();
   restart.layer.cornerRadius = 18;
   restart.layer.cornerCurve = kCACornerCurveContinuous;
   restart.contentEdgeInsets = UIEdgeInsetsMake(0, 18, 0, 18);
