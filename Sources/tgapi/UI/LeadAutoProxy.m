@@ -287,7 +287,10 @@ static NSString *LeadProxyFirstReachable(NSArray<NSString *> *links) {
 }
 
 // Both signaling and native media must use the same selected server during a call.
+extern NSDictionary *LeadWarpCallProxy(void);
 static NSDictionary *LeadCallProxyChoose(void) {
+  NSDictionary *warp = LeadWarpCallProxy();
+  if (warp) return warp; // Activated only after a successful WARP trace.
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
   NSArray<NSString *> *configured = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
   if (!configured.count) return nil;
