@@ -71,6 +71,7 @@ void LeadAutoProxyInstall(void);
 void LeadAutoProxySetEnabled(BOOL on);
 // Re-reads the JSON list, tests the proxies in order, switches to the first that answers.
 void LeadAutoProxyRefresh(void (^done)(NSString *summary, BOOL reachable));
+void LeadAutoProxyRotate(void (^done)(NSString *summary, BOOL reachable));
 // Used by the hooks: the MTSocksProxySettings to use when Telegram has no proxy of its own.
 id LeadAutoProxyCurrentSettings(void);
 void LeadAutoProxyRememberContext(id context);

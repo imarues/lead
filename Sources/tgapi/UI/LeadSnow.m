@@ -1,22 +1,10 @@
 // Visual-only snowfall for Telegram. Excludes call screens and keyboard geometry.
-// A non-key, touch-through window keeps the effect above Telegram's navigation UI.
+// A touch-through canvas in Telegram's existing window avoids creating a new UIWindow.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import "LeadDesign.h"
 #import "../Constants.h"
-
-@interface LeadSnowWindow : UIWindow
-@end
-
-@implementation LeadSnowWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    return nil; // Never intercept Telegram gestures or keyboard input.
-}
-- (BOOL)canBecomeKeyWindow {
-    return NO;
-}
-@end
 
 // Telegram uses a custom navigation stack, so hooks on its ChatControllerImpl
 // give us an exact distinction between a chat and the rest of the application.
@@ -65,8 +53,7 @@ static BOOL LeadSnowHasCallController(UIViewController *controller) {
 
 static BOOL LeadSnowSceneHasCall(UIWindowScene *scene) {
     for (UIWindow *window in scene.windows) {
-        if ([window isKindOfClass:[LeadSnowWindow class]] ||
-            window.hidden || window.alpha < 0.03) continue;
+        if (window.hidden || window.alpha < 0.03) continue;
         // Keyboard windows are unrelated to Telegram's call UI.
         NSString *name = NSStringFromClass(window.class).lowercaseString;
         if ([name containsString:@"keyboard"] || [name containsString:@"texteffects"]) continue;
@@ -167,7 +154,7 @@ static UIImage *LeadSnowMakeTexture(NSInteger depth) {
     self.opaque = NO;
     self.userInteractionEnabled = NO;
     self.clipsToBounds = YES;
-    self.flakes = [NSMutableArray arrayWithCapacity:96];
+    self.flakes = [NSMutableArray arrayWithCapacity:64];
     self.previousSize = frame.size;
     static NSArray<UIImage *> *textures;
     static dispatch_once_t once;
@@ -175,9 +162,9 @@ static UIImage *LeadSnowMakeTexture(NSInteger depth) {
         textures = @[LeadSnowMakeTexture(0), LeadSnowMakeTexture(1), LeadSnowMakeTexture(2)];
     });
     // Seed snow over the FULL viewport immediately, not just from the top.
-    // 48 distant + 36 middle + 12 near flakes = gentle, layered snowfall.
-    for (NSInteger i = 0; i < 96; i++) {
-        NSInteger depth = i < 48 ? 0 : (i < 84 ? 1 : 2);
+    // 32 distant + 24 middle + 8 near flakes = gentle, layered snowfall.
+    for (NSInteger i = 0; i < 64; i++) {
+        NSInteger depth = i < 32 ? 0 : (i < 56 ? 1 : 2);
         LeadSnowFlake *flake = [LeadSnowFlake new];
         flake.depth = depth;
         flake.layer = [CALayer layer];
@@ -256,7 +243,7 @@ static UIImage *LeadSnowMakeTexture(NSInteger depth) {
     if (self.displayLink) return;
     self.lastTimestamp = 0;
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-    link.preferredFramesPerSecond = 30;
+    link.preferredFramesPerSecond = 24;
     [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     self.displayLink = link;
 }
@@ -271,196 +258,144 @@ static UIImage *LeadSnowMakeTexture(NSInteger depth) {
 @end
 
 @interface LeadSnowManager : NSObject
-@property (nonatomic, strong) NSMapTable<UIWindowScene *, LeadSnowWindow *> *windows;
+@property (nonatomic, strong) NSMapTable<UIWindowScene *, LeadSnowCanvas *> *canvases;
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, assign) CGRect keyboardScreenFrame;
 @property (nonatomic, assign) BOOL keyboardVisible;
-@property (nonatomic, assign) BOOL appActive;
+@property (nonatomic, assign) CFTimeInterval readyAt;
 - (void)refresh;
 @end
 
 @implementation LeadSnowManager
-
 + (instancetype)shared {
     static LeadSnowManager *manager;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ manager = [LeadSnowManager new]; });
     return manager;
 }
-
 - (instancetype)init {
     self = [super init];
     if (!self) return nil;
-    _windows = [NSMapTable weakToStrongObjectsMapTable];
+    _canvases = [NSMapTable weakToStrongObjectsMapTable];
     _keyboardScreenFrame = CGRectNull;
-    _appActive = YES;
+    _readyAt = CACurrentMediaTime() + 2.0;
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
-    [center addObserver:self selector:@selector(settingsChanged:)
-                  name:LeadSettingsDidChangeNotification object:nil];
-    for (NSString *event in @[ UIApplicationDidBecomeActiveNotification,
-                               UIApplicationWillResignActiveNotification,
-                               UISceneDidActivateNotification,
-                               UISceneWillDeactivateNotification,
-                               UIWindowDidBecomeKeyNotification ]) {
-        [center addObserver:self selector:@selector(lifecycleChanged:)
-                      name:event object:nil];
+    [center addObserver:self selector:@selector(settingsChanged:) name:LeadSettingsDidChangeNotification object:nil];
+    for (NSString *event in @[UIApplicationDidBecomeActiveNotification, UIApplicationWillResignActiveNotification,
+                              UISceneDidActivateNotification, UISceneWillDeactivateNotification,
+                              UIWindowDidBecomeKeyNotification]) {
+        [center addObserver:self selector:@selector(lifecycleChanged:) name:event object:nil];
     }
-    for (NSString *event in @[ UIKeyboardWillShowNotification,
-                               UIKeyboardWillChangeFrameNotification,
-                               UIKeyboardDidChangeFrameNotification ]) {
-        [center addObserver:self selector:@selector(keyboardChanged:)
-                      name:event object:nil];
+    for (NSString *event in @[UIKeyboardWillShowNotification, UIKeyboardWillChangeFrameNotification, UIKeyboardDidChangeFrameNotification]) {
+        [center addObserver:self selector:@selector(keyboardChanged:) name:event object:nil];
     }
-    [center addObserver:self selector:@selector(keyboardHidden:)
-                  name:UIKeyboardWillHideNotification object:nil];
-    [center addObserver:self selector:@selector(keyboardHidden:)
-                  name:UIKeyboardDidHideNotification object:nil];
+    [center addObserver:self selector:@selector(keyboardHidden:) name:UIKeyboardWillHideNotification object:nil];
+    [center addObserver:self selector:@selector(keyboardHidden:) name:UIKeyboardDidHideNotification object:nil];
     return self;
 }
-
+- (void)hideAll {
+    for (LeadSnowCanvas *canvas in self.canvases.objectEnumerator) {
+        [canvas stop]; canvas.hidden = YES;
+    }
+}
 - (void)settingsChanged:(NSNotification *)note {
-    if (note.object &&
-        ![note.object isEqual:kLeadSnowEnabled] &&
-        ![note.object isEqual:kLeadSnowHideInChats]) return;
+    if (note.object && ![note.object isEqual:kLeadSnowEnabled] && ![note.object isEqual:kLeadSnowHideInChats]) return;
     [self refresh];
 }
-
 - (void)lifecycleChanged:(NSNotification *)note {
-    if ([note.name isEqualToString:UIApplicationWillResignActiveNotification]) {
-        self.appActive = NO;
-    } else if ([note.name isEqualToString:UIApplicationDidBecomeActiveNotification]) {
-        self.appActive = YES;
+    if ([note.name isEqualToString:UIApplicationWillResignActiveNotification] ||
+        [note.name isEqualToString:UISceneWillDeactivateNotification]) {
+        [self hideAll]; return;
+    }
+    if ([note.name isEqualToString:UIApplicationDidBecomeActiveNotification] ||
+        [note.name isEqualToString:UISceneDidActivateNotification]) {
+        self.readyAt = CACurrentMediaTime() + 1.5;
+        [self hideAll];
     }
     [self refresh];
 }
-
 - (void)keyboardChanged:(NSNotification *)note {
     NSValue *value = note.userInfo[UIKeyboardFrameEndUserInfoKey];
-    if (value) {
-        self.keyboardScreenFrame = value.CGRectValue;
-        self.keyboardVisible = YES;
-    }
+    if (value) { self.keyboardScreenFrame = value.CGRectValue; self.keyboardVisible = YES; }
     [self refresh];
 }
-
 - (void)keyboardHidden:(NSNotification *)note {
-    self.keyboardVisible = NO;
-    self.keyboardScreenFrame = CGRectNull;
+    self.keyboardVisible = NO; self.keyboardScreenFrame = CGRectNull;
     [self refresh];
 }
-
-- (void)tick:(NSTimer *)timer {
-    [self refresh];
-}
-
-- (void)applyKeyboardExclusionToWindow:(LeadSnowWindow *)window {
-    UIView *view = window.rootViewController.view;
+- (void)tick:(NSTimer *)timer { [self refresh]; }
+- (void)applyKeyboardExclusion:(LeadSnowCanvas *)canvas window:(UIWindow *)window {
     if (!self.keyboardVisible || CGRectIsNull(self.keyboardScreenFrame)) {
-        view.layer.mask = nil;
-        return;
+        canvas.layer.mask = nil; return;
     }
     CGRect keyboard = [window convertRect:self.keyboardScreenFrame fromWindow:nil];
-    CGRect overlap = CGRectIntersection(view.bounds, keyboard);
-    if (CGRectIsNull(overlap) || CGRectIsEmpty(overlap)) {
-        view.layer.mask = nil;
-        return;
-    }
-    // An even-odd mask cuts out exactly the keyboard, including floating keyboards.
-    UIBezierPath *path = [UIBezierPath bezierPathWithRect:view.bounds];
+    CGRect overlap = CGRectIntersection(canvas.bounds, [canvas convertRect:keyboard fromView:window]);
+    if (CGRectIsNull(overlap) || CGRectIsEmpty(overlap)) { canvas.layer.mask = nil; return; }
+    UIBezierPath *path = [UIBezierPath bezierPathWithRect:canvas.bounds];
     [path appendPath:[UIBezierPath bezierPathWithRect:overlap]];
     CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.frame = view.bounds;
-    mask.path = path.CGPath;
-    mask.fillRule = kCAFillRuleEvenOdd;
-    view.layer.mask = mask;
+    mask.frame = canvas.bounds; mask.path = path.CGPath; mask.fillRule = kCAFillRuleEvenOdd;
+    canvas.layer.mask = mask;
 }
-
-- (LeadSnowWindow *)windowForScene:(UIWindowScene *)scene {
-    LeadSnowWindow *window = [self.windows objectForKey:scene];
-    if (window) return window;
-    window = [[LeadSnowWindow alloc] initWithWindowScene:scene];
-    window.frame = scene.coordinateSpace.bounds;
-    window.windowLevel = UIWindowLevelAlert + 1;
-    window.backgroundColor = UIColor.clearColor;
-    window.userInteractionEnabled = NO;
-    UIViewController *root = [UIViewController new];
-    root.view = [[LeadSnowCanvas alloc] initWithFrame:window.bounds];
-    window.rootViewController = root;
-    window.hidden = YES;
-    [self.windows setObject:window forKey:scene];
-    return window;
-}
-
-- (void)refresh {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; });
-        return;
+- (UIWindow *)hostWindow:(UIWindowScene *)scene {
+    for (UIWindow *window in scene.windows) {
+        if (!window.isKeyWindow || window.hidden || window.alpha < 0.95 ||
+            window.windowLevel != UIWindowLevelNormal || !window.rootViewController.isViewLoaded) continue;
+        UIView *root = window.rootViewController.view;
+        if (root.window != window || CGRectIsEmpty(root.bounds) || root.hidden || root.alpha < 0.95) continue;
+        return window;
     }
+    return nil;
+}
+- (void)refresh {
+    if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; }); return; }
     BOOL enabled = [[NSUserDefaults standardUserDefaults] boolForKey:kLeadSnowEnabled];
     if (!enabled) {
-        [self.timer invalidate];
-        self.timer = nil;
-        for (LeadSnowWindow *window in self.windows.objectEnumerator) {
-            [(LeadSnowCanvas *)window.rootViewController.view stop];
-            window.hidden = YES;
-        }
-        return;
+        [self.timer invalidate]; self.timer = nil;
+        [self hideAll];
+        for (LeadSnowCanvas *canvas in self.canvases.objectEnumerator) [canvas removeFromSuperview];
+        [self.canvases removeAllObjects]; return;
     }
-    if (!self.timer) {
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:0.45
-                             target:self selector:@selector(tick:)
-                           userInfo:nil repeats:YES];
+    if (!self.timer) self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive || CACurrentMediaTime() < self.readyAt) {
+        [self hideAll]; return;
     }
     BOOL hideInChats = [[NSUserDefaults standardUserDefaults] boolForKey:kLeadSnowHideInChats];
     for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
-        if (![candidate isKindOfClass:[UIWindowScene class]]) continue;
+        if (![candidate isKindOfClass:UIWindowScene.class]) continue;
         UIWindowScene *scene = (UIWindowScene *)candidate;
-        LeadSnowWindow *window = [self.windows objectForKey:scene];
-        BOOL active = self.appActive &&
-                      scene.activationState == UISceneActivationStateForegroundActive;
-        if (!active) {
-            if (window) {
-                [(LeadSnowCanvas *)window.rootViewController.view stop];
-                window.hidden = YES;
-            }
-            continue;
-        }
+        LeadSnowCanvas *canvas = [self.canvases objectForKey:scene];
+        UIWindow *window = scene.activationState == UISceneActivationStateForegroundActive ? [self hostWindow:scene] : nil;
         BOOL isChat = NO;
-        if (hideInChats && sLeadCurrentChat && sLeadCurrentChat.isViewLoaded) {
+        if (hideInChats && sLeadCurrentChat.isViewLoaded) {
             UIView *chatView = sLeadCurrentChat.view;
-            isChat = chatView.window && chatView.window.windowScene == scene &&
-                     !chatView.hidden && chatView.alpha > 0.03;
+            isChat = chatView.window == window && !chatView.hidden && chatView.alpha > 0.03;
         }
-        BOOL show = !isChat && !LeadSnowSceneHasCall(scene);
-        if (!show) {
-            if (window) {
-                [(LeadSnowCanvas *)window.rootViewController.view stop];
-                window.hidden = YES;
-            }
-            continue;
+        if (!window || isChat || LeadSnowSceneHasCall(scene)) {
+            [canvas stop]; canvas.hidden = YES; continue;
         }
-        if (!window) window = [self windowForScene:scene];
-        CGRect bounds = scene.coordinateSpace.bounds;
-        if (!CGRectEqualToRect(window.frame, bounds)) window.frame = bounds;
-        LeadSnowCanvas *canvas = (LeadSnowCanvas *)window.rootViewController.view;
-        [self applyKeyboardExclusionToWindow:window];
-        if (window.hidden) window.hidden = NO; // Never become a key window.
-        [canvas start];
+        if (!canvas) {
+            canvas = [[LeadSnowCanvas alloc] initWithFrame:window.bounds];
+            canvas.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            canvas.accessibilityElementsHidden = YES;
+            [self.canvases setObject:canvas forKey:scene];
+        }
+        if (canvas.superview != window) {
+            [canvas removeFromSuperview]; canvas.frame = window.bounds; [window addSubview:canvas];
+        }
+        if (window.subviews.lastObject != canvas) [window bringSubviewToFront:canvas];
+        if (!CGRectEqualToRect(canvas.frame, window.bounds)) canvas.frame = window.bounds;
+        [self applyKeyboardExclusion:canvas window:window];
+        canvas.hidden = NO; [canvas start];
     }
 }
 @end
-
 void LeadSnowInstall(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[LeadSnowManager shared] refresh];
-    });
+    dispatch_async(dispatch_get_main_queue(), ^{ [[LeadSnowManager shared] refresh]; });
 }
-
 void LeadSnowChatDidAppear(UIViewController *chat) {
-    sLeadCurrentChat = chat;
-    [[LeadSnowManager shared] refresh];
+    sLeadCurrentChat = chat; [[LeadSnowManager shared] refresh];
 }
-
 void LeadSnowChatWillDisappear(UIViewController *chat) {
     if (sLeadCurrentChat == chat) sLeadCurrentChat = nil;
     [[LeadSnowManager shared] refresh];

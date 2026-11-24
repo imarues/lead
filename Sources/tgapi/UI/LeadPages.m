@@ -757,7 +757,21 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     if (![[NSUserDefaults standardUserDefaults] boolForKey:kAutoProxy]) return LeadL(@"UI_OFF");
     return LeadAutoProxySummary() ?: LeadL(@"UI_NOT_SET");
   };
-  LeadSection *proxySection = [LeadSection title:nil rows:@[ autoProxy, proxyStatus ]];
+  LeadRow *proxyRotate = [LeadRow link:@"UI_AUTO_PROXY_ROTATE" symbol:@"arrow.triangle.2.circlepath" tap:^(UIViewController *host) {
+    if (proxyUpdating) return;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kAutoProxy]) {
+      [LeadToast showText:LeadL(@"UI_OFF") symbol:@"exclamationmark.circle" inView:host.view]; return;
+    }
+    proxyUpdating = YES;
+    [LeadToast showText:LeadL(@"UI_AUTO_PROXY_CHECKING") symbol:@"arrow.clockwise" inView:host.view];
+    LeadAutoProxyRotate(^(NSString *summary, BOOL reachable) {
+      proxyUpdating = NO;
+      [LeadToast showText:reachable ? (summary ?: @"") : LeadL(@"UI_AUTO_PROXY_NO_ALTERNATIVE") symbol:reachable ? @"checkmark" : @"exclamationmark.circle" inView:host.view];
+      if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
+    });
+  }];
+  proxyRotate.style = LeadRowStyleAction;
+  LeadSection *proxySection = [LeadSection title:nil rows:@[ autoProxy, proxyStatus, proxyRotate ]];
 
   LeadPage *proxy = [LeadPage new];
   proxy.titleKey = @"UI_PAGE_PROXY";

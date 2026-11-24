@@ -40,10 +40,12 @@ final class LeadChannelPromotion: NSObject {
                 } ?? false
             }
             if let channel = channel {
-                // Native additional chat-list item; no fake peer IDs, access hashes, joins or messages.
-                // Mark as a local promotion via the existing proxy-style presentation.
-                promo = .promoData(.init(flags: (1 << 0) | (1 << 3), expires: now + 1200,
-                    peer: resolved.peer, psaType: nil, psaMessage: nil,
+                // Use the native additional-chat-list item. A proxy-only item has
+                // includeIfNoHistory=false in Telegram iOS; a text-bearing announcement
+                // uses the same list slot even when the channel is not in local history.
+                // Explicitly label the content as a Kira advertisement.
+                promo = .promoData(.init(flags: (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3), expires: now + 1200,
+                    peer: resolved.peer, psaType: "kira_promotion", psaMessage: "إعلان قناة iKiraPlus",
                     pendingSuggestions: [], dismissedSuggestions: [], customPendingSuggestion: nil,
                     chats: [channel], users: resolved.users))
             }

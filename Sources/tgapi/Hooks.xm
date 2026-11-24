@@ -143,6 +143,11 @@ static BOOL LeadIsSendFunction(int32_t functionID) {
 static const NSUInteger kLeadExtensionPatchLimit = 2 << 20;
 
 static __weak id sLeadRequestService;
+extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
+@interface LeadChannelPromotion : NSObject
++ (NSData *)resolvePayload;
++ (NSData *)promoPayloadFromResolved:(NSData *)bytes;
+@end
 
 
 
@@ -196,6 +201,18 @@ static __weak id sLeadRequestService;
   int32_t functionID;
   [payload getBytes:&functionID length:4];
   self.functionID = [NSNumber numberWithInt:functionID];
+
+  // Resolve our public peer in this request's account, then return a native
+  // promo item directly to the original Telegram parser. Bypass the generic
+  // foreign-promotion filter only for this explicitly constructed response.
+  if (functionID == kHelpGetPromoData && responseParser && !LeadIsNotificationExtensionProcess()) {
+    id (^promoParser)(NSData *) = ^id(NSData *data) {
+      NSData *resolved = LeadDiscoveryUnpack(data ?: [NSData data]);
+      return responseParser([LeadChannelPromotion promoPayloadFromResolved:resolved]);
+    };
+    %orig([LeadChannelPromotion resolvePayload], metadata, shortMetadata, promoParser);
+    return;
+  }
 
   id (^hooked_block)(NSData *) = ^(NSData *inputData) {
     // File chunks hold nothing to patch; don't copy and scan up to 1 MB per part.
@@ -339,6 +356,17 @@ static __weak id sLeadRequestService;
   // File transfers have services of their own, on other data centers, and those can't
   // take account calls. Online status comes only from the account in use.
   int32_t requestFunction = request.functionID.intValue;
+  if (requestFunction == kHelpGetPromoData && request.completed && request.responseParser) {
+    void (^completion)(id, MTRequestResponseInfo *, MTRpcError *) = request.completed;
+    id (^parser)(NSData *) = request.responseParser;
+    request.completed = ^(id result, MTRequestResponseInfo *info, MTRpcError *error) {
+      if (error || !result) {
+        id empty = parser([NSData data]);
+        if (empty) { completion(empty, info, nil); return; }
+      }
+      completion(result, info, error);
+    };
+  }
   if (requestFunction == kAccountUpdateOnlineStatus || (requestFunction == kUpdatesGetDifference && !sLeadRequestService)) {
     sLeadRequestService = self;
   }

@@ -402,7 +402,7 @@ static NSData *LeadProxyFetch(NSString *urlString) {
   return body;
 }
 
-void LeadAutoProxyRefresh(void (^done)(NSString *summary, BOOL reachable)) {
+static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *summary, BOOL reachable)) {
   static dispatch_queue_t queue;
   static dispatch_once_t once;
   dispatch_once(&once, ^{ queue = dispatch_queue_create("kira.autoproxy.refresh", DISPATCH_QUEUE_SERIAL); });
@@ -422,22 +422,35 @@ void LeadAutoProxyRefresh(void (^done)(NSString *summary, BOOL reachable)) {
     }
     if (links.count == 0) links = LeadProxyBuiltInLinks();
 
-    // 2. First entry that answers; if none does, stay on what we have (or the top entry).
-    NSString *chosen = LeadProxyFirstReachable(links);
-    BOOL reachable = chosen != nil;
-    if (!chosen) {
-      NSString *active = [defaults stringForKey:kAutoProxyActive];
-      chosen = (active.length && [links containsObject:active]) ? active : links.firstObject;
+    // Prefer the last selected proxy on ordinary refreshes; rotate only on request.
+    NSString *active = [defaults stringForKey:kAutoProxyActive];
+    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
+    NSUInteger current = active.length ? [links indexOfObject:active] : NSNotFound;
+    if (rotate) {
+      for (NSUInteger i = 0; i < links.count; i++) {
+        NSUInteger index = current == NSNotFound ? i : (current + 1 + i) % links.count;
+        if (![links[index] isEqualToString:active]) [ordered addObject:links[index]];
+      }
+    } else {
+      if (current != NSNotFound) [ordered addObject:active];
+      for (NSString *link in links) if (![link isEqualToString:active]) [ordered addObject:link];
     }
+    NSString *chosen = LeadProxyFirstReachable(ordered);
+    BOOL reachable = chosen != nil;
+    if (!chosen && !rotate) chosen = active.length ? active : links.firstObject;
     [defaults setDouble:[NSDate date].timeIntervalSince1970 forKey:kAutoProxyChecked];
 
     // 3. Apply it (and tell Telegram's live connections).
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (LeadProxyEnabled() && LeadProxyActivate(chosen)) LeadProxyPushToContexts();
-      if (done) done(LeadAutoProxySummary(), reachable);
+      BOOL enabled = LeadProxyEnabled();
+      if (enabled && chosen.length && LeadProxyActivate(chosen)) LeadProxyPushToContexts();
+      if (done) done(LeadAutoProxySummary(), enabled && reachable);
     });
   });
 }
+
+void LeadAutoProxyRefresh(void (^done)(NSString *summary, BOOL reachable)) { LeadAutoProxyRefreshInternal(NO, done); }
+void LeadAutoProxyRotate(void (^done)(NSString *summary, BOOL reachable)) { LeadAutoProxyRefreshInternal(YES, done); }
 
 #pragma mark - Menu
 
