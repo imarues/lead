@@ -233,7 +233,6 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 }
 
 - (void)updateColors {
-  BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
   UIColor *top = LeadThemeInk();
   UIColor *bottom = LeadThemeAccent();
   _gradient.colors = @[ (id)top.CGColor, (id)bottom.CGColor ];
