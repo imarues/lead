@@ -320,6 +320,9 @@ static NSObject *LeadProxyLock(void) {
   return lock;
 }
 
+// Temporary managed signaling override for native group calls; never persisted.
+static id sLeadGroupProxySettings = nil;
+static NSUInteger sLeadGroupProxyUsers = 0;
 static id sLeadProxySettings = nil;               // MTSocksProxySettings in use, nil = off
 static NSString *sLeadProxyLink = nil;            // canonical link behind it
 static NSDictionary *sLeadProxyInfo = nil;        // parsed form of that link
@@ -367,6 +370,7 @@ static BOOL LeadProxyActivate(NSString *link) {
 
 static void LeadProxyDeactivate(void) {
   @synchronized(LeadProxyLock()) {
+    sLeadGroupProxySettings = nil;
     sLeadProxySettings = nil;
     sLeadProxyLink = nil;
     sLeadProxyInfo = nil;
@@ -383,7 +387,7 @@ static void LeadProxyActivateCached(void) {
 
 id LeadAutoProxyCurrentSettings(void) {
   @synchronized(LeadProxyLock()) {
-    return sLeadProxySettings;
+    return sLeadGroupProxySettings ?: sLeadProxySettings;
   }
 }
 
@@ -444,6 +448,34 @@ static BOOL LeadProxyPushToContexts(void) {
     ((void (*)(id, SEL, id))objc_msgSend)(context, update, block);
   }
   return YES;
+}
+
+// Lifecycle is serialized on the main queue. The normal proxy remains in its
+// own slot, and is restored on the last group context stopping/deallocating.
+// This only reroutes managed MTProto signaling and broadcast parts, NOT the
+// independent group WebRTC media sockets. A manually configured Telegram
+// proxy remains untouched, as in the rest of Auto Proxy.
+void LeadGroupCallProxyBegin(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (++sLeadGroupProxyUsers != 1 || !LeadProxyEnabled()) return;
+    NSDictionary *p = LeadCallProxyNext();
+    id settings = p ? LeadProxyMakeSettings(p) : nil;
+    if (!settings) return;
+    @synchronized(LeadProxyLock()) {
+      if (!sLeadProxyOwn) sLeadProxyOwn = [NSHashTable weakObjectsHashTable];
+      [sLeadProxyOwn addObject:settings];
+      sLeadGroupProxySettings = settings;
+    }
+    LeadProxyPushToContexts();
+    NSLog(@"[Kira] Group signaling SOCKS5 %@:%@", p[@"server"], p[@"port"]);
+  });
+}
+void LeadGroupCallProxyEnd(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (sLeadGroupProxyUsers == 0 || --sLeadGroupProxyUsers != 0) return;
+    @synchronized(LeadProxyLock()) { sLeadGroupProxySettings = nil; }
+    LeadProxyPushToContexts();
+  });
 }
 
 #pragma mark - Refresh

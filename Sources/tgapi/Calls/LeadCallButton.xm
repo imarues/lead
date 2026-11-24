@@ -33,6 +33,7 @@ static void LeadExcludeRecordingControlFromSystemCapture(UIView *control) {
 static char kLeadCallRecordButtonKey;
 static BOOL leadPrivateHooksInstalled=NO;
 static BOOL leadGroupHooksInstalled=NO;
+static BOOL leadGroupControllerHooksInstalled=NO;
 
 @interface LeadRecordingHUDWindow : UIWindow
 @end
@@ -269,10 +270,14 @@ static BOOL leadGroupHooksInstalled=NO;
 @end
 
 static void LeadInstallCallControl(UIView *callView) {
-    if(!callView.window || ![[NSUserDefaults standardUserDefaults] boolForKey:LeadCallRecordingEnabledKey])
+    if(!callView.window || callView.bounds.size.width<100 || callView.bounds.size.height<150 ||
+       ![[NSUserDefaults standardUserDefaults] boolForKey:LeadCallRecordingEnabledKey])
         return;
     UIButton *button=objc_getAssociatedObject(callView,&kLeadCallRecordButtonKey);
-    if(button)return;
+    if(button) {
+        if(button.superview!=callView)[callView addSubview:button];
+        return;
+    }
     button=[UIButton buttonWithType:UIButtonTypeCustom];
     button.frame=CGRectMake(MAX(4,callView.bounds.size.width-82),
                             MAX(100,callView.bounds.size.height*0.46),68,44);
@@ -329,9 +334,52 @@ static void LeadDetachCallControl(UIView *view) {
     UIView *callView=(UIView *)self;
     if(callView.window)LeadInstallCallControl(callView);
 }
+- (void)layoutSubviews {
+    %orig;
+    if(self.window)LeadInstallCallControl((UIView *)self);
+}
 - (void)willMoveToWindow:(UIWindow *)window {
     if(!window)LeadDetachCallControl((UIView *)self);
     %orig;
+}
+%end
+%end
+
+// Group/channel calls share VideoChatScreenV2Impl. Some versions attach the
+// component after didMoveToWindow; keep a controller-level fallback.
+static UIView *LeadFindGroupCallView(UIView *view) {
+    if([NSStringFromClass(view.class) containsString:@"VideoChatScreenComponent"] &&
+       view.bounds.size.width>=100 && view.bounds.size.height>=150)return view;
+    for(UIView *child in view.subviews) {
+        UIView *found=LeadFindGroupCallView(child);
+        if(found)return found;
+    }
+    return nil;
+}
+static void LeadEnsureGroupControllerControl(UIViewController *controller) {
+    if(!controller.isViewLoaded || !controller.view.window)return;
+    UIView *root=controller.view;
+    UIView *component=LeadFindGroupCallView(root);
+    if(component && component!=root) {
+        LeadDetachCallControl(root);
+        LeadInstallCallControl(component);
+    } else {
+        LeadInstallCallControl(root);
+    }
+}
+%group LeadGroupControllerHooks
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig(animated);
+    LeadEnsureGroupControllerControl((UIViewController *)self);
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    LeadEnsureGroupControllerControl((UIViewController *)self);
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig(animated);
+    if(self.isViewLoaded)LeadDetachCallControl(self.view);
 }
 %end
 %end
@@ -349,6 +397,13 @@ static void LeadTryInstallCallScreenHooks(void) {
         if(cls) {
             %init(LeadGroupCallScreenHooks,UIView=cls);
             leadGroupHooksInstalled=YES;
+        }
+    }
+    if(!leadGroupControllerHooksInstalled) {
+        Class cls=objc_getClass("_TtC15TelegramCallsUI21VideoChatScreenV2Impl");
+        if(cls) {
+            %init(LeadGroupControllerHooks,UIViewController=cls);
+            leadGroupControllerHooksInstalled=YES;
         }
     }
 }
