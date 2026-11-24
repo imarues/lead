@@ -4,7 +4,31 @@
 #import <objc/runtime.h>
 #import "LeadCallRecording.h"
 #import "LeadCallAudio.h"
+extern "C" void LeadRecordingPresentSaveOptions(NSURL *file,NSError *warning,UIViewController *presenter);
 #import "../UI/LeadDesign.h"
+
+// Keep Lead's own REC control visible and interactive to the local user,
+// while excluding its layer from native iOS screenshots/screen recordings.
+// UIApplicationUserDidTakeScreenshotNotification is posted AFTER the capture,
+// so reacting to that notification would leave the REC control in the image.
+// This CoreAnimation mask is undocumented: safely leave the UI untouched on
+// OS versions where the layer capability is unavailable.
+static void LeadExcludeRecordingControlFromSystemCapture(UIView *control) {
+    if(!control)return;
+    CALayer *layer=control.layer;
+    SEL readMask=NSSelectorFromString(@"disableUpdateMask");
+    SEL writeMask=NSSelectorFromString(@"setDisableUpdateMask:");
+    if(![layer respondsToSelector:readMask] ||
+       ![layer respondsToSelector:writeMask])return;
+    @try {
+        NSInteger currentMask=[[layer valueForKey:@"disableUpdateMask"] integerValue];
+        [layer setValue:@(currentMask | (1 << 1) | (1 << 4))
+                 forKey:@"disableUpdateMask"];
+    } @catch (__unused NSException *exception) {
+        // The recording button must continue to work if an iOS update changes
+        // its internal CoreAnimation capture behavior.
+    }
+}
 
 static char kLeadCallRecordButtonKey;
 static BOOL leadPrivateHooksInstalled=NO;
@@ -110,6 +134,7 @@ static BOOL leadGroupHooksInstalled=NO;
     move.maximumNumberOfTouches=1;
     [badge addGestureRecognizer:move];
     [controller.view addSubview:badge];
+    LeadExcludeRecordingControlFromSystemCapture(badge);
     self.hudWindow=window;
     self.hudButton=badge;
     // Never makeKeyAndVisible: Telegram keeps its key window and keyboard.
@@ -204,16 +229,20 @@ static BOOL leadGroupHooksInstalled=NO;
         [recorder stop:^(NSURL *file,NSError *error){
             button.enabled=YES;
             [self update:button];
-            NSString *message=(file && error)?
-                [NSString stringWithFormat:@"تم حفظ الصوت فقط في: %@\n%@",file.lastPathComponent,error.localizedDescription]:
-                (error?error.localizedDescription:
-                [NSString stringWithFormat:@"تم حفظ التسجيل: %@",file.lastPathComponent]);
-            UIAlertController *result=[UIAlertController alertControllerWithTitle:
-               (file && error?@"تم حفظ الصوت فقط":error?@"التسجيل غير مكتمل":@"تم حفظ التسجيل") message:message
-               preferredStyle:UIAlertControllerStyleAlert];
-            [result addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
-            UIViewController *top=LeadTopPresenter();
-            if(top)[top presentViewController:result animated:YES completion:nil];
+            if(file) {
+                // Finalized MP4/M4A is ready. Let the user name it and select
+                // archive, Photos, Saved Messages, or all destinations.
+                LeadRecordingPresentSaveOptions(file,error,LeadTopPresenter());
+            } else {
+                UIAlertController *failed=[UIAlertController alertControllerWithTitle:
+                    @"تعذّر إنهاء التسجيل"
+                    message:error.localizedDescription?:@"ما تم إنشاء ملف صالح."
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [failed addAction:[UIAlertAction actionWithTitle:@"موافق"
+                    style:UIAlertActionStyleCancel handler:nil]];
+                UIViewController *top=LeadTopPresenter();
+                if(top)[top presentViewController:failed animated:YES completion:nil];
+            }
         }];
         return;
     }
@@ -260,6 +289,7 @@ static void LeadInstallCallControl(UIView *callView) {
     pan.maximumNumberOfTouches=1;
     [button addGestureRecognizer:pan];
     [callView addSubview:button];
+    LeadExcludeRecordingControlFromSystemCapture(button);
     objc_setAssociatedObject(callView,&kLeadCallRecordButtonKey,button,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [LeadCallRecordButtonTarget shared].currentCallButton=button;
     [[LeadCallRecordButtonTarget shared] refreshRecordingUI];

@@ -8,6 +8,11 @@
 #import <os/lock.h>
 #import <objc/message.h>
 
+// Snow is a visual-only overlay, independent of Telegram calls/media handling.
+extern "C" void LeadSnowInstall(void);
+extern "C" void LeadSnowChatDidAppear(UIViewController *chat);
+extern "C" void LeadSnowChatWillDisappear(UIViewController *chat);
+
 @interface ASDisplayNode : NSObject
 @property (atomic, strong, readonly) CALayer *layer;
 @property (atomic, assign, readonly) UIView *view;
@@ -56,6 +61,7 @@ static TGLocalization *getActiveTGLocalization(void) {
     return nil;
 }
 
+extern "C" void LeadInstallFileSendOptions(void);
 void showUI();
 static BOOL LeadIsUsableGhostTitle(NSString *title);
 static BOOL LeadIsCurrentUserPeer(long long peerId);
@@ -1513,6 +1519,14 @@ static void LeadInstallProfileItems(UIViewController *controller) {
         }
     } @catch (NSException *e) {}
 }
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    LeadSnowChatDidAppear((UIViewController *)self);
+}
+- (void)viewWillDisappear:(BOOL)animated {
+    LeadSnowChatWillDisappear((UIViewController *)self);
+    %orig;
+}
 %end
 
 %hook _TtC10TelegramUI22TelegramRootController
@@ -1528,65 +1542,209 @@ static void LeadInstallProfileItems(UIViewController *controller) {
 }
 %end
 
-%group CallConfirmHooks
+// Intercept ASControlNode's native touch-up event before Telegram dials.
+// CRITICAL: Texture/AsyncDisplayKit has its OWN event enumeration:
+// ASControlNodeEventTouchUpInside = 1 << 4 (16).
+// UIKit's UIControlEventTouchUpInside = 1 << 6 (64) is ONLY for UIControl.
+// Mixing these enums is exactly why the menu didn't appear on profile taps.
+static BOOL gLeadCallPromptOpen=NO;
+static __thread BOOL gLeadCallPromptBypass=NO;
 
+static BOOL LeadIsVisibleCallScreen(UIView *view) {
+    if(!view || view.hidden)return NO;
+    if([NSStringFromClass(view.class) containsString:@"PrivateCallScreen"])return YES;
+    for(UIView *child in view.subviews)
+        if(LeadIsVisibleCallScreen(child))return YES;
+    return NO;
+}
+static BOOL LeadIsOutgoingCallLabel(NSString *label, BOOL allowShortVideo,
+                                     BOOL *video, BOOL *voice) {
+    NSString *lower=[[label?:@"" stringByTrimmingCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if(!lower.length)return NO;
+    TGLocalization *loc=getActiveTGLocalization();
+    NSString *videoLabel=[[loc get:@"PeerInfo.ButtonVideoCall"] lowercaseString];
+    NSString *voiceLabel=[[loc get:@"PeerInfo.ButtonCall"] lowercaseString];
+    BOOL isVideo=[lower isEqualToString:@"video call"] ||
+        [lower isEqualToString:@"videochat"] ||
+        [lower isEqualToString:@"видеозвонок"] ||
+        [lower isEqualToString:@"видео"] ||
+        [lower containsString:@"مكالمة فيديو"] ||
+        [lower containsString:@"اتصال فيديو"] ||
+        [lower containsString:@"مكالمة مرئية"] ||
+        [lower containsString:@"اتصال مرئي"] ||
+        [lower containsString:@"مكالمة بالفيديو"] ||
+        (allowShortVideo && [lower isEqualToString:@"video"]) ||
+        (videoLabel.length && ![videoLabel isEqualToString:@"peerinfo.buttonvideocall"] &&
+         [lower isEqualToString:videoLabel]);
+    BOOL isVoice=[lower isEqualToString:@"call"] ||
+        [lower isEqualToString:@"позвонить"] ||
+        [lower isEqualToString:@"звонок"] ||
+        [lower isEqualToString:@"مكالمة صوتية"] ||
+        (voiceLabel.length && ![voiceLabel isEqualToString:@"peerinfo.buttoncall"] &&
+         [lower isEqualToString:voiceLabel]);
+    if(video)*video=isVideo;
+    if(voice)*voice=isVoice;
+    return isVideo || isVoice;
+}
+static BOOL LeadPresentCallChoice(NSString *label,BOOL allowShortVideo,
+                                    void (^originalAction)(void)) {
+    if(gLeadCallPromptBypass)return NO;
+    BOOL isVideo=NO,isVoice=NO;
+    if(!LeadIsOutgoingCallLabel(label,allowShortVideo,&isVideo,&isVoice))return NO;
+    BOOL confirmCalls=[[NSUserDefaults standardUserDefaults] boolForKey:kConfirmCalls];
+    if(!confirmCalls || !(isVoice || isVideo))return NO;
+    if(gLeadCallPromptOpen)return YES;
+    UIWindow *window=LeadMainWindow();
+    // A video button *during* a call is not a new call. Avoid touching it.
+    if(window && LeadIsVisibleCallScreen(window))return NO;
+    UIViewController *root=window.rootViewController;
+    if(!root) {
+        NSLog(@"[Kira] refusing to dial without confirmation: no presenter");
+        return YES;
+    }
+    while(root.presentedViewController)root=root.presentedViewController;
+    gLeadCallPromptOpen=YES;
+    void (^dial)(void)=[originalAction copy];
+    UIAlertController *confirm=[UIAlertController
+        alertControllerWithTitle:@"تأكيد المكالمة"
+        message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+         style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action){
+            gLeadCallPromptOpen=NO;
+         }]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"اتصال"
+         style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){
+            gLeadCallPromptOpen=NO;
+            dial();
+         }]];
+    [root presentViewController:confirm animated:YES completion:nil];
+    return YES;
+}
+
+// The peer profile's "video call" button is NOT dispatched by UIControl.
+// Telegram creates PeerInfoHeaderButtonNode (a HighlightableButtonNode) and
+// registers the Swift @objc selector buttonPressed. That selector invokes
+// PeerInfoScreenNode.performButtonAction(.videoCall), which calls requestCall
+// directly. Hook the precise selector before the real call can start.
+//
+// Keep its original IMP so confirming a call performs the app action once.
+// Neither call recording nor the
+// generic camera/microphone controls are affected.
+static IMP gLeadOriginalPeerInfoButtonPressed=NULL;
+static IMP gLeadOriginalPeerInfoActionPressed=NULL;
+static BOOL gLeadPeerInfoHookInstalled=NO;
+static BOOL gLeadPeerInfoActionHookInstalled=NO;
+
+static void LeadInterceptPeerInfoPress(id node,SEL selector,IMP original) {
+    if(!original)return;
+    if(gLeadCallPromptBypass) {
+        ((void(*)(id,SEL))original)(node,selector);
+        return;
+    }
+    NSString *title=[node respondsToSelector:@selector(accessibilityLabel)]?
+        [(id)node accessibilityLabel]:nil;
+    // The original button's accessibility label is taken from the exact
+    // localized PeerInfo_ButtonVideoCall string (including "مكالمة مرئية").
+    // Avoid touching unrelated profile buttons like search or message.
+    void (^dial)(void)=^{
+        gLeadCallPromptBypass=YES;
+        @try {
+            ((void(*)(id,SEL))original)(node,selector);
+        } @finally {
+            gLeadCallPromptBypass=NO;
+        }
+    };
+    if(LeadPresentCallChoice(title,YES,dial)) {
+        NSLog(@"[Lead] intercepted Telegram profile video call button: %@",title);
+        return;
+    }
+    ((void(*)(id,SEL))original)(node,selector);
+}
+static void LeadPeerInfoHeaderButtonPressed(id node,SEL selector) {
+    LeadInterceptPeerInfoPress(node,selector,gLeadOriginalPeerInfoButtonPressed);
+}
+static void LeadPeerInfoHeaderActionPressed(id node,SEL selector) {
+    LeadInterceptPeerInfoPress(node,selector,gLeadOriginalPeerInfoActionPressed);
+}
+static BOOL LeadInstallOneProfileButtonHook(const char *swiftClassName,
+                                            IMP replacement,IMP *original) {
+    Class cls=objc_getClass(swiftClassName);
+    if(!cls)return NO;
+    SEL selector=NSSelectorFromString(@"buttonPressed");
+    Method method=class_getInstanceMethod(cls,selector);
+    if(!method) {
+        NSLog(@"[Lead] profile call button class has no buttonPressed: %s",swiftClassName);
+        return NO;
+    }
+    IMP current=method_getImplementation(method);
+    if(current==replacement)return YES;
+    // It is an instance method implemented by this exact Swift class, not
+    // an inherited generic UIKit sendAction method.
+    *original=method_setImplementation(method,replacement);
+    NSLog(@"[Lead] intercepted Swift profile button selector: %s",swiftClassName);
+    return *original!=NULL;
+}
+static void LeadInstallPeerInfoCallHooks(void) {
+    if(!gLeadPeerInfoHookInstalled) {
+        gLeadPeerInfoHookInstalled=LeadInstallOneProfileButtonHook(
+            "_TtC10TelegramUI24PeerInfoHeaderButtonNode",
+            (IMP)LeadPeerInfoHeaderButtonPressed,
+            &gLeadOriginalPeerInfoButtonPressed);
+    }
+    if(!gLeadPeerInfoActionHookInstalled) {
+        gLeadPeerInfoActionHookInstalled=LeadInstallOneProfileButtonHook(
+            "_TtC10TelegramUI30PeerInfoHeaderActionButtonNode",
+            (IMP)LeadPeerInfoHeaderActionPressed,
+            &gLeadOriginalPeerInfoActionPressed);
+    }
+}
+
+%group CallConfirmHooks
 %hook ASControlNode
 - (void)sendActionsForControlEvents:(NSUInteger)controlEvents withEvent:(UIEvent *)event {
-    if (controlEvents == (1 << 4)) { // ASControlNodeEventTouchUpInside
-        NSString *label = [(id)self accessibilityLabel];
-        if (label && label.length > 0 && [[NSUserDefaults standardUserDefaults] boolForKey:kConfirmCalls]) {
-            NSString *lower = [label lowercaseString];
-            
-            // Fallback EN/RU labels plus whatever the active Telegram language
-            // calls the profile buttons (PeerInfo.ButtonCall / ButtonVideoCall).
-            NSMutableSet *callLabels = [NSMutableSet setWithArray:@[
-                @"call", @"позвонить", @"звонок"
-            ]];
-            NSMutableSet *videoLabels = [NSMutableSet setWithArray:@[
-                @"video", @"видео", @"video call", @"видеозвонок"
-            ]];
-            TGLocalization *loc = getActiveTGLocalization();
-            NSString *localizedCall = [[loc get:@"PeerInfo.ButtonCall"] lowercaseString];
-            NSString *localizedVideo = [[loc get:@"PeerInfo.ButtonVideoCall"] lowercaseString];
-            if (localizedCall.length > 0 && ![localizedCall isEqualToString:@"peerinfo.buttoncall"]) [callLabels addObject:localizedCall];
-            if (localizedVideo.length > 0 && ![localizedVideo isEqualToString:@"peerinfo.buttonvideocall"]) [videoLabels addObject:localizedVideo];
-            
-            BOOL isCall = [callLabels containsObject:lower];
-            BOOL isVideo = [videoLabels containsObject:lower];
-            
-            if (isCall || isVideo) {
-                UIWindow *window = LeadMainWindow();
-                UIViewController *rootVC = window.rootViewController;
-                while (rootVC.presentedViewController) {
-                    rootVC = rootVC.presentedViewController;
-                }
-                if (rootVC) {
-                    NSString *confirmTitle = isVideo ? @"Video Call" : @"Call";
-                    NSString *alertTitle = isVideo ? @"Start Video Call?" : @"Start Call?";
-                    
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:alertTitle
-                                                                                   message:nil
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-                    
-                    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                                             style:UIAlertActionStyleCancel
-                                                           handler:nil]];
-                    [alert addAction:[UIAlertAction actionWithTitle:confirmTitle
-                                                             style:UIAlertActionStyleDefault
-                                                           handler:^(UIAlertAction *action) {
-                        %orig(controlEvents, event);
-                    }]];
-                    
-                    [rootVC presentViewController:alert animated:YES completion:nil];
-                    return;
-                }
+    // Covers Swift modules that only load when the profile screen is opened.
+    // The call node is already instantiated before it receives this event.
+    if(!gLeadPeerInfoHookInstalled || !gLeadPeerInfoActionHookInstalled)
+        LeadInstallPeerInfoCallHooks();
+    if(gLeadCallPromptBypass){%orig(controlEvents,event);return;}
+    // These are ASControlNodeEvent flags, NOT UIKit's UIControlEvent flags.
+    static const NSUInteger kLeadASControlTouchUpInside=(1u << 4);
+    if((controlEvents & kLeadASControlTouchUpInside)!=0) {
+        // Hold the original control throughout the picker so it cannot be
+        // deallocated while the user's movie assets are loading.
+        id control=self;
+        void (^dial)(void)=^{
+            gLeadCallPromptBypass=YES;
+            @try {
+                [(id)control sendActionsForControlEvents:controlEvents withEvent:nil];
+            } @finally {
+                gLeadCallPromptBypass=NO;
             }
-        }
+        };
+        if(LeadPresentCallChoice([(id)self accessibilityLabel],YES,dial))return;
     }
     %orig;
 }
 %end
-
+// UIKit-backed menu items use UIControl rather than AsyncDisplayKit's
+// ASControlNode. They previously dialed immediately without any selector.
+%hook UIControl
+- (void)sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event {
+    if(gLeadCallPromptBypass){%orig;return;}
+    NSString *title=self.accessibilityLabel;
+    if(!title.length && [self isKindOfClass:UIButton.class])
+        title=((UIButton *)self).currentTitle;
+    UIControl *control=self;
+    void (^dial)(void)=^{
+        gLeadCallPromptBypass=YES;
+        @try { [control sendAction:action to:target forEvent:nil]; }
+        @finally { gLeadCallPromptBypass=NO; }
+    };
+    if(LeadPresentCallChoice(title,NO,dial))return;
+    %orig;
+}
+%end
 %end // CallConfirmHooks
 
 %group SiriBypassHooks
@@ -1661,6 +1819,7 @@ static void hook() {
     
     [LeadAntiRevokeUpdater shared];
     [LeadDeletionBanner install];
+    LeadInstallFileSendOptions();
     
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
         kDisableAllAds: @YES,
@@ -1668,6 +1827,7 @@ static void hook() {
         kDisableScreenshotNotification: @YES,
         kHideProxyPromo: @YES,
         FILE_PICKER_FIX_KEY: @YES,
+        kCustomFileSend: @YES,
         kSendAsVoice: @YES,
         kVideoToVoice: @NO,
         kVideoToNote: @NO,
@@ -1700,6 +1860,8 @@ static void hook() {
         kDisableEmojiInteractionStatus: @NO,
         kDisableEmojiAcknowledgementStatus: @NO,
         kConfirmCalls: @YES,
+        kLeadSnowEnabled: @NO,
+        kLeadSnowHideInChats: @NO,
         @"LeadCallRecordingEnabled": @NO,
         kHideTTLLabel: @YES,
         kVisualStarsEnabled: @NO,
@@ -1727,6 +1889,8 @@ static void hook() {
         [leadDefaults setBool:YES forKey:kLeadMediaDefaultsMigration];
     }
 
+    LeadSnowInstall();
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         %init(
             _TtC10TelegramUI18ChatControllerImpl = objc_getClass("_TtC10TelegramUI18ChatControllerImpl")
@@ -1736,7 +1900,15 @@ static void hook() {
             Class asControlNodeClass = objc_getClass("ASControlNode");
             if (asControlNodeClass) {
                 %init(CallConfirmHooks, ASControlNode = asControlNodeClass);
-                NSLog(@"[Lead] CallConfirmHooks initialized");
+                LeadInstallPeerInfoCallHooks();
+                // Some app forks lazily register their Swift profile screen
+                // after Theos installs the generic ASControlNode hooks.
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),
+                    dispatch_get_main_queue(),^{LeadInstallPeerInfoCallHooks();});
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(7*NSEC_PER_SEC)),
+                    dispatch_get_main_queue(),^{LeadInstallPeerInfoCallHooks();});
+                NSLog(@"[Lead] CallConfirmHooks initialized, profile=%d action=%d",
+                      gLeadPeerInfoHookInstalled,gLeadPeerInfoActionHookInstalled);
             }
         } @catch (NSException *e) {
             NSLog(@"[Lead] CallConfirmHooks init failed: %@", e);

@@ -3,6 +3,14 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 #import <QuartzCore/QuartzCore.h>
+// The gallery preview is an AVPlayerLayer; UIKit snapshots omit its actual
+// video pixels. Explicitly composite its decoded frame when recording.
+extern void LeadVirtualMediaDrawRecordingPreview(UIView *captureRoot);
+
+// Never alter recording pixels to cover iOS status indicators: the prior
+// interpolation created visible black/noisy rectangles in the user's video.
+extern NSArray<NSURL *> *LeadVirtualMediaFullCallAudioSources(void);
+extern double LeadVirtualMediaFullCallElapsed(void);
 
 NSString *const LeadCallRecordingEnabledKey=@"LeadCallRecordingEnabled";
 NSString *const LeadCallRecordingChangedNotification=@"LeadCallRecordingChanged";
@@ -54,7 +62,7 @@ static NSError *LeadRecorderError(NSString *detail) {
        AVVideoWidthKey:@(width),
        AVVideoHeightKey:@(height),
        AVVideoCompressionPropertiesKey:@{
-          AVVideoAverageBitRateKey:@(8000000),
+          AVVideoAverageBitRateKey:@(10000000),
           AVVideoExpectedSourceFrameRateKey:@(30),
           AVVideoMaxKeyFrameIntervalKey:@(60)
        }
@@ -186,12 +194,15 @@ static NSError *LeadRecorderError(NSString *detail) {
                           self.size.height/MAX(view.bounds.size.height,1));
     UIGraphicsPushContext(ctx);
     BOOL drawn=[view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
-    UIGraphicsPopContext();
     if(!drawn) {
         // CALayer fallback avoids a zero-frame recording if UIKit declines
         // a snapshot during a Telegram transition or on a specific iOS build.
         [view.layer renderInContext:ctx];
     }
+    // Draw the actual gallery-video pixels *after* the UIKit snapshot.
+    // The user may drag/resize the preview; the recorder uses its live rect.
+    LeadVirtualMediaDrawRecordingPreview(view);
+    UIGraphicsPopContext();
     CGContextRelease(ctx);
     NSTimeInterval elapsed=MAX(0,CACurrentMediaTime()-self.startTime);
     CMTime presentationTime=CMTimeMakeWithSeconds(elapsed,600);
@@ -232,6 +243,8 @@ static NSError *LeadRecorderError(NSString *detail) {
 @property(nonatomic,strong) LeadCallVideoRecorder *videoRecorder;
 @property(nonatomic,copy) NSString *temporaryFolder;
 @property(nonatomic,strong) NSDate *startDate;
+@property(nonatomic,copy) NSArray<NSURL *> *fullCallSources;
+@property(nonatomic,assign) NSTimeInterval fullCallOffset;
 @end
 
 @implementation LeadCallRecording
@@ -243,7 +256,7 @@ static NSError *LeadRecorderError(NSString *detail) {
 }
 + (NSString *)recordingsDirectory {
     NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
-    NSString *folder=[[documents stringByAppendingPathComponent:@"Lead"] stringByAppendingPathComponent:@"Calls"];
+    NSString *folder=[[documents stringByAppendingPathComponent:@"Kira"] stringByAppendingPathComponent:@"Calls"];
     [[NSFileManager defaultManager] createDirectoryAtPath:folder
           withIntermediateDirectories:YES attributes:nil error:nil];
     return folder;
@@ -273,10 +286,12 @@ static NSError *LeadRecorderError(NSString *detail) {
     // Recording may only be initiated by tapping the visible in-call control.
     if(self.recording || !view.window ||
        ![[NSUserDefaults standardUserDefaults] boolForKey:LeadCallRecordingEnabledKey]) {
-        if(completion)completion(LeadRecorderError(@"Enable Call Recording in Lead settings and open an active call."));
+        if(completion)completion(LeadRecorderError(@"Enable Call Recording in Kira settings and open an active call."));
         return;
     }
     self.startDate=[NSDate date];
+    self.fullCallSources=video?[LeadVirtualMediaFullCallAudioSources() copy]:nil;
+    self.fullCallOffset=self.fullCallSources.count==2?LeadVirtualMediaFullCallElapsed():0;
     self.videoRequested=video;
     self.audioRequested=YES;
     self.temporaryFolder=[NSTemporaryDirectory() stringByAppendingPathComponent:
@@ -328,16 +343,49 @@ static NSError *LeadRecorderError(NSString *detail) {
     [outVideo insertTimeRange:CMTimeRangeMake(kCMTimeZero,videoTrack.timeRange.duration)
                    ofTrack:videoTrack atTime:kCMTimeZero error:&err];
     if(err){if(completion)completion(nil,err);return;}
-    AVAssetTrack *audioTrack=[sound tracksWithMediaType:AVMediaTypeAudio].firstObject;
-    if(audioTrack) {
-        AVMutableCompositionTrack *outAudio=[mix addMutableTrackWithMediaType:AVMediaTypeAudio preferredTrackID:kCMPersistentTrackID_Invalid];
-        CMTime duration=CMTimeMinimum(audioTrack.timeRange.duration,videoTrack.timeRange.duration);
-        [outAudio insertTimeRange:CMTimeRangeMake(kCMTimeZero,duration)
-                        ofTrack:audioTrack atTime:kCMTimeZero error:&err];
-        if(err){if(completion)completion(nil,err);return;}
+    NSMutableArray<AVMutableAudioMixInputParameters *> *audioGains=[NSMutableArray array];
+    // Full virtual call: archive the two chosen movie tracks only.
+    // In the LOCAL archive, FIRST (quiet local preview) is quiet and
+    // SECOND (simulated peer) is loud. The FIRST movie is still transmitted
+    // to the other participant at a separate, high WebRTC level.
+    // Never mix the real peer's microphone into the simulated recording.
+    if(self.fullCallSources.count==2) {
+        CMTime begin=CMTimeMakeWithSeconds(MAX(0,self.fullCallOffset),600);
+        for(NSUInteger i=0;i<2;i++) {
+            AVURLAsset *asset=[AVURLAsset URLAssetWithURL:self.fullCallSources[i] options:nil];
+            AVAssetTrack *source=[asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+            if(!source)continue;
+            CMTime available=CMTimeSubtract(source.timeRange.duration,begin);
+            if(CMTIME_COMPARE_INLINE(available,<=,kCMTimeZero))continue;
+            CMTime duration=CMTimeMinimum(videoTrack.timeRange.duration,available);
+            AVMutableCompositionTrack *out=[mix addMutableTrackWithMediaType:AVMediaTypeAudio
+                                              preferredTrackID:kCMPersistentTrackID_Invalid];
+            if(![out insertTimeRange:CMTimeRangeMake(begin,duration)
+                             ofTrack:source atTime:kCMTimeZero error:&err]) {
+                if(completion)completion(nil,err);return;
+            }
+            AVMutableAudioMixInputParameters *gain=[AVMutableAudioMixInputParameters
+                audioMixInputParametersWithTrack:out];
+            [gain setVolume:(i==0?0.12f:1.0f) atTime:kCMTimeZero];
+            [audioGains addObject:gain];
+        }
+    } else {
+        AVAssetTrack *audioTrack=[sound tracksWithMediaType:AVMediaTypeAudio].firstObject;
+        if(audioTrack) {
+            AVMutableCompositionTrack *outAudio=[mix addMutableTrackWithMediaType:AVMediaTypeAudio preferredTrackID:kCMPersistentTrackID_Invalid];
+            CMTime duration=CMTimeMinimum(audioTrack.timeRange.duration,videoTrack.timeRange.duration);
+            [outAudio insertTimeRange:CMTimeRangeMake(kCMTimeZero,duration)
+                            ofTrack:audioTrack atTime:kCMTimeZero error:&err];
+            if(err){if(completion)completion(nil,err);return;}
+        }
     }
     AVAssetExportSession *exporter=[[AVAssetExportSession alloc] initWithAsset:mix
                        presetName:AVAssetExportPresetHighestQuality];
+    if(audioGains.count) {
+        AVMutableAudioMix *levels=[AVMutableAudioMix audioMix];
+        levels.inputParameters=audioGains;
+        exporter.audioMix=levels;
+    }
     exporter.outputURL=final;
     exporter.outputFileType=AVFileTypeMPEG4;
     [exporter exportAsynchronouslyWithCompletionHandler:^{
@@ -361,10 +409,23 @@ static NSError *LeadRecorderError(NSString *detail) {
         LeadCallAudioStop(^(NSURL *audioFile,NSError *audioError) {
             typeof(self) strongSelf=weakSelf;
             if(!strongSelf) return;
-            // Do not claim a complete two-sided audio call if AudioUnit hooks
-            // were incompatible with this Telegram version.
+            // A call's screen frames are independent of its audio capture.
+            // Never lose a finished MP4 merely because one/both CoreAudio
+            // paths were unavailable on this fork of Telegram.
             if(audioError) {
-                if(completion)completion(nil,audioError);
+                if(videoFile && !videoError) {
+                    [strongSelf finishOutputAudio:nil video:videoFile completion:^(NSURL *savedVideo,NSError *savingError) {
+                        if(savedVideo && !savingError) {
+                            // Chosen media soundtracks remain valid even if
+                            // the native call's CoreAudio input was unavailable.
+                            NSError *warning=strongSelf.fullCallSources.count==2?nil:
+                                [NSError errorWithDomain:@"Lead.CallRecorder" code:3
+                                    userInfo:@{NSLocalizedDescriptionKey:
+                                     @"Live call audio failed; video is saved without live call sound."}];
+                            if(completion)completion(savedVideo,warning);
+                        } else if(completion)completion(nil,savingError?:audioError);
+                    }];
+                } else if(completion)completion(nil,audioError);
                 return;
             }
             if(videoError) {

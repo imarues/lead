@@ -30,7 +30,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   };
 }
 
-@interface Lead () <UISearchResultsUpdating, UIScrollViewDelegate>
+@interface Kira () <UISearchResultsUpdating, UIScrollViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, strong) NSArray<LeadPage *> *pages;
@@ -49,14 +49,14 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 @property (nonatomic, assign) NSInteger appearOrder;
 @end
 
-@implementation Lead
+@implementation Kira
 
 + (void)presentMenu {
   UIViewController *root = LeadTopPresenter();
   if (!root) return;
   // Already open (and actually on screen) — nothing to do.
   if ([root isKindOfClass:[LeadNavigationController class]] && root.view.window) return;
-  LeadNavigationController *nav = [[LeadNavigationController alloc] initWithRootViewController:[Lead new]];
+  LeadNavigationController *nav = [[LeadNavigationController alloc] initWithRootViewController:[Kira new]];
   [root presentViewController:nav animated:YES completion:nil];
 }
 
@@ -90,7 +90,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 }
 
 // With Telegram's Rust engine (Debug menu) no request passes through MtProtoKit,
-// so every network feature of Lead is silently off. Say so instead of pretending.
+// so every network feature of Kira is silently off. Say so instead of pretending.
 - (void)refreshEngineWarning {
   BOOL blind = LeadNetworkHookActivity() == 0 && LeadTweakUptime() > 20;
   if (blind == (self.engineWarningCard != nil)) return;
@@ -122,7 +122,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
       [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(closeTapped)];
 
   self.navTitleLabel = [UILabel new];
-  self.navTitleLabel.text = @"Lead";
+  self.navTitleLabel.text = @"Kira";
   self.navTitleLabel.font = LeadRoundedFont(17, UIFontWeightSemibold);
   self.navTitleLabel.alpha = 0;
   // Navigation transitions animate the titleView's own alpha back to 1, so the
@@ -131,7 +131,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   UIView *titleContainer = [[UIView alloc] initWithFrame:self.navTitleLabel.bounds];
   [titleContainer addSubview:self.navTitleLabel];
   self.navigationItem.titleView = titleContainer;
-  self.navigationItem.backButtonTitle = @"Lead";
+  self.navigationItem.backButtonTitle = @"Kira";
 
   self.searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
   self.searchController.searchResultsUpdater = self;
@@ -179,7 +179,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   [header addSubview:self.logoView];
 
   UILabel *title = [UILabel new];
-  title.text = @"Lead";
+  title.text = @"Kira";
   title.font = LeadRoundedFont(32, UIFontWeightBold);
   title.textColor = UIColor.labelColor;
 
@@ -288,6 +288,8 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 }
 
 - (NSString *)valueForPage:(LeadPage *)page {
+  if ([page.titleKey isEqualToString:@"UI_MESSAGE_DISCOVERY_TITLE"] ||
+      [page.titleKey isEqualToString:@"UI_CONVERSIONS_TITLE"]) return @"";
   NSInteger count = page.enabledCount;
   return count > 0 ? [NSString stringWithFormat:LeadL(@"UI_ON_COUNT"), (long)count] : LeadL(@"UI_OFF");
 }
@@ -480,6 +482,14 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 }
 
 - (void)openPage:(LeadPage *)page {
+  if ([page.titleKey isEqualToString:@"UI_MESSAGE_DISCOVERY_TITLE"]) {
+    [self.navigationController pushViewController:[LeadMessageDiscoveryViewController new] animated:YES];
+    return;
+  }
+  if ([page.titleKey isEqualToString:@"UI_CONVERSIONS_TITLE"]) {
+    [self.navigationController pushViewController:[LeadConversionsViewController new] animated:YES];
+    return;
+  }
   [self.navigationController pushViewController:[[LeadPageViewController alloc] initWithPage:page] animated:YES];
 }
 

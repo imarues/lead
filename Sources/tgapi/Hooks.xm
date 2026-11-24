@@ -80,7 +80,8 @@ extern "C" NSString *LeadDiagSignLine(void) {
     NSBundle *bundle = [NSBundle bundleWithPath:appex];
     NSData *binary = bundle.executablePath ? [NSData dataWithContentsOfFile:bundle.executablePath options:NSDataReadingMappedIfSafe error:nil] : nil;
     NSRange head = NSMakeRange(0, MIN(binary.length, (NSUInteger)(1 << 20)));
-    BOOL hasLead = binary && ([binary rangeOfData:[@"Lead.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound ||
+    BOOL hasLead = binary && ([binary rangeOfData:[@"Kira.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound ||
+                              [binary rangeOfData:[@"Lead.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound ||
                               [binary rangeOfData:[@"lead.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound);
     // The extension's own entitlements sit as an XML plist in its code signature.
     NSString *nseGroups = @"?";
@@ -120,7 +121,8 @@ extern "C" NSInteger LeadExtensionInjected(void) {
     NSBundle *bundle = [NSBundle bundleWithPath:[plugins stringByAppendingPathComponent:plugin]];
     NSData *binary = bundle.executablePath ? [NSData dataWithContentsOfFile:bundle.executablePath options:NSDataReadingMappedIfSafe error:nil] : nil;
     NSRange head = NSMakeRange(0, MIN(binary.length, (NSUInteger)(1 << 20)));
-    return binary && ([binary rangeOfData:[@"Lead.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound ||
+    return binary && ([binary rangeOfData:[@"Kira.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound ||
+                              [binary rangeOfData:[@"Lead.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound ||
                       [binary rangeOfData:[@"lead.dylib" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:head].location != NSNotFound);
   }
   return -1;
@@ -284,7 +286,9 @@ static __weak id sLeadRequestService;
   case kMessagesSendMultiMedia:
   case kMessagesUploadMedia: {
     NSData *converted = [TLParser rewriteVoiceUpload:payload];
-    if (converted) self.fakePayload = converted;
+    NSData *intermediate = converted ?: payload;
+    NSData *custom = [TLParser rewriteCustomFileSend:intermediate];
+    if (custom || converted) self.fakePayload = custom ?: intermediate;
     break;
   }
   default:

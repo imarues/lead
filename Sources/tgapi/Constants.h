@@ -48,6 +48,8 @@
 #define kGhostDetailsToggle @"LeadGhostDetailsToggle"
 #define kGhostPeerRecords @"LeadGhostPeerRecords"
 #define kGhostPeerKeys @"LeadGhostPeerKeys"
+#define kLeadSnowEnabled @"LeadSnowEnabled"
+#define kLeadSnowHideInChats @"LeadSnowHideInChats"
 #define kDisableOnlineStatus @"disableOnlineStatus"
 
 #define kDisableTypingStatus @"disableTypingStatus"
@@ -117,6 +119,7 @@
 #define FAKE_LATITUDE_KEY @"LeadSavedLatitude"
 #define FAKE_LONGITUDE_KEY @"LeadSavedLongitude"
 
+#define kCustomFileSend @"LeadCustomFileSend"
 #define FILE_PICKER_FIX_KEY @"LeadFixFilePicker"
 #define FILE_PICKER_PATH @"LeadFileFixUsingSomeUglyHacks"
 

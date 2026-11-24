@@ -40,7 +40,7 @@ static NSArray<NSDictionary *> *LeadCompatItems(void) {
   NSDictionary *counters = [TLParser compatCounters];
   NSInteger (^count)(NSString *) = ^NSInteger(NSString *key) { return [counters[key] integerValue]; };
 
-  // API layer: the one thing that decides whether Lead can read this client's traffic.
+  // API layer: the one thing that decides whether Kira can read this client's traffic.
   NSInteger layer = LeadClientApiLayer();
   if (layer == 0) {
     [items addObject:LeadCompatItem(@"UI_COMPAT_API", LeadCheckUnknown, LeadL(@"UI_COMPAT_API_UNKNOWN"))];
@@ -65,7 +65,7 @@ static NSArray<NSDictionary *> *LeadCompatItems(void) {
     [items addObject:LeadCompatItem(@"UI_COMPAT_NETWORK", LeadCheckUnknown, LeadL(@"UI_COMPAT_WAIT"))];
   }
 
-  // Responses Lead understands vs. known types that still failed to parse.
+  // Responses Kira understands vs. known types that still failed to parse.
   NSInteger parsed = count(@"parsed"), failed = count(@"parseFailed");
   if (parsed + failed == 0) {
     [items addObject:LeadCompatItem(@"UI_COMPAT_PARSER", LeadCheckUnknown, LeadL(@"UI_COMPAT_PARSER_IDLE"))];
@@ -103,7 +103,7 @@ static NSArray<NSDictionary *> *LeadCompatItems(void) {
     [items addObject:LeadCompatItem(@"UI_COMPAT_MESSAGES", LeadCheckWarning, LeadCompatFormat(@"UI_COMPAT_MESSAGES_PARTIAL", (long)refNoChat, (long)(refOk + refNoChat)))];
   }
 
-  // Lead's buttons on profiles and the chat hook are attached to these classes.
+  // Kira's buttons on profiles and the chat hook are attached to these classes.
   BOOL profile = objc_getClass("_TtC14PeerInfoScreen18PeerInfoScreenImpl") != Nil;
   BOOL chat = objc_getClass("_TtC10TelegramUI18ChatControllerImpl") != Nil;
   [items addObject:LeadCompatItem(@"UI_COMPAT_SCREENS", profile && chat ? LeadCheckOK : LeadCheckFailed,
@@ -147,7 +147,7 @@ static NSArray<NSDictionary *> *LeadCompatItems(void) {
 }
 
 - (void)copyReport {
-  NSMutableArray *lines = [NSMutableArray arrayWithObject:[NSString stringWithFormat:@"Lead %@ (%@), %@", kLeadTweakVersion, kLeadTweakBuild, [self clientLine]]];
+  NSMutableArray *lines = [NSMutableArray arrayWithObject:[NSString stringWithFormat:@"Kira %@ (%@), %@", kLeadTweakVersion, kLeadTweakBuild, [self clientLine]]];
   for (NSDictionary *item in self.items) {
     [lines addObject:[NSString stringWithFormat:@"[%@] %@: %@", @[ @"?", @"OK", @"WARN", @"FAIL" ][[item[@"check"] integerValue]], item[@"title"], item[@"detail"]]];
   }

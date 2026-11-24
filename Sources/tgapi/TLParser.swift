@@ -3523,3 +3523,139 @@ extension TLParser {
         return out as NSData
     }
 }
+
+
+// MARK: - Per-file rename and uploaded custom document thumbnail
+// Name is matched against the original filename on the wire. Never guess or
+// rewrite a different user's document when the source filename is missing.
+extension TLParser {
+    private struct CustomFileOptions {
+        let displayName: String
+        let thumbnailId: Int64?
+        let caption: String?
+        let registeredAt: TimeInterval
+    }
+    private static let customFileQueue = DispatchQueue(label: "com.lead.custom.files")
+    private static var customFilePending: [String: [CustomFileOptions]] = [:]
+
+    @objc(registerCustomFileSendForOriginalName:displayName:thumbnailFileId:)
+    static func registerCustomFileSend(originalName: String, displayName: String, thumbnailFileId: NSNumber?) {
+        registerCustomFileSend(originalName: originalName, displayName: displayName,
+                               thumbnailFileId: thumbnailFileId, caption: nil)
+    }
+
+    @objc(registerCustomFileSendForOriginalName:displayName:thumbnailFileId:caption:)
+    static func registerCustomFileSend(originalName: String, displayName: String,
+                                       thumbnailFileId: NSNumber?, caption: String?) {
+        let key = originalName.lowercased()
+        guard !key.isEmpty, !displayName.isEmpty else { return }
+        customFileQueue.sync {
+            let now = Date().timeIntervalSince1970
+            customFilePending = customFilePending.mapValues { $0.filter { now - $0.registeredAt < 600 } }
+                .filter { !$0.value.isEmpty }
+            var queue = customFilePending[key] ?? []
+            queue.append(CustomFileOptions(displayName: displayName,
+                                          thumbnailId: thumbnailFileId?.int64Value,
+                                          caption: caption,
+                                          registeredAt: now))
+            customFilePending[key] = Array(queue.suffix(6))
+        }
+    }
+
+    private static func takeCustomOptions(for names: [String]) -> CustomFileOptions? {
+        return customFileQueue.sync {
+            let now = Date().timeIntervalSince1970
+            for name in names {
+                let key = name.lowercased()
+                guard var queue = customFilePending[key] else { continue }
+                queue.removeAll { now - $0.registeredAt >= 600 }
+                guard !queue.isEmpty else {
+                    customFilePending.removeValue(forKey: key)
+                    continue
+                }
+                let chosen = queue.removeFirst()
+                if queue.isEmpty { customFilePending.removeValue(forKey: key) }
+                else { customFilePending[key] = queue }
+                return chosen
+            }
+            return nil
+        }
+    }
+
+    @objc(rewriteCustomFileSend:)
+    static func rewriteCustomFileSend(_ data: NSData) -> NSData? {
+        let payload = data as Data
+        let reader = BufferReader(Buffer(data: payload))
+        guard let functionId = reader.readInt32() else { return nil }
+
+        switch functionId {
+        case 53536639:  // messages.sendMedia
+            guard let flags = reader.readInt32(), skipBoxed(reader) else { return nil }
+            if (flags & (1 << 0)) != 0 && !skipBoxed(reader) { return nil }
+        case 345405816: // messages.uploadMedia
+            guard let flags = reader.readInt32() else { return nil }
+            if (flags & (1 << 0)) != 0 && parseString(reader) == nil { return nil }
+            guard skipBoxed(reader) else { return nil }
+        default:
+            return nil
+        }
+
+        let mediaStart = Int(reader.offset)
+        guard let signature = reader.readInt32(), signature == 58495792,
+              let media = Api.parse(reader, signature: signature) as? Api.InputMedia,
+              case let .inputMediaUploadedDocument(document) = media else { return nil }
+        let mediaEnd = Int(reader.offset)
+
+        let names: [String] = document.attributes.compactMap {
+            if case let .documentAttributeFilename(value) = $0 { return value.fileName }
+            return nil
+        } + {
+            switch document.file {
+            case let .inputFile(value): return [value.name]
+            case let .inputFileBig(value): return [value.name]
+            default: return []
+            }
+        }()
+
+        guard let options = takeCustomOptions(for: names) else { return nil }
+
+        document.attributes.removeAll {
+            if case .documentAttributeFilename = $0 { return true }
+            return false
+        }
+        document.attributes.append(.documentAttributeFilename(
+            Api.DocumentAttribute.Cons_documentAttributeFilename(fileName: options.displayName)))
+        if let thumbId = options.thumbnailId {
+            document.thumb = .inputFile(Api.InputFile.Cons_inputFile(
+                id: thumbId, parts: 1, name: "lead-custom-thumb.jpg", md5Checksum: ""))
+            document.flags |= (1 << 2)
+        }
+
+        let mediaBuffer = Buffer()
+        media.serialize(mediaBuffer, true)
+
+        // Description: for messages.sendMedia the caption (message:string) sits
+        // right after the media. Replace it only when Telegram sent it empty.
+        var tail = payload.subdata(in: mediaEnd ..< payload.count)
+        var captionData = Data()
+        if functionId == 53536639, let caption = options.caption, !caption.isEmpty {
+            let tailReader = BufferReader(Buffer(data: tail))
+            if let original = parseString(tailReader), original.isEmpty {
+                let consumed = Int(tailReader.offset)
+                if consumed > 0 && consumed <= tail.count {
+                    let captionBuffer = Buffer()
+                    serializeString(String(caption.prefix(1024)), buffer: captionBuffer, boxed: false)
+                    captionData = captionBuffer.makeData()
+                    tail = tail.subdata(in: consumed ..< tail.count)
+                }
+            }
+        }
+
+        var result = Data()
+        result.append(payload.subdata(in: 0 ..< mediaStart))
+        result.append(mediaBuffer.makeData())
+        result.append(captionData)
+        result.append(tail)
+        return result as NSData
+    }
+}

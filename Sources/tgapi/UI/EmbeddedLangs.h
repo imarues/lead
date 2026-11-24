@@ -516,7 +516,7 @@ static inline NSDictionary *GetAllTranslations(NSString *code) {
           @"including the Telegram name and logo, belong to their respective "
           @"owners. Don't use this to break rules or violate Telegram's terms "
           @"— we're not responsible if things go sideways. Use at your own "
-          @"risk.\n\nMade by Lead Team",
+          @"risk.\n\nMade by Kira Team",
     };
   }
   if ([code isEqualToString:@"es"]) {
@@ -1023,7 +1023,7 @@ static inline NSDictionary *GetAllTranslations(NSString *code) {
       @"CANCEL" : @"Отмена",
       @"DISCLAIMER" : @"Отказ от ответственности",
       @"AUTHOR_MESSAGE" :
-          @"Lead — независимый твик для Telegram. Он не связан с Telegram FZ-LLC и не одобрен ею; название и логотип Telegram принадлежат их владельцам.\n\nТвик работает только на вашем устройстве и ничего не передаёт разработчику. Пользуясь им, вы сами отвечаете за соблюдение правил Telegram и возможные последствия для аккаунта.\n\nНашли баг или есть идея — пишите в @Leadgramm.",
+          @"Kira — независимый твик для Telegram. Он не связан с Telegram FZ-LLC и не одобрен ею; название и логотип Telegram принадлежат их владельцам.\n\nТвик работает только на вашем устройстве и ничего не передаёт разработчику. Пользуясь им, вы сами отвечаете за соблюдение правил Telegram и возможные последствия для аккаунта.\n\nНашли баг или есть идея — пишите в @Leadgramm.",
     };
   }
   if ([code isEqualToString:@"fr"]) {

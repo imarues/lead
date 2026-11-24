@@ -6,7 +6,7 @@
 
 // ============================================================
 // LeadBundlePath() — shared function used by LeadLocalization
-// and LanguageSelector to find Lead.bundle.
+// and LanguageSelector to find Kira.bundle.
 //
 // Search order:
 //  1. Next to the dylib via dladdr (covers Frameworks/ layout)
@@ -30,12 +30,12 @@ NSString *LeadBundlePath(void) {
       NSString *dylibDir = [dylibPath stringByDeletingLastPathComponent];
 
       NSArray *candidates = @[
-        [dylibDir stringByAppendingPathComponent:@"Lead.bundle"],
+        [dylibDir stringByAppendingPathComponent:@"Kira.bundle"],
         [[dylibDir stringByDeletingLastPathComponent]
-            stringByAppendingPathComponent:@"Lead.bundle"],
+            stringByAppendingPathComponent:@"Kira.bundle"],
         [[[dylibDir stringByDeletingLastPathComponent]
             stringByDeletingLastPathComponent]
-            stringByAppendingPathComponent:@"Lead.bundle"],
+            stringByAppendingPathComponent:@"Kira.bundle"],
         [dylibDir stringByAppendingPathComponent:@"Choco.bundle"],
         [[dylibDir stringByDeletingLastPathComponent]
             stringByAppendingPathComponent:@"Choco.bundle"]
@@ -51,8 +51,8 @@ NSString *LeadBundlePath(void) {
 
     // 2. Classic jailbreak path
     NSString *jbPath = [NSString
-        stringWithFormat:@"%@/Lead.bundle",
-                         jbroot(@"/Library/Application Support/Lead")];
+        stringWithFormat:@"%@/Kira.bundle",
+                         jbroot(@"/Library/Application Support/Kira")];
     if ([fm fileExistsAtPath:jbPath]) {
       cachedPath = jbPath;
       return;
@@ -61,7 +61,7 @@ NSString *LeadBundlePath(void) {
     // 3. Final desperate scan in the main bundle's subdirectories
     NSString *bundlePath = [NSBundle mainBundle].bundlePath;
     NSArray *subDirs = @[
-      @"Lead.bundle", @"Choco.bundle", @"Frameworks/Lead.bundle",
+      @"Kira.bundle", @"Lead.bundle", @"Choco.bundle", @"Frameworks/Kira.bundle", @"Frameworks/Lead.bundle",
       @"Frameworks/Choco.bundle"
     ];
     for (NSString *sub in subDirs) {

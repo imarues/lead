@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Puts Lead.dylib into a Telegram IPA: into the app itself and into its
-# notification service extension, so the extension gets Lead's app-group fix
+# Puts Kira.dylib into a Telegram IPA: into the app itself and into its
+# notification service extension, so the extension gets Kira's app-group fix
 # (SideloadFix.m) and can read the account to show real notifications.
-# Sign the result as usual, WITHOUT adding Lead.dylib again in the signer.
+# Sign the result as usual, WITHOUT adding Kira.dylib again in the signer.
 #
-#   python3 tools/inject_ipa.py Telegram.ipa [-o Telegram-Lead.ipa] [--dylib Lead.dylib]
+#   python3 tools/inject_ipa.py Telegram.ipa [-o Telegram-Kira.ipa] [--dylib Kira.dylib]
 #                               [--all-extensions] [--remove sideloadFixer] [--extra other.dylib]
 #
 # Extra dylibs that link CydiaSubstrate.framework get it copied into Frameworks
@@ -130,7 +130,7 @@ def remove_dylibs(data, needle):
     return removed
 
 
-def patch_binary(binary, load_path, remove, skip_if='lead.dylib'):
+def patch_binary(binary, load_path, remove, skip_if='kira.dylib'):
     data = bytearray(open(binary, 'rb').read())
     check_decrypted(data, binary)
     notes = []
@@ -175,8 +175,8 @@ def bundle_executable(bundle):
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    default_dylib = os.path.join(here, '..', '.theos', '_', 'Library', 'MobileSubstrate', 'DynamicLibraries', 'Lead.dylib')
-    parser = argparse.ArgumentParser(description='Inject Lead.dylib into a Telegram IPA and its notification extension.')
+    default_dylib = os.path.join(here, '..', '.theos', '_', 'Library', 'MobileSubstrate', 'DynamicLibraries', 'Kira.dylib')
+    parser = argparse.ArgumentParser(description='Inject Kira.dylib into a Telegram IPA and its notification extension.')
     parser.add_argument('ipa')
     parser.add_argument('-o', '--output')
     parser.add_argument('--dylib', default=default_dylib)
@@ -190,8 +190,8 @@ def main():
     args = parser.parse_args()
 
     if not os.path.isfile(args.dylib):
-        sys.exit('Lead.dylib not found at %s (build with `make package FINALPACKAGE=1` or pass --dylib)' % args.dylib)
-    output = args.output or os.path.splitext(args.ipa)[0] + '-Lead.ipa'
+        sys.exit('Kira.dylib not found at %s (build with `make package FINALPACKAGE=1` or pass --dylib)' % args.dylib)
+    output = args.output or os.path.splitext(args.ipa)[0] + '-Kira.ipa'
     work = tempfile.mkdtemp(prefix='lead-ipa-')
     try:
         subprocess.run(['unzip', '-q', os.path.abspath(args.ipa), '-d', work], check=True)
@@ -203,11 +203,11 @@ def main():
 
         frameworks = os.path.join(app, 'Frameworks')
         os.makedirs(frameworks, exist_ok=True)
-        shutil.copy2(args.dylib, os.path.join(frameworks, 'Lead.dylib'))
+        shutil.copy2(args.dylib, os.path.join(frameworks, 'Kira.dylib'))
 
         executable, _ = bundle_executable(app)
         print('%s:' % apps[0])
-        for note in patch_binary(executable, '@executable_path/Frameworks/Lead.dylib', args.remove):
+        for note in patch_binary(executable, '@executable_path/Frameworks/Kira.dylib', args.remove):
             print('  ' + note)
         for extra in args.extra:
             for note in add_extra(app, executable, extra, args.substrate):
@@ -226,7 +226,7 @@ def main():
                 continue
             print('PlugIns/%s (%s):' % (name, point or 'extension'))
             # Extensions live in <app>/PlugIns/<x>.appex/, the app's Frameworks two levels up.
-            for note in patch_binary(executable, '@executable_path/../../Frameworks/Lead.dylib', args.remove):
+            for note in patch_binary(executable, '@executable_path/../../Frameworks/Kira.dylib', args.remove):
                 print('  ' + note)
             injected_nse = injected_nse or is_nse
         if not injected_nse:
@@ -235,7 +235,7 @@ def main():
         if os.path.exists(output):
             os.remove(output)
         subprocess.run(['zip', '-qry', os.path.abspath(output), 'Payload'], cwd=work, check=True)
-        print('\nDone: %s\nSign it as usual, and do not add Lead.dylib in the signer again.' % output)
+        print('\nDone: %s\nSign it as usual, and do not add Kira.dylib in the signer again.' % output)
     except InjectError as error:
         sys.exit('error: %s' % error)
     finally:

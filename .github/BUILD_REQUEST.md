@@ -1,5 +1,5 @@
 # Build request
 
-Validate the current `main` source and produce `Lead.dylib` through the existing pull-request Build workflow.
+Build the latest `feature/virtual-media-call-test` source (including direct Saved Messages upload, virtual video media and call recording) with the existing GitHub Actions Build workflow.
 
-No functional source changes are added by this file.
+This file only requests a build and does not change application behavior. The updated audio C++ atomics import is included in the branch.

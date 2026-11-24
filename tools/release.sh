@@ -1,6 +1,6 @@
 #!/bin/bash
 # Publishes the version in layout/DEBIAN/control as a GitHub release: builds from the
-# pushed commit and attaches Lead.dylib and the three debs. The notes come from
+# pushed commit and attaches Kira.dylib and the three debs. The notes come from
 # changelogs/<version>.md. IPAs stay out of the repository (they contain other people's
 # apps); those are posted to the Telegram channel.
 #
@@ -31,18 +31,18 @@ make package FINALPACKAGE=1 >/dev/null
 
 WORK=$(mktemp -d)
 trap 'rm -rf "${WORK:?}"' EXIT
-cp packages/Lead.dylib "$WORK/Lead.dylib"
+cp packages/Kira.dylib "$WORK/Kira.dylib"
 cp "packages/${PACKAGE}_${VERSION}_iphoneos-arm.deb" "$WORK/Lead_${VERSION}_rootful.deb"
 cp "packages/${PACKAGE}_${VERSION}_iphoneos-arm64.deb" "$WORK/Lead_${VERSION}_rootless.deb"
 cp "packages/${PACKAGE}_${VERSION}_iphoneos-arm64e.deb" "$WORK/Lead_${VERSION}_roothide.deb"
 
 # Every package must carry the dylib that's published next to it.
-EXPECTED=$(shasum -a 256 "$WORK/Lead.dylib" | cut -d' ' -f1)
+EXPECTED=$(shasum -a 256 "$WORK/Kira.dylib" | cut -d' ' -f1)
 for deb in "$WORK"/*.deb; do
   UNPACKED="$WORK/unpacked"
   mkdir -p "$UNPACKED"
   dpkg-deb -x "$deb" "$UNPACKED"
-  [ "$(find "$UNPACKED" -name Lead.dylib -exec shasum -a 256 {} \; | cut -d' ' -f1)" = "$EXPECTED" ] || fail "$(basename "$deb") has a different dylib"
+  [ "$(find "$UNPACKED" -name Kira.dylib -exec shasum -a 256 {} \; | cut -d' ' -f1)" = "$EXPECTED" ] || fail "$(basename "$deb") has a different dylib"
   rm -rf "${UNPACKED:?}"
 done
 
@@ -52,7 +52,7 @@ cat "$NOTES" > "$BODY"
   echo
   echo "### SHA-256"
   echo '```'
-  (cd "$WORK" && shasum -a 256 Lead.dylib ./*.deb | sed 's# \./# #')
+  (cd "$WORK" && shasum -a 256 Kira.dylib ./*.deb | sed 's# \./# #')
   echo '```'
 } >> "$BODY"
 
@@ -61,5 +61,5 @@ if [ "$DRY_RUN" = 1 ]; then
   cat "$BODY"
   exit 0
 fi
-gh release create "$TAG" --target "$(git rev-parse HEAD)" --title "Lead $VERSION" --notes-file "$BODY" --latest \
-  "$WORK/Lead.dylib" "$WORK"/*.deb
+gh release create "$TAG" --target "$(git rev-parse HEAD)" --title "Kira $VERSION" --notes-file "$BODY" --latest \
+  "$WORK/Kira.dylib" "$WORK"/*.deb

@@ -3,7 +3,7 @@
 name: Build
 
 permissions:
-    contents: read
+    contents: write
 
 on:
     push:
@@ -13,7 +13,7 @@ on:
 
 # Avoid accumulating duplicate builds of the same public main branch.
 concurrency:
-    group: lead-main-build
+    group: kira-main-build
     cancel-in-progress: true
 
 jobs:
@@ -43,7 +43,33 @@ jobs:
             - name: Upload packages
               uses: actions/upload-artifact@v4
               with:
-                name: lead-packages
+                name: kira-packages
                 path: |
                     packages/*.deb
-                    packages/Lead.dylib
+                    packages/Kira.dylib
+
+            # Publish the compiled binary, not an artifact ZIP, for sideload users.
+            # The separate branch is excluded from the push trigger, avoiding CI loops.
+            - name: Publish standalone Kira.dylib
+              if: github.ref == 'refs/heads/main'
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  test -s packages/Kira.dylib
+                  if ! gh api "repos/${GITHUB_REPOSITORY}/branches/compiled-kira" >/dev/null 2>&1; then
+                      gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                          -f ref='refs/heads/compiled-kira' -f sha="${GITHUB_SHA}" >/dev/null
+                  fi
+                  current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/Kira.dylib?ref=compiled-kira" --jq .sha 2>/dev/null || true)"
+                  base64 < packages/Kira.dylib | tr -d '\n' > "${RUNNER_TEMP}/Kira.b64"
+                  jq -n --rawfile encoded "${RUNNER_TEMP}/Kira.b64" \
+                      --arg message "Build Kira.dylib from ${GITHUB_SHA}" \
+                      --arg branch compiled-kira --arg sha "${current_sha}" \
+                      '{message:$message,branch:$branch,content:$encoded} +
+                        (if $sha == "" then {} else {sha:$sha} end)' \
+                      > "${RUNNER_TEMP}/kira-payload.json"
+                  gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/Kira.dylib" \
+                      --input "${RUNNER_TEMP}/kira-payload.json" >/dev/null
+                  echo "Direct dylib: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/compiled-kira/Kira.dylib"

@@ -5,12 +5,14 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
+
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <mach-o/nlist.h>
 #import <mach/mach.h>
 #import <dlfcn.h>
 #import <sys/mman.h>
+#import <sys/stat.h>
 #import <fcntl.h>
 #import <unistd.h>
 #import <math.h>
@@ -20,6 +22,7 @@
 #import <algorithm>
 
 using std::memory_order_acquire;
+using std::memory_order_acq_rel;
 using std::memory_order_release;
 using std::memory_order_relaxed;
 
@@ -39,6 +42,13 @@ static dispatch_queue_t gWriterQueue;
 static dispatch_source_t gWriterTimer;
 static NSString *gTemporaryDirectory;
 static BOOL gHooksReady = NO;
+// Diagnostics are atomic: no logging or allocation on CoreAudio render threads.
+static std::atomic<uint32_t> gBoundAudioImports{0};
+static std::atomic<uint32_t> gRenderCallHits{0};
+static std::atomic<uint32_t> gOutputCallbackHits{0};
+static std::atomic<uint32_t> gRenderNotifyHits{0};
+static std::atomic<uint32_t> gRenderCallbackConfigurations{0};
+static std::atomic<AudioUnit> gNotifiedUnits[128];
 
 typedef OSStatus (*RenderProc)(AudioUnit, AudioUnitRenderActionFlags *,
     const AudioTimeStamp *, UInt32, UInt32, AudioBufferList *);
@@ -46,6 +56,9 @@ typedef OSStatus (*SetPropertyProc)(AudioUnit, AudioUnitPropertyID,
     AudioUnitScope, AudioUnitElement, const void *, UInt32);
 static RenderProc gOriginalRender = nullptr;
 static SetPropertyProc gOriginalSetProperty = nullptr;
+typedef OSStatus (*AudioUnitSimpleProc)(AudioUnit);
+static AudioUnitSimpleProc gOriginalInitialize = nullptr;
+static AudioUnitSimpleProc gOriginalOutputUnitStart = nullptr;
 
 struct OutputCallback {
     AURenderCallback original;
@@ -111,13 +124,47 @@ static void capture(Ring &ring, const AudioBufferList *abl,
     ring.writeIndex.store(w+n, memory_order_release);
 }
 
+// Render notify handles versions of Telegram that bypass SetRenderCallback.
+static OSStatus leadAudioRenderNotify(void *opaque, AudioUnitRenderActionFlags *flags,
+       const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *data) {
+    if(!flags || !(*flags & kAudioUnitRenderAction_PostRender) || !data)
+        return noErr;
+    AudioUnit unit=(AudioUnit)opaque;
+    if(gActive.load(memory_order_relaxed)) {
+        gRenderNotifyHits.fetch_add(1,memory_order_relaxed);
+        if(bus==0 && gRemote.writeIndex.load(memory_order_acquire)==0) {
+            AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Input,0);
+            capture(gRemote,data,frames,f);
+        } else if(bus==1 && gMic.writeIndex.load(memory_order_acquire)==0) {
+            AudioStreamBasicDescription f=formatFor(unit,kAudioUnitScope_Output,1);
+            capture(gMic,data,frames,f);
+        }
+    }
+    // VoiceProcessingIO/RemoteIO: bus 0 is speaker output; bus 1 is mic input.
+    return noErr;
+}
+static void leadEnsureAudioRenderNotify(AudioUnit unit) {
+    if(!isCallAudioUnit(unit))return;
+    for(auto &slot:gNotifiedUnits) {
+        if(slot.load(memory_order_acquire)==unit)return;
+    }
+    for(auto &slot:gNotifiedUnits) {
+        AudioUnit empty=nullptr;
+        if(slot.compare_exchange_strong(empty,unit,memory_order_acq_rel)) {
+            OSStatus status=AudioUnitAddRenderNotify(unit,leadAudioRenderNotify,unit);
+            if(status!=noErr)slot.store(nullptr,memory_order_release);
+            return;
+        }
+    }
+}
 static OSStatus leadAudioUnitRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
              const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *out) {
     OSStatus status = gOriginalRender ? gOriginalRender(unit, flags, time, bus, frames, out) : -1;
-    if (status == noErr && bus == 1 && gActive.load(memory_order_relaxed) &&
-        isCallAudioUnit(unit)) {
+    if (status == noErr && bus == 1 && isCallAudioUnit(unit)) {
+        if(gActive.load(memory_order_relaxed))
+            gRenderCallHits.fetch_add(1,memory_order_relaxed);
         AudioStreamBasicDescription f = formatFor(unit, kAudioUnitScope_Output, 1);
-        capture(gMic,out,frames,f);
+        if(gActive.load(memory_order_relaxed)) capture(gMic,out,frames,f);
     }
     return status;
 }
@@ -127,10 +174,13 @@ static OSStatus leadOutputCallback(void *opaque, AudioUnitRenderActionFlags *fla
     OutputCallback *binding = static_cast<OutputCallback *>(opaque);
     if (!binding || !binding->original) return -1;
     OSStatus status = binding->original(binding->context, flags, time, bus, frames, data);
-    if (status == noErr && gActive.load(memory_order_relaxed)) {
-        if (!binding->format.mSampleRate)
-            binding->format = formatFor(binding->unit,kAudioUnitScope_Input,0);
-        capture(gRemote,data,frames,binding->format);
+    if(status==noErr) {
+        if(gActive.load(memory_order_relaxed)) {
+            gOutputCallbackHits.fetch_add(1,memory_order_relaxed);
+            if(!binding->format.mSampleRate)
+                binding->format = formatFor(binding->unit,kAudioUnitScope_Input,0);
+            capture(gRemote,data,frames,binding->format);
+        }
     }
     return status;
 }
@@ -140,6 +190,7 @@ static OSStatus leadAudioUnitSetProperty(AudioUnit unit, AudioUnitPropertyID pro
     if (!gOriginalSetProperty) return -1;
     if (property == kAudioUnitProperty_SetRenderCallback && element == 0 &&
         size >= sizeof(AURenderCallbackStruct) && data && isCallAudioUnit(unit)) {
+        gRenderCallbackConfigurations.fetch_add(1,memory_order_relaxed);
         uint32_t index = gCallbackCount.fetch_add(1, memory_order_relaxed);
         if (index < 128) {
             OutputCallback *binding = &gCallbackSlots[index];
@@ -154,6 +205,22 @@ static OSStatus leadAudioUnitSetProperty(AudioUnit unit, AudioUnitPropertyID pro
         }
     }
     return gOriginalSetProperty(unit,property,scope,element,data,size);
+}
+
+static OSStatus leadAudioUnitInitialize(AudioUnit unit) {
+    if(!gOriginalInitialize)return -1;
+    const OSStatus status=gOriginalInitialize(unit);
+    if(status==noErr) {
+
+        leadEnsureAudioRenderNotify(unit);
+    }
+    return status;
+}
+static OSStatus leadAudioOutputUnitStart(AudioUnit unit) {
+    if(!gOriginalOutputUnitStart)return -1;
+
+    leadEnsureAudioRenderNotify(unit);
+    return gOriginalOutputUnitStart(unit);
 }
 
 // Rebind import slots in present/future Mach-O images. There are no global
@@ -172,6 +239,8 @@ static void bindSection(const section_64 *sec, intptr_t slide,
         void *replacement=nullptr;
         if (strcmp(name,"_AudioUnitRender")==0) replacement=(void*)&leadAudioUnitRender;
         else if (strcmp(name,"_AudioUnitSetProperty")==0) replacement=(void*)&leadAudioUnitSetProperty;
+        else if (strcmp(name,"_AudioUnitInitialize")==0) replacement=(void*)&leadAudioUnitInitialize;
+        else if (strcmp(name,"_AudioOutputUnitStart")==0) replacement=(void*)&leadAudioOutputUnitStart;
         if (!replacement) continue;
         void **slot=(void**)(address+i*sizeof(void*));
         if (*slot==replacement) continue;
@@ -181,6 +250,7 @@ static void bindSection(const section_64 *sec, intptr_t slide,
                  VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY) != KERN_SUCCESS) continue;
         }
         *slot=replacement;
+        gBoundAudioImports.fetch_add(1,memory_order_relaxed);
     }
 }
 static void bindImage(const mach_header *header, intptr_t slide) {
@@ -250,6 +320,77 @@ static void drain(Ring &ring) {
     }
     ring.readIndex.store(r,memory_order_release);
 }
+
+// Postprocess the TWO separate 16-bit WAV stems before making the M4A.
+// Doing this off CoreAudio's real-time render callback preserves the call
+// and provides predictable gain without a live mic/remote imbalance.
+// Voice-gated RMS avoids boosting long periods of digital silence.
+static void normalizeRecordedWav(NSString *path, bool remote) {
+    if(!path.length)return;
+    int fd=open(path.fileSystemRepresentation,O_RDWR);
+    if(fd<0)return;
+    struct stat st={};
+    if(fstat(fd,&st)!=0 || st.st_size<=44) {close(fd);return;}
+    const off_t first=44;
+    const off_t countBytes=(st.st_size-first)&~(off_t)1;
+    int16_t samples[8192]={};
+    double squares=0.0;
+    uint64_t active=0,total=0;
+    const double gate=remote?0.0035:0.0045;
+    for(off_t off=0;off<countBytes;) {
+        size_t limit=(size_t)std::min((off_t)sizeof(samples),countBytes-off);
+        ssize_t n=pread(fd,samples,limit,first+off);
+        if(n<=0)break;
+        size_t count=(size_t)n/sizeof(int16_t);
+        for(size_t i=0;i<count;i++){
+            double x=(double)samples[i]*(1.0/32768.0);
+            if(std::fabs(x)>=gate){squares+=x*x;active++;}
+        }
+        total+=count;
+        off+=(off_t)(count*sizeof(int16_t));
+    }
+    if(!total || active<total/250) { // nearly silent: do NOT amplify noise.
+        NSLog(@"[LeadRecorder] %@ track quiet, gain unchanged",
+             remote?@"remote":@"microphone");
+        close(fd);return;
+    }
+    const double rms=std::sqrt(squares/(double)active);
+    // Remote voice gets ~5 dB stronger target than local voice.
+    // Gain is capped, and a smooth peak knee prevents hard clipping.
+    const double targetRms=remote?0.195:0.108;
+    const double minimum=remote?1.10:1.04;
+    const double maximum=remote?5.0:3.2;
+    const double gain=std::max(minimum,std::min(maximum,
+        targetRms/std::max(0.0001,rms)));
+    for(off_t off=0;off<countBytes;) {
+        size_t limit=(size_t)std::min((off_t)sizeof(samples),countBytes-off);
+        ssize_t n=pread(fd,samples,limit,first+off);
+        if(n<=0)break;
+        size_t count=(size_t)n/sizeof(int16_t);
+        for(size_t i=0;i<count;i++) {
+            double value=((double)samples[i]/32768.0)*gain;
+            const double sign=value<0?-1.0:1.0;
+            double a=std::fabs(value);
+            // Identity below 0.80, progressively limit above it.
+            // Max output is ~0.99, never an integer wrap/clipped square wave.
+            if(a>0.80)a=0.80+0.19*(1.0-std::exp(-(a-0.80)/0.19));
+            a=std::min(0.99,a);
+            samples[i]=(int16_t)std::lrint(sign*a*32767.0);
+        }
+        size_t bytes=count*sizeof(int16_t);
+        if(pwrite(fd,samples,bytes,first+off)!=(ssize_t)bytes){
+            NSLog(@"[LeadRecorder] failed gain write for %@ stem",
+                  remote?@"remote":@"microphone");
+            break;
+        }
+        off+=(off_t)bytes;
+    }
+    close(fd);
+    NSLog(@"[LeadRecorder] %@ voice RMS=%.4f, gain=%.2fx, active=%llu",
+          remote?@"remote":@"microphone",rms,gain,
+          (unsigned long long)active);
+}
+
 static NSError *recordingError(NSString *message) {
     return [NSError errorWithDomain:@"Lead.CallAudio" code:1
       userInfo:@{NSLocalizedDescriptionKey:message}];
@@ -262,6 +403,8 @@ extern "C" void LeadCallAudioInstallHooks(void) {
         gWriterQueue=dispatch_queue_create("lead.calls.audio.writer",DISPATCH_QUEUE_SERIAL);
         gOriginalRender=(RenderProc)dlsym(RTLD_DEFAULT,"AudioUnitRender");
         gOriginalSetProperty=(SetPropertyProc)dlsym(RTLD_DEFAULT,"AudioUnitSetProperty");
+        gOriginalInitialize=(AudioUnitSimpleProc)dlsym(RTLD_DEFAULT,"AudioUnitInitialize");
+        gOriginalOutputUnitStart=(AudioUnitSimpleProc)dlsym(RTLD_DEFAULT,"AudioOutputUnitStart");
         if(gOriginalRender && gOriginalSetProperty) {
             _dyld_register_func_for_add_image(bindImage);
             gHooksReady=YES;
@@ -280,6 +423,11 @@ extern "C" BOOL LeadCallAudioStart(NSString *directory) {
         ring->writeIndex.store(0);ring->readIndex.store(0);
         ring->writtenFrames=0;ring->sampleRate.store(48000);
     }
+    gRenderCallHits.store(0,memory_order_relaxed);
+    gOutputCallbackHits.store(0,memory_order_relaxed);
+    gRenderNotifyHits.store(0,memory_order_relaxed);
+    NSLog(@"[LeadRecorder] start CoreAudio hooks ready=%d imported=%u configuredCallbacks=%u",
+          gHooksReady,gBoundAudioImports.load(),gRenderCallbackConfigurations.load());
     NSString *mic=[directory stringByAppendingPathComponent:@"mic.wav"];
     NSString *remote=[directory stringByAppendingPathComponent:@"remote.wav"];
     gMic.fd=open(mic.fileSystemRepresentation,O_CREAT|O_TRUNC|O_RDWR,0600);
@@ -311,8 +459,21 @@ extern "C" void LeadCallAudioStop(void (^completion)(NSURL *,NSError *)) {
         wavHeader(gMic.fd,micFrames,gMic.sampleRate.load());
         wavHeader(gRemote.fd,remoteFrames,gRemote.sampleRate.load());
         close(gMic.fd);close(gRemote.fd);gMic.fd=gRemote.fd=-1;
+        if(micFrames>0 && remoteFrames>0) {
+            normalizeRecordedWav([gTemporaryDirectory stringByAppendingPathComponent:@"mic.wav"],false);
+            normalizeRecordedWav([gTemporaryDirectory stringByAppendingPathComponent:@"remote.wav"],true);
+        }
         if(micFrames==0 || remoteFrames==0) {
-            NSError *error=recordingError(@"The call audio paths were not captured on this Telegram version. No valid two-sided recording was produced.");
+            // The previous generic message hid whether just one side was
+            // missing or the injected app never reached our CoreAudio hooks.
+            NSString *detail=[NSString stringWithFormat:
+                @"VoidGram audio capture incomplete: microphone=%llu frames, remote=%llu frames. CoreAudio hooks=%u, render=%u, output callbacks=%u, render notifications=%u, callback configs=%u. No two-sided audio was produced.",
+                (unsigned long long)micFrames,(unsigned long long)remoteFrames,
+                gBoundAudioImports.load(),gRenderCallHits.load(),
+                gOutputCallbackHits.load(),gRenderNotifyHits.load(),
+                gRenderCallbackConfigurations.load()];
+            NSLog(@"[LeadRecorder] %@",detail);
+            NSError *error=recordingError(detail);
             dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(nil,error);});
             return;
         }
@@ -331,7 +492,11 @@ extern "C" void LeadCallAudioStop(void (^completion)(NSURL *,NSError *)) {
                             ofTrack:source atTime:kCMTimeZero error:&composeError])break;
             AVMutableAudioMixInputParameters *params=[AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track];
             // Preserve full captured voice levels; do not attenuate each side to 80%.
-            [params setVolume:1.0 atTime:kCMTimeZero];[mixParameters addObject:params];
+            // Mic is kept lower than the normalized remote track; both are
+            // noticeably louder than their original quiet captures.
+            [params setVolume:([url.lastPathComponent isEqualToString:@"remote.wav"]?1.0:0.78)
+                       atTime:kCMTimeZero];
+            [mixParameters addObject:params];
         }
         if(composeError) {
             dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(nil,composeError);});

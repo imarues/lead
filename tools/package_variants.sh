@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the rootless and RootHide .debs from the staging dir of a normal
-# `make package` (rootful). All three carry the same Lead.dylib: it works out the
+# `make package` (rootful). All three carry the same Kira.dylib: it works out the
 # jailbreak root from where it was loaded (Sources/tgapiC/roothide_stub.m).
 #   rootful   iphoneos-arm     /Library/…
 #   rootless  iphoneos-arm64   /var/jb/Library/…

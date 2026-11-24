@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-  <img src="assets/banner-light.svg" width="100%" alt="Lead — the quiet power tweak for Telegram on iOS">
+  <img src="assets/banner-light.svg" width="100%" alt="Kira — the quiet power tweak for Telegram on iOS">
 </picture>
 
 <p align="center">
@@ -34,7 +34,7 @@
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="Screenshots/menu.jpg" alt="Lead menu"></td>
+    <td align="center" width="34%"><img src="Screenshots/menu.jpg" alt="Kira menu"></td>
     <td align="center" width="66%"><img src="Screenshots/edit-history.jpg" alt="Edit history"></td>
   </tr>
   <tr>
@@ -93,6 +93,7 @@
 ### 🧰 Media, Calls & Extras
 - **Send audio as voice**
 - **Confirm calls** — no accidental dialing
+- **Manual call recording** — audio and video with explicit user confirmation; normal video calls only
 - **Fake location** — any point on the map
 - **`#` on profiles** — ID and estimated sign-up year
 - **Settings export / import**, 10 languages, search
@@ -111,16 +112,16 @@
 Ready-made IPAs are posted in the [channel](https://t.me/leadgramm).
 
 > [!IMPORTANT]
-> Lead is **already inside** the IPA — sign it as usual and **don't add the dylib again**.
+> Kira is **already inside** the IPA — sign it as usual and **don't add the dylib again**.
 > The **sideload fix is built in**, so a separate “sideload fixer” dylib isn't needed.
 
 > [!NOTE]
 > Notifications with message text work when your signing supports **App Groups**.
 
-**Injecting Lead yourself** (decrypted IPA required) — into the app *and* its notification extension:
+**Injecting Kira yourself** (decrypted IPA required) — into the app *and* its notification extension:
 
 ```bash
-python3 tools/inject_ipa.py Telegram.ipa --dylib packages/Lead.dylib
+python3 tools/inject_ipa.py Telegram.ipa --dylib packages/Kira.dylib
 ```
 
 ### 🔓 Jailbreak
@@ -139,18 +140,18 @@ Install the `.deb` from the [channel](https://t.me/leadgramm) with your package 
 | ⚠️ | **Nagram 13.1.1** | Same API as the others, not fully tested yet |
 
 > [!WARNING]
-> With the **Rust MTProto** engine enabled in Telegram's Debug menu, network features can't work. Lead shows a warning in its menu when that happens.
+> With the **Rust MTProto** engine enabled in Telegram's Debug menu, network features can't work. Kira shows a warning in its menu when that happens.
 
 <br>
 
 ## 🧠 How it works
 
-Lead sits between Telegram and the network. It reads what the server sends, adjusts it, and hands it back, so Telegram itself does the rest — no private Swift hooks, which is why it works without a jailbreak.
+Kira sits between Telegram and the network. It reads what the server sends, adjusts it, and hands it back, so Telegram itself does the rest — no private Swift hooks, which is why it works without a jailbreak.
 
 ```mermaid
 flowchart LR
     S(["☁️ Telegram servers"]) <--> M["MtProtoKit"]
-    M <--> L{{"⚡ Lead"}}
+    M <--> L{{"⚡ Kira"}}
     L --> T["📱 Telegram app"]
     L -. "keeps deleted messages<br/>unlocks protected content<br/>records edits" .-> T
     N["🔔 Notification extension"] -->|shared App Group| D[("💾 Account data")]
@@ -193,7 +194,7 @@ For a fork, `tools/extract_schema.py` recovers the schema straight from its app 
 
 ## ❤️ Support
 
-Lead is free. If you'd like to support development, open **Lead → Support** in the app for donation wallets:
+Kira is free. If you'd like to support development, open **Kira → Support** in the app for donation wallets:
 
 <p>
   <img src="https://img.shields.io/badge/TON-0098EA?style=flat-square&logo=ton&logoColor=white" alt="TON">
@@ -207,11 +208,12 @@ Lead is free. If you'd like to support development, open **Lead → Support** in
 <summary><b>⚠️ Disclaimer</b></summary>
 <br>
 
-Lead is an **independent modification** of the Telegram app. It is **not affiliated with, authorized or endorsed by Telegram Messenger LLP** or any of its affiliates. It is made for personal and educational use — use it at your own risk; the author takes no responsibility for any consequences of using it.
+Kira is an **independent modification** of the Telegram app. It is **not affiliated with, authorized or endorsed by Telegram Messenger LLP** or any of its affiliates. It is made for personal and educational use — use it at your own risk; the author takes no responsibility for any consequences of using it.
 
 </details>
 
 ### 🙏 Acknowledgements
+- Based on the original [Lead by w3ltyyy](https://github.com/w3ltyyy/lead); Kira is a modified fork.
 - **chocolate fluffy** — for the core code this project grew from
 - A fork of [Aj3radi/TGExtra](https://github.com/Aj3radi/TGExtra)
 
@@ -219,5 +221,5 @@ Lead is an **independent modification** of the Telegram app. It is **not affilia
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/footer-dark.svg">
-  <img src="assets/footer-light.svg" width="100%" alt="Lead">
+  <img src="assets/footer-light.svg" width="100%" alt="Kira">
 </picture>
