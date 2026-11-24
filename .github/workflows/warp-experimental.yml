@@ -1,0 +1,50 @@
+name: WARP experimental build
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/warp/**'
+      - 'Sources/tgapi/UI/LeadWarp.m'
+      - 'Sources/tgapi/UI/LeadAutoProxy.m'
+      - 'Sources/tgapi/UI/LeadPages.m'
+      - 'Sources/tgapi/UI/LeadUIStrings.h'
+      - 'Makefile'
+      - '.github/workflows/warp-experimental.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: lead-warp-experimental
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - name: Set up Theos
+        uses: waruhachi/theos-action@v2.4.6
+        with:
+          theos-src: 'waruhachi/theos'
+          theos-branch: 'main'
+          sdks-src: 'waruhachi/sdks'
+          sdks-branch: 'main'
+      - name: Install dpkg
+        run: brew install dpkg
+      - name: Compile userspace WireGuard archive
+        run: bash tools/warp/build.sh
+      - name: Build experimental arm64 dylib
+        shell: bash
+        run: make clean package FINALPACKAGE=1 LEAD_WARP_ARCHIVE="$PWD/tools/warp/build/libLeadWarp.a"
+      - name: Check exported Go symbols in dylib
+        run: |
+          test -s packages/Kira.dylib
+          nm packages/Kira.dylib | grep -q 'LeadWarpStart'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lead-warp-experimental-arm64
+          path: packages/Kira.dylib
+          if-no-files-found: error
