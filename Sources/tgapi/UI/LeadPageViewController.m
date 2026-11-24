@@ -25,7 +25,9 @@ static NSString *const kHeaderId = @"LeadHeader";
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-  self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.tableView.backgroundColor = LeadThemeBackground();
+  self.tableView.tintColor = LeadThemeAccent();
+  self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
   self.tableView.estimatedRowHeight = 64;
   self.tableView.rowHeight = UITableViewAutomaticDimension;
   self.tableView.sectionHeaderHeight = UITableViewAutomaticDimension;
@@ -250,7 +252,9 @@ static NSString *LeadGhostUserId(NSDictionary *record) {
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.title = LeadL(@"UI_EXCEPTIONS");
-  self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.tableView.backgroundColor = LeadThemeBackground();
+  self.tableView.tintColor = LeadThemeAccent();
+  self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
   self.tableView.rowHeight = UITableViewAutomaticDimension;
   self.tableView.estimatedRowHeight = 60;
   [self.tableView registerClass:[LeadCell class] forCellReuseIdentifier:kCellId];
@@ -281,7 +285,7 @@ static NSString *LeadGhostUserId(NSDictionary *record) {
   UILabel *hint = [UILabel new];
   hint.text = LeadL(@"UI_EXCEPTIONS_EMPTY_HINT");
   hint.font = LeadFont(14, UIFontWeightRegular);
-  hint.textColor = UIColor.secondaryLabelColor;
+  hint.textColor = LeadThemeMuted();
   hint.textAlignment = NSTextAlignmentCenter;
   hint.numberOfLines = 0;
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ tile, title, hint ]];

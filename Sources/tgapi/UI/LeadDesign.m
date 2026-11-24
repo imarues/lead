@@ -7,6 +7,28 @@ NSString *const LeadSettingsDidChangeNotification = @"LeadSettingsDidChangeNotif
 
 static BOOL sLeadNeedsRestart = NO;
 
+UIColor *LeadThemeBackground(void) { return [UIColor colorWithRed:0.075 green:0.047 blue:0.14 alpha:1]; }
+UIColor *LeadThemeCard(void) { return [UIColor colorWithRed:0.16 green:0.105 blue:0.255 alpha:1]; }
+UIColor *LeadThemeAccent(void) { return [UIColor colorWithRed:0.70 green:0.59 blue:0.98 alpha:1]; }
+UIColor *LeadThemeInk(void) { return [UIColor colorWithRed:0.97 green:0.95 blue:1 alpha:1]; }
+UIColor *LeadThemeMuted(void) { return [UIColor colorWithRed:0.72 green:0.66 blue:0.82 alpha:1]; }
+
+@implementation LeadThemeHeader
++ (Class)layerClass { return CAGradientLayer.class; }
+- (instancetype)initWithFrame:(CGRect)frame {
+  if ((self = [super initWithFrame:frame])) {
+    CAGradientLayer *gradient = (CAGradientLayer *)self.layer;
+    gradient.colors = @[(id)[UIColor colorWithRed:0.27 green:0.16 blue:0.43 alpha:1].CGColor,
+                        (id)LeadThemeBackground().CGColor];
+    gradient.startPoint = CGPointMake(0, 0);
+    gradient.endPoint = CGPointMake(0.9, 1);
+    self.layer.cornerRadius = 28;
+    self.layer.masksToBounds = YES;
+  }
+  return self;
+}
+@end
+
 #pragma mark - Basics
 
 UIFont *LeadFont(CGFloat size, UIFontWeight weight) {
@@ -180,10 +202,10 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
 - (void)updateColors {
   BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
-  UIColor *top = dark ? [UIColor colorWithWhite:0.93 alpha:1] : [UIColor colorWithWhite:0.74 alpha:1];
-  UIColor *bottom = dark ? [UIColor colorWithWhite:0.52 alpha:1] : [UIColor colorWithWhite:0.24 alpha:1];
+  UIColor *top = LeadThemeInk();
+  UIColor *bottom = LeadThemeAccent();
   _gradient.colors = @[ (id)top.CGColor, (id)bottom.CGColor ];
-  _stroke.strokeColor = [UIColor.labelColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+  _stroke.strokeColor = [LeadThemeInk() resolvedColorWithTraitCollection:self.traitCollection].CGColor;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
@@ -311,11 +333,11 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
 - (void)applyColors {
   if (!_templateImage) {
-    self.backgroundColor = UIColor.tertiarySystemFillColor;
+    self.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
     return;
   }
-  self.backgroundColor = _active ? UIColor.labelColor : UIColor.tertiarySystemFillColor;
-  UIColor *ink = _active ? UIColor.systemBackgroundColor : UIColor.labelColor;
+  self.backgroundColor = _active ? LeadThemeAccent() : [LeadThemeAccent() colorWithAlphaComponent:0.14];
+  UIColor *ink = _active ? UIColor.systemBackgroundColor : LeadThemeInk();
   _imageView.tintColor = ink;
   _textLabel.textColor = ink;
 }
@@ -348,8 +370,10 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
   self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseIdentifier];
   if (self) {
+    self.backgroundColor = LeadThemeCard();
+    self.tintColor = LeadThemeAccent();
     UIView *selected = [UIView new];
-    selected.backgroundColor = UIColor.tertiarySystemFillColor;
+    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.selectedBackgroundView = selected;
 
     _tile = [LeadIconTile new];
@@ -358,11 +382,11 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
     _titleLabel = [UILabel new];
     _titleLabel.font = LeadFont(16, UIFontWeightRegular);
-    _titleLabel.textColor = UIColor.labelColor;
+    _titleLabel.textColor = LeadThemeInk();
     _titleLabel.numberOfLines = 0;
     _subtitleLabel = [UILabel new];
     _subtitleLabel.font = LeadFont(13, UIFontWeightRegular);
-    _subtitleLabel.textColor = UIColor.secondaryLabelColor;
+    _subtitleLabel.textColor = LeadThemeMuted();
     _subtitleLabel.numberOfLines = 0;
     _textStack = [[UIStackView alloc] initWithArrangedSubviews:@[ _titleLabel, _subtitleLabel ]];
     _textStack.axis = UILayoutConstraintAxisVertical;
@@ -375,11 +399,11 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
     _valueLabel = [UILabel new];
     _valueLabel.font = LeadFont(15, UIFontWeightRegular);
-    _valueLabel.textColor = UIColor.secondaryLabelColor;
+    _valueLabel.textColor = LeadThemeMuted();
     _valueLabel.textAlignment = NSTextAlignmentRight;
     _chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"
                                                            withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold]]];
-    _chevron.tintColor = UIColor.tertiaryLabelColor;
+    _chevron.tintColor = LeadThemeMuted();
     UIStackView *valueStack = [[UIStackView alloc] initWithArrangedSubviews:@[ _valueLabel, _chevron ]];
     valueStack.spacing = 8;
     valueStack.alignment = UIStackViewAlignmentCenter;
@@ -443,7 +467,7 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 }
 
 - (void)setDestructive:(BOOL)destructive {
-  _titleLabel.textColor = destructive ? UIColor.systemRedColor : UIColor.labelColor;
+  _titleLabel.textColor = destructive ? UIColor.systemRedColor : LeadThemeInk();
 }
 
 - (void)toggleChanged {
@@ -473,8 +497,10 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
   self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseIdentifier];
   if (self) {
+    self.backgroundColor = LeadThemeCard();
+    self.tintColor = LeadThemeAccent();
     UIView *selected = [UIView new];
-    selected.backgroundColor = UIColor.tertiarySystemFillColor;
+    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.selectedBackgroundView = selected;
 
     _tile = [LeadIconTile new];
@@ -487,7 +513,7 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
     _titleLabel.font = LeadRoundedFont(20, UIFontWeightSemibold);
     _statusLabel = [UILabel new];
     _statusLabel.font = LeadFont(14, UIFontWeightRegular);
-    _statusLabel.textColor = UIColor.secondaryLabelColor;
+    _statusLabel.textColor = LeadThemeMuted();
     _statusLabel.numberOfLines = 2;
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ _titleLabel, _statusLabel ]];
     stack.axis = UILayoutConstraintAxisVertical;
@@ -538,7 +564,7 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 - (void)playPulse {
   [self layoutIfNeeded];
   CGRect frame = _tile.frame;
-  _pulse.strokeColor = [UIColor.labelColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+  _pulse.strokeColor = [LeadThemeInk() resolvedColorWithTraitCollection:self.traitCollection].CGColor;
   _pulse.path = [UIBezierPath bezierPathWithRoundedRect:frame cornerRadius:frame.size.width * 0.28].CGPath;
   _pulse.frame = self.contentView.bounds;
   CGPoint center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
@@ -580,12 +606,12 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   if (self) {
     _label = [UILabel new];
     _label.font = LeadFont(13, UIFontWeightSemibold);
-    _label.textColor = UIColor.secondaryLabelColor;
+    _label.textColor = LeadThemeMuted();
     _label.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_label];
     _actionButton = [UIButton buttonWithType:UIButtonTypeSystem];
     _actionButton.titleLabel.font = LeadFont(13, UIFontWeightSemibold);
-    _actionButton.tintColor = UIColor.labelColor;
+    _actionButton.tintColor = LeadThemeInk();
     _actionButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_actionButton addTarget:self action:@selector(actionTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.contentView addSubview:_actionButton];
@@ -633,11 +659,11 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
   UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbol ?: @"checkmark"
                                                                 withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold]]];
-  icon.tintColor = UIColor.labelColor;
+  icon.tintColor = LeadThemeInk();
   UILabel *label = [UILabel new];
   label.text = text;
   label.font = LeadFont(14, UIFontWeightMedium);
-  label.textColor = UIColor.labelColor;
+  label.textColor = LeadThemeInk();
   label.numberOfLines = 2;
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ icon, label ]];
   stack.spacing = 8;
@@ -687,13 +713,16 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.view.tintColor = UIColor.labelColor;
+  self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  self.view.tintColor = LeadThemeAccent();
+  self.navigationBar.tintColor = LeadThemeAccent();
   UINavigationBarAppearance *edge = [UINavigationBarAppearance new];
   [edge configureWithTransparentBackground];
-  edge.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  edge.backgroundColor = LeadThemeBackground();
   UINavigationBarAppearance *standard = [UINavigationBarAppearance new];
-  [standard configureWithDefaultBackground];
-  standard.titleTextAttributes = @{ NSFontAttributeName : LeadFont(17, UIFontWeightSemibold) };
+  [standard configureWithOpaqueBackground];
+  standard.backgroundColor = LeadThemeBackground();
+  standard.titleTextAttributes = @{ NSFontAttributeName : LeadFont(17, UIFontWeightSemibold), NSForegroundColorAttributeName : LeadThemeInk() };
   edge.titleTextAttributes = standard.titleTextAttributes;
   self.navigationBar.standardAppearance = standard;
   self.navigationBar.scrollEdgeAppearance = edge;
@@ -719,12 +748,12 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
   UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.clockwise"
                                                                 withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold]]];
-  icon.tintColor = UIColor.secondaryLabelColor;
+  icon.tintColor = LeadThemeMuted();
   [icon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
   UILabel *hint = [UILabel new];
   hint.text = LeadL(@"UI_RESTART_HINT");
   hint.font = LeadFont(13, UIFontWeightMedium);
-  hint.textColor = UIColor.secondaryLabelColor;
+  hint.textColor = LeadThemeMuted();
   hint.numberOfLines = 2;
   hint.adjustsFontSizeToFitWidth = YES;
   hint.minimumScaleFactor = 0.8;
@@ -733,7 +762,7 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
   [restart setTitle:LeadL(@"UI_RESTART") forState:UIControlStateNormal];
   restart.titleLabel.font = LeadFont(15, UIFontWeightSemibold);
   [restart setTitleColor:UIColor.systemBackgroundColor forState:UIControlStateNormal];
-  restart.backgroundColor = UIColor.labelColor;
+  restart.backgroundColor = LeadThemeInk();
   restart.layer.cornerRadius = 18;
   restart.layer.cornerCurve = kCACornerCurveContinuous;
   restart.contentEdgeInsets = UIEdgeInsetsMake(0, 18, 0, 18);
@@ -813,13 +842,13 @@ static CGPathRef LeadCreateLogoPath(CGRect r) {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.view.backgroundColor = LeadThemeBackground();
   _textView = [UITextView new];
   _textView.editable = NO;
   _textView.backgroundColor = UIColor.clearColor;
   _textView.textContainerInset = UIEdgeInsetsMake(16, 16, 32, 16);
   _textView.font = _monospaced ? [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular] : LeadFont(16, UIFontWeightRegular);
-  _textView.textColor = UIColor.labelColor;
+  _textView.textColor = LeadThemeInk();
   _textView.alwaysBounceVertical = YES;
   _textView.translatesAutoresizingMaskIntoConstraints = NO;
   [self.view addSubview:_textView];

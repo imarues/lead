@@ -62,7 +62,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.view.backgroundColor = LeadThemeBackground();
   self.ghostPage = LeadGhostPage();
   self.pages = LeadFeaturePages();
 
@@ -146,7 +146,9 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
   self.tableView.dataSource = self;
   self.tableView.delegate = self;
-  self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.tableView.backgroundColor = LeadThemeBackground();
+  self.tableView.tintColor = LeadThemeAccent();
+  self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
   self.tableView.rowHeight = UITableViewAutomaticDimension;
   self.tableView.estimatedRowHeight = 60;
   self.tableView.sectionHeaderHeight = UITableViewAutomaticDimension;
@@ -167,12 +169,12 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   self.emptySearchLabel = [UILabel new];
   self.emptySearchLabel.text = LeadL(@"UI_SEARCH_EMPTY");
   self.emptySearchLabel.font = LeadFont(15, UIFontWeightRegular);
-  self.emptySearchLabel.textColor = UIColor.secondaryLabelColor;
+  self.emptySearchLabel.textColor = LeadThemeMuted();
   self.emptySearchLabel.textAlignment = NSTextAlignmentCenter;
 }
 
 - (void)setupHeader {
-  UIView *header = [UIView new];
+  UIView *header = [LeadThemeHeader new];
 
   self.logoView = [LeadLogoView new];
   self.logoView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -181,7 +183,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   UILabel *title = [UILabel new];
   title.text = @"Kira";
   title.font = LeadRoundedFont(32, UIFontWeightBold);
-  title.textColor = UIColor.labelColor;
+  title.textColor = LeadThemeInk();
 
   self.statusDot = [UIView new];
   self.statusDot.layer.cornerRadius = 3.5;
@@ -189,7 +191,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   [self.statusDot.heightAnchor constraintEqualToConstant:7].active = YES;
   self.statusLabel = [UILabel new];
   self.statusLabel.font = LeadFont(14, UIFontWeightMedium);
-  self.statusLabel.textColor = UIColor.secondaryLabelColor;
+  self.statusLabel.textColor = LeadThemeMuted();
   UIStackView *status = [[UIStackView alloc] initWithArrangedSubviews:@[ self.statusDot, self.statusLabel ]];
   status.spacing = 7;
   status.alignment = UIStackViewAlignmentCenter;
@@ -208,7 +210,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   [header addSubview:self.announcementStack];
 
   [NSLayoutConstraint activateConstraints:@[
-    [self.logoView.topAnchor constraintEqualToAnchor:header.topAnchor constant:4],
+    [self.logoView.topAnchor constraintEqualToAnchor:header.topAnchor constant:22],
     [self.logoView.centerXAnchor constraintEqualToAnchor:header.centerXAnchor],
     [self.logoView.widthAnchor constraintEqualToConstant:72],
     [self.logoView.heightAnchor constraintEqualToConstant:72],
@@ -217,7 +219,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
     [self.announcementStack.topAnchor constraintEqualToAnchor:titles.bottomAnchor constant:18],
     [self.announcementStack.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:20],
     [self.announcementStack.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-20],
-    [self.announcementStack.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-4],
+    [self.announcementStack.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-20],
   ]];
   self.headerView = header;
   [self layoutHeader];
@@ -273,7 +275,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 - (void)refreshStatusAnimated:(BOOL)animated {
   NSInteger count = LeadEnabledFeatureCount();
   NSString *text = count > 0 ? [NSString stringWithFormat:LeadL(@"UI_STATUS_ON"), (long)count] : LeadL(@"UI_STATUS_NONE");
-  UIColor *dot = count > 0 ? UIColor.systemGreenColor : UIColor.tertiaryLabelColor;
+  UIColor *dot = count > 0 ? UIColor.systemGreenColor : LeadThemeMuted();
   if (!animated || [self.statusLabel.text isEqualToString:text]) {
     self.statusLabel.text = text;
     self.statusDot.backgroundColor = dot;
@@ -571,7 +573,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 
 - (UIView *)announcementCardWithTitle:(NSString *)title message:(NSString *)message type:(NSString *)type url:(NSString *)url {
   UIControl *card = [UIControl new];
-  card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+  card.backgroundColor = LeadThemeCard();
   card.layer.cornerRadius = 14;
   card.layer.cornerCurve = kCACornerCurveContinuous;
 
@@ -588,7 +590,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   UILabel *messageLabel = [UILabel new];
   messageLabel.text = [message isKindOfClass:[NSString class]] ? message : @"";
   messageLabel.font = LeadFont(13, UIFontWeightRegular);
-  messageLabel.textColor = UIColor.secondaryLabelColor;
+  messageLabel.textColor = LeadThemeMuted();
   messageLabel.numberOfLines = 0;
   UIStackView *texts = [[UIStackView alloc] initWithArrangedSubviews:@[ titleLabel, messageLabel ]];
   texts.axis = UILayoutConstraintAxisVertical;
@@ -603,7 +605,7 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   if (url.length) {
     UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"
                                                                        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightSemibold]]];
-    chevron.tintColor = UIColor.tertiaryLabelColor;
+    chevron.tintColor = LeadThemeMuted();
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:chevron];
     [NSLayoutConstraint activateConstraints:@[

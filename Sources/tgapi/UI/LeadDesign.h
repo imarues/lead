@@ -96,3 +96,11 @@ UIViewController *LeadTopPresenter(void);
 
 // Fades and lifts rows in, staggered, the first time a list appears.
 void LeadAnimateCellIn(UITableViewCell *cell, NSInteger order);
+
+UIColor *LeadThemeBackground(void);
+UIColor *LeadThemeCard(void);
+UIColor *LeadThemeAccent(void);
+UIColor *LeadThemeInk(void);
+UIColor *LeadThemeMuted(void);
+@interface LeadThemeHeader : UIView
+@end
