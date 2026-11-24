@@ -188,6 +188,7 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
 %property(nonatomic, strong) NSData *fakeData;
 %property(nonatomic, strong) NSData *fakePayload;
 %property(nonatomic, strong) NSNumber *functionID;
+%property(nonatomic, copy) id (^leadPromoParser)(NSData *);
 
 - (void)setPayload:(NSData *)payload
           metadata:(id)metadata
@@ -203,6 +204,7 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
   int32_t functionID;
   [payload getBytes:&functionID length:4];
   self.functionID = [NSNumber numberWithInt:functionID];
+  self.leadPromoParser = functionID == kHelpGetPromoData ? responseParser : nil;
 
   id (^hooked_block)(NSData *) = ^(NSData *inputData) {
     // File chunks hold nothing to patch; don't copy and scan up to 1 MB per part.
@@ -349,7 +351,8 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
   if (requestFunction == kHelpGetPromoData && request.completed && request.responseParser) {
     NSString *proxy = LeadListedProxyForService(self);
     if (proxy) {
-      id (^parse)(NSData *) = request.responseParser;
+      // Listed partners use the native parser before the global ad-removal filter.
+      id (^parse)(NSData *) = [(id)request leadPromoParser] ?: request.responseParser;
       void (^finish)(id, MTRequestResponseInfo *, MTRpcError *) = request.completed;
       // Keep the original parser for both the normal and substituted response.
       // The internal marker keeps this wire-data parser out of the generic TL hook.
@@ -361,10 +364,8 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
         NSData *original = result;
         id fallback = parse(original);
         MTRequestMessageService *service = weakService;
-        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         NSData *unpacked = LeadDiscoveryUnpack(original);
         if (!fallback || ![proxy isEqual:LeadListedProxyForService(service)] ||
-            [defaults boolForKey:kHideProxyPromo] || [defaults boolForKey:kDisableAllAds] ||
             !unpacked || ![LeadChannelPromotion containsSponsor:unpacked]) {
           finish(fallback, info, nil);
           return;
