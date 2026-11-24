@@ -11,6 +11,27 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 + (NSData *)pageRequest:(NSDictionary *)target offset:(int32_t)offset pinned:(BOOL)pinned limit:(int32_t)limit;
 + (NSDictionary *)parsePage:(NSData *)data;
 @end
+// A separate source list keeps every occurrence accessible without duplicating the results.
+@interface LeadUsernameSourceController : UITableViewController
+@property(nonatomic,copy) NSArray<NSNumber *> *messageIds;
+@property(nonatomic,copy) void (^openSource)(NSNumber *);
+@end
+@implementation LeadUsernameSourceController
+- (void)viewDidLoad {
+    [super viewDidLoad]; self.title = @"مصادر النتيجة";
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.messageIds.count; }
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"source"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"source"];
+    NSNumber *mid = self.messageIds[indexPath.row];
+    cell.textLabel.text = mid.longLongValue > 0 ? [NSString stringWithFormat:@"الرسالة #%@",mid] : @"نبذة القناة";
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.openSource) self.openSource(self.messageIds[indexPath.row]);
+}
+@end
 @interface LeadUsernameScanViewController () <UITextFieldDelegate>
 @property(nonatomic,strong) UITextField *field;
 @property(nonatomic,strong) UILabel *status;
@@ -18,6 +39,8 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 @property(nonatomic,strong) NSDictionary *target;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSString *> *unique;
 @property(nonatomic,strong) NSArray<NSString *> *rows;
+@property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableOrderedSet<NSNumber *> *> *sources;
+@property(nonatomic,copy) NSString *bioURL;
 @property(nonatomic,strong) NSMutableArray<NSString *> *warnings;
 @property(nonatomic) NSInteger generation;
 @property(nonatomic) NSInteger scanned;
@@ -27,7 +50,7 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 - (instancetype)init { return [super initWithStyle:UITableViewStyleInsetGrouped]; }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"فحص اليوزرات";
-    self.rows = @[]; self.unique = [NSMutableDictionary dictionary]; self.warnings = [NSMutableArray array];
+    self.rows = @[]; self.unique = [NSMutableDictionary dictionary]; self.sources = [NSMutableDictionary dictionary]; self.warnings = [NSMutableArray array];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"نسخ الكل" style:UIBarButtonItemStylePlain target:self action:@selector(copyAll)];
     UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0,0,320,178)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -51,9 +74,14 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     [self.tableView reloadData];
 }
 - (void)addRefs:(NSArray *)refs {
-    for (NSString *ref in refs) { if (![ref isKindOfClass:NSString.class]) continue;
+    for (id item in refs) {
+        NSString *ref = [item isKindOfClass:NSDictionary.class] ? item[@"value"] : item;
+        NSNumber *mid = [item isKindOfClass:NSDictionary.class] ? item[@"messageId"] : @0;
+        if (![ref isKindOfClass:NSString.class] || ![mid isKindOfClass:NSNumber.class]) continue;
         NSString *key = [ref hasPrefix:@"@"] ? ref.lowercaseString : ref;
         if (!self.unique[key]) self.unique[key] = ref;
+        if (!self.sources[key]) self.sources[key] = [NSMutableOrderedSet orderedSet];
+        [self.sources[key] addObject:mid];
     }
     [self refreshRows];
 }
@@ -80,11 +108,15 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     [self.field resignFirstResponder]; NSDictionary *req = [LeadUsernameScanner resolveTarget:self.field.text ?: @""];
     if (!req) { self.status.text = @"أدخل رابط قناة أو رابط دعوة صحيح، وليس رابط رسالة."; return; }
     NSInteger gen = ++self.generation; self.running = YES; self.scanned = 0;
-    [self.unique removeAllObjects]; [self.warnings removeAllObjects]; [self refreshRows]; self.field.enabled = NO;
+    [self.unique removeAllObjects]; [self.sources removeAllObjects]; self.bioURL = nil; [self.warnings removeAllObjects]; [self refreshRows]; self.field.enabled = NO;
     [self.start setTitle:@"إيقاف الفحص" forState:UIControlStateNormal]; self.status.text = @"جاري التحقق من القناة…";
     [self send:req[@"payload"] generation:gen completion:^(NSData *data, NSString *error) {
         self.target = data.length && !error.length ? [LeadUsernameScanner parseTarget:data kind:req[@"kind"]] : nil;
         if (!self.target[@"peer"]) { [self finish:error ?: self.target[@"error"] ?: @"تعذر الوصول إلى القناة أو الرابط ليس قناة"]; return; }
+        NSString *name = self.target[@"username"];
+        if (name.length) self.bioURL = [NSString stringWithFormat:@"tg://resolve?domain=%@",name];
+        else if ([req[@"kind"] isEqual:@"invite"]) self.bioURL = [NSString stringWithFormat:@"tg://join?invite=%@",req[@"targetValue"]];
+        else self.bioURL = [NSString stringWithFormat:@"tg://resolve?domain=%@",req[@"targetValue"]];
         [self send:[LeadUsernameScanner fullRequest:self.target] generation:gen completion:^(NSData *full, NSString *err) {
             NSArray *refs = !err.length && full.length ? [LeadUsernameScanner parseFull:full] : nil;
             if (refs) [self addRefs:refs]; else [self.warnings addObject:@"تعذر فحص النبذة"];
@@ -119,10 +151,57 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     }];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.rows.count; }
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"reference"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"reference"];
-    cell.textLabel.text = self.rows[indexPath.row]; cell.textLabel.font = [UIFont systemFontOfSize:15]; cell.textLabel.numberOfLines = 0; cell.accessoryType = UITableViewCellAccessoryNone; return cell;
+- (NSArray<NSNumber *> *)sourcesFor:(NSString *)ref {
+    NSString *key = [ref hasPrefix:@"@"] ? ref.lowercaseString : ref;
+    return [self.sources[key].array sortedArrayUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) { return [b compare:a]; }];
 }
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath { UIPasteboard.generalPasteboard.string = self.rows[indexPath.row]; [tableView deselectRowAtIndexPath:indexPath animated:YES]; }
+- (void)openMessageId:(NSNumber *)mid {
+    NSString *url = nil;
+    if (mid.longLongValue == 0) url = self.bioURL;
+    else if ([self.target[@"username"] length]) url = [NSString stringWithFormat:@"tg://resolve?domain=%@&post=%@",self.target[@"username"],mid];
+    else if ([self.target[@"channelId"] longLongValue] > 0) url = [NSString stringWithFormat:@"tg://privatepost?channel=%@&post=%@",self.target[@"channelId"],mid];
+    if (url.length) {
+        if (self.running) { self.generation++; [self finish:@"أُوقف الفحص — النتائج جزئية"]; }
+        LeadOpenTelegramURL(url); // Internal app delegate/scene router; never LaunchServices for tg://.
+    }
+}
+- (void)openReference:(NSString *)ref {
+    NSArray<NSNumber *> *ids = [self sourcesFor:ref];
+    if (ids.count == 1) { [self openMessageId:ids.firstObject]; return; }
+    if (ids.count > 1) {
+        LeadUsernameSourceController *vc = [[LeadUsernameSourceController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        vc.messageIds = ids;
+        __weak typeof(self) weakSelf = self;
+        vc.openSource = ^(NSNumber *mid) { [weakSelf openMessageId:mid]; };
+        [self.navigationController pushViewController:vc animated:YES];
+    }
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"referenceActions"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"referenceActions"];
+    NSString *ref = self.rows[indexPath.row];
+    NSArray *ids = [self sourcesFor:ref];
+    cell.textLabel.text = ref; cell.textLabel.font = [UIFont systemFontOfSize:15]; cell.textLabel.numberOfLines = 0;
+    cell.detailTextLabel.text = ids.count == 1 ? ([ids.firstObject longLongValue] == 0 ? @"نبذة القناة" : [NSString stringWithFormat:@"الرسالة #%@",ids.firstObject]) : [NSString stringWithFormat:@"%lu مصادر",(unsigned long)ids.count];
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    __weak typeof(self) weakSelf = self;
+    UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
+    [copy setTitle:@"نسخ" forState:UIControlStateNormal];
+    [copy addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
+        UIPasteboard.generalPasteboard.string = ref;
+        LeadUsernameScanViewController *host = weakSelf;
+        if (host) [LeadToast showText:@"تم النسخ" symbol:@"checkmark" inView:host.view];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    UIButton *open = [UIButton buttonWithType:UIButtonTypeSystem];
+    [open setTitle:@"فتح" forState:UIControlStateNormal];
+    [open addAction:[UIAction actionWithHandler:^(__unused UIAction *action) { [weakSelf openReference:ref]; }] forControlEvents:UIControlEventTouchUpInside];
+    open.enabled = ids.count > 0;
+    UIStackView *actions = [[UIStackView alloc] initWithArrangedSubviews:@[copy,open]];
+    actions.axis = UILayoutConstraintAxisHorizontal; actions.distribution = UIStackViewDistributionFillEqually; actions.spacing = 4;
+    actions.frame = CGRectMake(0,0,104,44);
+    cell.accessoryView = actions;
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath { [tableView deselectRowAtIndexPath:indexPath animated:YES]; }
 - (void)copyAll { UIPasteboard.generalPasteboard.string = [self.rows componentsJoinedByString:@"\n"]; }
 @end

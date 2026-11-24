@@ -10,6 +10,7 @@
 
 // Snow is a visual-only overlay, independent of Telegram calls/media handling.
 extern "C" void LeadSnowInstall(void);
+extern "C" void LeadChatListPromotionInstall(void);
 extern "C" void LeadSnowChatDidAppear(UIViewController *chat);
 extern "C" void LeadSnowChatWillDisappear(UIViewController *chat);
 
@@ -1895,6 +1896,7 @@ static void hook() {
     [leadDefaults setBool:YES forKey:kHideProxyPromo];
     LeadSnowInstall();
     LeadAutoProxyInstall();
+    LeadChatListPromotionInstall();
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         %init(

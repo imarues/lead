@@ -731,7 +731,7 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     [LeadSection title:nil rows:@[ fakeDevice, deviceName ]],
   ];
 
-  LeadRow *autoProxy = [LeadRow toggle:kAutoProxy title:@"UI_AUTO_PROXY_TITLE" subtitle:@"UI_AUTO_PROXY_SUBTITLE" symbol:@"network"];
+  LeadRow *autoProxy = [LeadRow toggle:kAutoProxy title:@"UI_AUTO_PROXY_TITLE" subtitle:nil symbol:@"network"];
   autoProxy.toggleBlock = ^(BOOL on, __unused UIViewController *host) {
     LeadAutoProxySetEnabled(on);
   };
@@ -758,7 +758,6 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     return LeadAutoProxySummary() ?: LeadL(@"UI_NOT_SET");
   };
   LeadSection *proxySection = [LeadSection title:nil rows:@[ autoProxy, proxyStatus ]];
-  proxySection.footerKey = @"UI_AUTO_PROXY_FOOTER";
 
   LeadPage *proxy = [LeadPage new];
   proxy.titleKey = @"UI_PAGE_PROXY";

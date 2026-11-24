@@ -61,13 +61,13 @@ final class LeadUsernameScanner: NSObject {
         let b = request(target.kind == "invite" ? 0x3eadb1bb : 0x725afbbc)
         if target.kind != "invite" { b.appendInt32(0) }
         serializeString(target.value, buffer: b, boxed: false)
-        return ["payload": bytes(b), "kind": target.kind] as NSDictionary
+        return ["payload": bytes(b), "kind": target.kind, "targetValue": target.value] as NSDictionary
     }
     private static func channel(_ chat: Api.Chat) -> NSDictionary? {
         guard case let .channel(c) = chat, c.flags & (1 << 5) != 0, let hash = c.accessHash else { return nil }
         let peer = Buffer(); Api.InputPeer.inputPeerChannel(.init(channelId: c.id, accessHash: hash)).serialize(peer, true)
         let input = Buffer(); Api.InputChannel.inputChannel(.init(channelId: c.id, accessHash: hash)).serialize(input, true)
-        return ["peer": bytes(peer), "channel": bytes(input), "title": c.title] as NSDictionary
+        return ["peer": bytes(peer), "channel": bytes(input), "title": c.title, "channelId": c.id, "username": c.username ?? ""] as NSDictionary
     }
     @objc(parseTarget:kind:) static func parseTarget(_ data: NSData, kind: String) -> NSDictionary? {
         let value = Api.parse(Buffer(data: data as Data))
@@ -105,27 +105,28 @@ final class LeadUsernameScanner: NSObject {
     @objc(parsePage:) static func parsePage(_ data: NSData) -> NSDictionary? {
         // Parse only the message vector, not unrelated users/chats that may have newer schema.
         guard let page = LeadMessageDiscoveryBridge.tolerantMessages(data) else { return nil }
-        var refs = [String](); var offset = Int32.max; var count = 0
+        var refs = [[String: Any]](); var offset = Int32.max; var count = 0
         for message in page.messages {
             switch message {
             case .message(let m):
                 offset = min(offset, m.id); count += 1
-                refs += LeadUsernameReferences.extract(m.message)
+                var messageRefs = LeadUsernameReferences.extract(m.message)
                 for entity in m.entities ?? [] {
-                    if case let .messageEntityTextUrl(e) = entity { refs += LeadUsernameReferences.extract(e.url) }
+                    if case let .messageEntityTextUrl(e) = entity { messageRefs += LeadUsernameReferences.extract(e.url) }
                 }
                 if case let .replyInlineMarkup(markup)? = m.replyMarkup {
                     for case let .keyboardInlineButtonRow(row) in markup.rows {
                         for case let .keyboardInlineButton(button) in row.buttons {
-                            refs += LeadUsernameReferences.extract(button.text)
+                            messageRefs += LeadUsernameReferences.extract(button.text)
                             switch button.type {
-                            case .inlineButtonTypeUrl(let u): refs += LeadUsernameReferences.extract(u.url)
-                            case .inlineButtonTypeUrlAuth(let u): refs += LeadUsernameReferences.extract(u.url)
+                            case .inlineButtonTypeUrl(let u): messageRefs += LeadUsernameReferences.extract(u.url)
+                            case .inlineButtonTypeUrlAuth(let u): messageRefs += LeadUsernameReferences.extract(u.url)
                             default: break
                             }
                         }
                     }
                 }
+                for ref in Set(messageRefs) { refs.append(["value": ref, "messageId": m.id]) }
             case .messageEmpty(let m): offset = min(offset, m.id)
             case .messageService(let m): offset = min(offset, m.id)
             }
