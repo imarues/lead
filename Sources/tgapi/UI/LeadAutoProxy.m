@@ -42,6 +42,20 @@ static NSArray<NSString *> *LeadProxyBuiltInLinks(void) {
   ];
 }
 
+// Kept separate from the normal MTProto pool; these were tested by the owner.
+static NSArray<NSString *> *LeadCallProxyBuiltInLinks(void) {
+  return @[
+    @"tg://socks?server=45.74.31.40&port=4161",
+    @"tg://socks?server=176.9.107.170&port=1083",
+    @"tg://socks?server=123.58.219.171&port=10808",
+    @"tg://socks?server=47.251.166.203&port=1080",
+    @"tg://socks?server=82.180.146.251&port=10800",
+    @"tg://socks?server=43.134.39.221&port=10000"
+  ];
+}
+static NSString *const kLeadCallProxyCache = @"LeadCallProxyList";
+static NSString *const kLeadCallProxyReachable = @"LeadCallProxyReachable";
+
 static const NSTimeInterval kLeadAutoProxyRefreshInterval = 20 * 60;
 static const NSUInteger kLeadAutoProxyMaxEntries = 20;
 static const NSUInteger kLeadAutoProxyMaxBytes = 64 * 1024;
@@ -193,6 +207,23 @@ static NSArray<NSString *> *LeadProxyLinksFromJSON(NSData *data) {
   return links.array;
 }
 
+// Only explicitly tagged SOCKS5 entries in the separate call pool are eligible.
+static NSArray<NSString *> *LeadCallProxyLinksFromJSON(NSData *data) {
+  if (data.length == 0 || data.length > kLeadAutoProxyMaxBytes) return nil;
+  id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  if (![root isKindOfClass:NSDictionary.class]) return nil;
+  id entries = root[@"call_proxies"];
+  if (![entries isKindOfClass:NSArray.class]) return nil;
+  NSMutableOrderedSet<NSString *> *links = [NSMutableOrderedSet orderedSet];
+  for (id entry in entries) {
+    NSString *link = LeadProxyLinkFromEntry(entry);
+    NSDictionary *parsed = LeadProxyParseLink(link);
+    if ([parsed[@"kind"] isEqualToString:@"socks"]) [links addObject:link];
+    if (links.count >= kLeadAutoProxyMaxEntries) break;
+  }
+  return links.array;
+}
+
 #pragma mark - Reachability
 
 // Plain TCP connect, off the proxy, so a dead server is skipped instead of chosen.
@@ -228,9 +259,9 @@ static BOOL LeadProxyProbe(NSString *host, int port, int timeoutMs) {
 }
 
 // First link, in list order, whose server answers; nil when none does.
-static NSString *LeadProxyFirstReachable(NSArray<NSString *> *links) {
+static NSArray<NSString *> *LeadProxyReachableLinks(NSArray<NSString *> *links) {
   NSUInteger count = links.count;
-  if (count == 0) return nil;
+  if (count == 0) return @[];
   NSMutableArray<NSNumber *> *answered = [NSMutableArray arrayWithCapacity:count];
   for (NSUInteger i = 0; i < count; i++) [answered addObject:@NO];
   dispatch_group_t group = dispatch_group_create();
@@ -243,9 +274,38 @@ static NSString *LeadProxyFirstReachable(NSArray<NSString *> *links) {
     });
   }
   dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
+  NSMutableArray<NSString *> *reachable = [NSMutableArray array];
   @synchronized(answered) {
     for (NSUInteger i = 0; i < count; i++) {
-      if ([answered[i] boolValue]) return links[i];
+      if ([answered[i] boolValue]) [reachable addObject:links[i]];
+    }
+  }
+  return reachable;
+}
+static NSString *LeadProxyFirstReachable(NSArray<NSString *> *links) {
+  return LeadProxyReachableLinks(links).firstObject;
+}
+
+// Called by the native VoIP initializer, not by MtProtoKit. No blocking I/O.
+// Advance to another server on each new call; prefer the last probed reachable pool.
+NSDictionary *LeadCallProxyNext(void) {
+  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+  if (![defaults boolForKey:kAutoProxy]) return nil;
+  NSArray<NSString *> *configured = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
+  if (!configured.count) return nil;
+  NSMutableArray<NSString *> *reachable = [NSMutableArray array];
+  for (NSString *link in [defaults arrayForKey:kLeadCallProxyReachable]) {
+    if ([configured containsObject:link]) [reachable addObject:link];
+  }
+  NSArray<NSString *> *pool = reachable.count ? reachable : configured;
+  static NSUInteger next = 0;
+  static NSObject *lock;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ lock = [NSObject new]; });
+  @synchronized(lock) {
+    for (NSUInteger i = 0; i < pool.count; i++) {
+      NSDictionary *p = LeadProxyParseLink(pool[next++ % pool.count]);
+      if ([p[@"kind"] isEqualToString:@"socks"]) return p;
     }
   }
   return nil;
@@ -432,7 +492,17 @@ static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *sum
     }
 
     // 1. The list: fresh from the file, else the last good one, else the built-in proxy.
-    NSArray<NSString *> *links = LeadProxyLinksFromJSON(LeadProxyFetch(LeadProxyConfigURLString()));
+    NSData *configData = LeadProxyFetch(LeadProxyConfigURLString());
+    NSArray<NSString *> *callLinks = LeadCallProxyLinksFromJSON(configData);
+    if (callLinks != nil) [defaults setObject:callLinks forKey:kLeadCallProxyCache];
+    else callLinks = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
+    // Probe calls independently so ordinary connection selection is not delayed.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      NSArray *reachableCalls = LeadProxyReachableLinks(callLinks);
+      NSArray *current = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
+      if ([current isEqualToArray:callLinks]) [defaults setObject:reachableCalls forKey:kLeadCallProxyReachable];
+    });
+    NSArray<NSString *> *links = LeadProxyLinksFromJSON(configData);
     if (links != nil) {
       [defaults setObject:links forKey:kAutoProxyList];
     } else {
