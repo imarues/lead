@@ -446,7 +446,7 @@ void handleEncryptedTyping(MTRequest *request, NSData *payload) {
 }
 
 void handleGetSponsoredMessages(MTRequest *request, NSData *payload) {
-	if ([[NSUserDefaults standardUserDefaults] boolForKey:kDisableAllAds]) {
+	{
 		
 		uint8_t header[] = {0x0F, 0X49, 0X39, 0X18}; // messages.sponsoredMessagesEmpty#1839490f
 		request.fakeData = [NSData dataWithBytes:header length:sizeof(header)];
@@ -454,7 +454,7 @@ void handleGetSponsoredMessages(MTRequest *request, NSData *payload) {
 }
 
 void handleGetSponsoredPeers(MTRequest *request, NSData *payload) {
-	if ([[NSUserDefaults standardUserDefaults] boolForKey:kDisableAllAds]) {
+	{
 		int32_t constructor = -365775695; // contacts.sponsoredPeersEmpty
 		request.fakeData = [NSData dataWithBytes:&constructor length:sizeof(constructor)];
 	}

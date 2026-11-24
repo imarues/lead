@@ -288,7 +288,8 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 }
 
 - (NSString *)valueForPage:(LeadPage *)page {
-  if ([page.titleKey isEqualToString:@"UI_MESSAGE_DISCOVERY_TITLE"] ||
+  if ([page.titleKey isEqualToString:@"UI_USERNAME_SCAN_TITLE"] ||
+      [page.titleKey isEqualToString:@"UI_MESSAGE_DISCOVERY_TITLE"] ||
       [page.titleKey isEqualToString:@"UI_CONVERSIONS_TITLE"]) return @"";
   NSInteger count = page.enabledCount;
   return count > 0 ? [NSString stringWithFormat:LeadL(@"UI_ON_COUNT"), (long)count] : LeadL(@"UI_OFF");
@@ -482,6 +483,10 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
 }
 
 - (void)openPage:(LeadPage *)page {
+  if ([page.titleKey isEqualToString:@"UI_USERNAME_SCAN_TITLE"]) {
+    [self.navigationController pushViewController:[LeadUsernameScanViewController new] animated:YES];
+    return;
+  }
   if ([page.titleKey isEqualToString:@"UI_MESSAGE_DISCOVERY_TITLE"]) {
     [self.navigationController pushViewController:[LeadMessageDiscoveryViewController new] animated:YES];
     return;

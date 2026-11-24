@@ -104,6 +104,14 @@
 // Hide the proxy sponsor channel and PSA banners from help.getPromoData.
 #define kHideProxyPromo @"LeadHideProxyPromo"
 
+// Auto proxy: connects Telegram through a proxy taken from a remote JSON list.
+// Toggle / URL override typed in the menu / link in use / last good list / last check time.
+#define kAutoProxy @"LeadAutoProxy"
+#define kAutoProxyConfigURL @"LeadAutoProxyConfigURL"
+#define kAutoProxyActive @"LeadAutoProxyActive"
+#define kAutoProxyList @"LeadAutoProxyList"
+#define kAutoProxyChecked @"LeadAutoProxyChecked"
+
 // Anti-features
 #define kAntiRevoke @"LeadAntiRevoke"
 #define kAntiEdit @"LeadAntiEdit"

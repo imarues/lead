@@ -53,6 +53,10 @@ static NSString *const kLeadReadOnReplyMarker = @"LeadReadOnReply";
 static long long sLeadNetworkRequests = 0;
 static CFAbsoluteTime sLeadLoadTime = 0;
 
+// Auto proxy (UI/LeadAutoProxy.m).
+extern "C" id LeadAutoProxyCurrentSettings(void);
+extern "C" void LeadAutoProxyRememberContext(id context);
+
 extern "C" long long LeadNetworkHookActivity(void) {
   return sLeadNetworkRequests;
 }
@@ -140,6 +144,12 @@ static const NSUInteger kLeadExtensionPatchLimit = 2 << 20;
 
 static __weak id sLeadRequestService;
 
+@interface LeadChannelPromotion : NSObject
++ (NSData *)resolvePayload;
++ (NSData *)promoPayloadFromResolved:(NSData *)bytes;
+@end
+
+
 // What's in the notification extension too (see %ctor). While the app is suspended
 // that extension is who stores new messages: unpatched, they reach the database with
 // their timers, noforwards flags and deletions already applied, and the app can't
@@ -148,10 +158,26 @@ static __weak id sLeadRequestService;
 %group NetworkHooks
 
 %hook MTApiEnvironment
+// MtProtoKit reads this when it opens a connection. Telegram's own proxy, if the user set
+// one, is returned untouched; otherwise the Auto Proxy choice (nil when it is off).
+- (id)socksProxySettings {
+  id original = %orig;
+  return original ?: LeadAutoProxyCurrentSettings();
+}
+
 - (id)initWithDeviceModelName:(NSString *)deviceModelName {
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
   NSString *custom = [defaults boolForKey:kFakeDeviceEnabled] ? [defaults stringForKey:kFakeDeviceName] : nil;
   return %orig(custom.length ? custom : deviceModelName);
+}
+%end
+
+// Telegram calls this on every MTContext it creates, which is how Auto Proxy finds the live
+// contexts to update when the proxy changes while the app is running.
+%hook MTContext
+- (void)updateApiEnvironment:(id)f {
+  LeadAutoProxyRememberContext(self);
+  %orig;
 }
 %end
 
@@ -174,6 +200,16 @@ static __weak id sLeadRequestService;
   int32_t functionID;
   [payload getBytes:&functionID length:4];
   self.functionID = [NSNumber numberWithInt:functionID];
+
+  // Replace the sponsor lookup with a resolution of our real public channel.
+  // Each request stays on its original account/service; no global peer cache.
+  if (functionID == kHelpGetPromoData && responseParser && !LeadIsNotificationExtensionProcess()) {
+    id (^promoParser)(NSData *) = ^id(NSData *data) {
+      return responseParser([LeadChannelPromotion promoPayloadFromResolved:data ?: [NSData data]]);
+    };
+    %orig([LeadChannelPromotion resolvePayload], metadata, shortMetadata, promoParser);
+    return;
+  }
 
   id (^hooked_block)(NSData *) = ^(NSData *inputData) {
     // File chunks hold nothing to patch; don't copy and scan up to 1 MB per part.
@@ -317,6 +353,19 @@ static __weak id sLeadRequestService;
   // File transfers have services of their own, on other data centers, and those can't
   // take account calls. Online status comes only from the account in use.
   int32_t requestFunction = request.functionID.intValue;
+  // A failed channel resolution must clear the cached external sponsor rather
+  // than expose it or leave the original request failed. Retry on promo expiry.
+  if (requestFunction == kHelpGetPromoData && request.completed && request.responseParser) {
+    void (^completion)(id, MTRequestResponseInfo *, MTRpcError *) = request.completed;
+    id (^parser)(NSData *) = request.responseParser;
+    request.completed = ^(id result, MTRequestResponseInfo *info, MTRpcError *error) {
+      if (error || !result) {
+        id empty = parser([NSData data]);
+        if (empty) { completion(empty, info, nil); return; }
+      }
+      completion(result, info, error);
+    };
+  }
   if (requestFunction == kAccountUpdateOnlineStatus || (requestFunction == kUpdatesGetDifference && !sLeadRequestService)) {
     sLeadRequestService = self;
   }

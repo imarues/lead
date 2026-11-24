@@ -57,6 +57,23 @@ BOOL LeadEnableGhostMode(UIViewController *host);
 NSString *LeadGhostStatusText(void);
 UIImage *LeadLogoImage(CGFloat side);
 void LeadOpenTelegramURL(NSString *urlString);
+// Auto proxy (LeadAutoProxy.m; the MtProtoKit hooks live in Hooks.xm).
+// Turns t.me/proxy, telegram.me/proxy, tg://proxy and tg://socks links into one canonical
+// tg://… form; nil when the link is not a usable proxy.
+NSString *LeadAutoProxyNormalizedLink(NSString *link);
+// "95.217.193.214:443" for the proxy in use, nil when none.
+NSString *LeadAutoProxySummary(void);
+// Host of the JSON list's URL, for the menu.
+NSString *LeadAutoProxyConfigHost(void);
+// Loads the cached proxy, installs the hooks and refreshes the list once after launch.
+void LeadAutoProxyInstall(void);
+// The menu switch: puts the proxy in or takes it out of the running connection.
+void LeadAutoProxySetEnabled(BOOL on);
+// Re-reads the JSON list, tests the proxies in order, switches to the first that answers.
+void LeadAutoProxyRefresh(void (^done)(NSString *summary, BOOL reachable));
+// Used by the hooks: the MTSocksProxySettings to use when Telegram has no proxy of its own.
+id LeadAutoProxyCurrentSettings(void);
+void LeadAutoProxyRememberContext(id context);
 NSArray<NSDictionary *> *LeadMessageLogEntries(void);
 NSString *LeadURLForLogEntry(NSDictionary *entry);
 NSString *LeadProfileChangeText(NSDictionary *entry);
@@ -114,4 +131,7 @@ NSInteger LeadExtensionInjected(void);
 
 // Offline PDF/image converter with optional user-initiated export to Saved Messages.
 @interface LeadConversionsViewController : UITableViewController
+@end
+
+@interface LeadUsernameScanViewController : UITableViewController
 @end

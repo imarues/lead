@@ -361,7 +361,7 @@ final class LeadMessageDiscoveryBridge: NSObject {
     // message uses a constructor it does not know (new media/flags). A page of
     // search results is mostly media, so that made every category look empty.
     // Read the header ourselves and keep every message that does parse.
-    private static func tolerantMessages(_ bytes: NSData) -> (messages: [Api.Message], failed: Bool)? {
+    static func tolerantMessages(_ bytes: NSData) -> (messages: [Api.Message], failed: Bool)? {
         let reader = BufferReader(Buffer(data: bytes as Data))
         guard let signature = reader.readInt32() else { return nil }
         switch signature {

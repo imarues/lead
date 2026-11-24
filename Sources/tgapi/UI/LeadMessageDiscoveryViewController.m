@@ -39,7 +39,7 @@ static NSData *LeadDiscoveryInflate(const uint8_t *bytes, NSUInteger length) {
 
 extern BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result, NSString *error));
 
-static NSData *LeadDiscoveryUnpack(NSData *data) {
+NSData *LeadDiscoveryUnpack(NSData *data) {
     if (!data || data.length < 8) return data;
     int32_t constructor = 0;
     [data getBytes:&constructor length:4];

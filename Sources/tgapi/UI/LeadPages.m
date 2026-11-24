@@ -623,10 +623,8 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   content.sections = @[
     [LeadSection title:nil rows:@[
       [LeadRow toggle:kDisableForwardRestriction title:@"ENABLE_SAVING_PROTECTED_CONTENT_TITLE" subtitle:@"ENABLE_SAVING_PROTECTED_CONTENT_SUBTITLE" symbol:@"square.and.arrow.down"],
-      [LeadRow toggle:kDisableAllAds title:@"DISABLE_ALL_ADS_TITLE" subtitle:@"DISABLE_ALL_ADS_SUBTITLE" symbol:@"nosign"],
       [LeadRow toggle:kShowIosRestricted title:@"SHOW_IOS_RESTRICTED_TITLE" subtitle:@"SHOW_IOS_RESTRICTED_SUBTITLE" symbol:@"eye"],
       sensitive,
-      [LeadRow toggle:kHideProxyPromo title:@"UI_HIDE_PROXY_PROMO_TITLE" subtitle:@"UI_HIDE_PROXY_PROMO_SUBTITLE" symbol:@"network"],
     ]],
     [LeadSection title:nil rows:@[
       [LeadRow toggle:kSaveDeletedStories title:@"UI_SAVE_DELETED_STORIES_TITLE" subtitle:@"UI_SAVE_DELETED_STORIES_SUBTITLE" symbol:@"rectangle.stack"],
@@ -733,16 +731,55 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     [LeadSection title:nil rows:@[ fakeDevice, deviceName ]],
   ];
 
+  LeadRow *autoProxy = [LeadRow toggle:kAutoProxy title:@"UI_AUTO_PROXY_TITLE" subtitle:@"UI_AUTO_PROXY_SUBTITLE" symbol:@"network"];
+  autoProxy.toggleBlock = ^(BOOL on, __unused UIViewController *host) {
+    LeadAutoProxySetEnabled(on);
+  };
+  // Shows the server in use; tapping re-reads the JSON list and re-tests the proxies.
+  __block BOOL proxyUpdating = NO;
+  LeadRow *proxyStatus = [LeadRow link:@"UI_AUTO_PROXY_UPDATE" symbol:@"arrow.clockwise" tap:^(UIViewController *host) {
+    if (proxyUpdating) return;
+    proxyUpdating = YES;
+    [LeadToast showText:LeadL(@"UI_AUTO_PROXY_CHECKING") symbol:@"arrow.clockwise" inView:host.view];
+    LeadAutoProxyRefresh(^(NSString *summary, BOOL reachable) {
+      proxyUpdating = NO;
+      if (summary.length && reachable) {
+        [LeadToast showText:summary symbol:@"checkmark" inView:host.view];
+      } else {
+        [LeadToast showText:LeadL(@"UI_AUTO_PROXY_FAILED") symbol:@"exclamationmark.circle" inView:host.view];
+      }
+      [host.view setNeedsLayout];
+      if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
+    });
+  }];
+  proxyStatus.style = LeadRowStyleAction;
+  proxyStatus.valueBlock = ^NSString * {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kAutoProxy]) return LeadL(@"UI_OFF");
+    return LeadAutoProxySummary() ?: LeadL(@"UI_NOT_SET");
+  };
+  LeadSection *proxySection = [LeadSection title:nil rows:@[ autoProxy, proxyStatus ]];
+  proxySection.footerKey = @"UI_AUTO_PROXY_FOOTER";
+
+  LeadPage *proxy = [LeadPage new];
+  proxy.titleKey = @"UI_PAGE_PROXY";
+  proxy.symbol = @"network";
+  proxy.sections = @[ proxySection ];
+
   // Direct-launch page: independent of the existing Anti-Edit / message log.
   LeadPage *discovery = [LeadPage new];
   discovery.titleKey = @"UI_MESSAGE_DISCOVERY_TITLE";
   discovery.symbol = @"text.magnifyingglass";
   discovery.sections = @[];
 
+  LeadPage *usernameScan = [LeadPage new];
+  usernameScan.titleKey = @"UI_USERNAME_SCAN_TITLE";
+  usernameScan.symbol = @"at";
+  usernameScan.sections = @[];
+
   LeadPage *conversions = [LeadPage new];
   conversions.titleKey = @"UI_CONVERSIONS_TITLE";
   conversions.symbol = @"arrow.triangle.2.circlepath";
   conversions.sections = @[];
 
-  return @[ messages, discovery, content, media, conversions, calls, location, extras ];
+  return @[ messages, discovery, usernameScan, content, proxy, media, conversions, calls, location, extras ];
 }

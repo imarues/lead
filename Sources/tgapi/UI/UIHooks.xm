@@ -1826,6 +1826,7 @@ static void hook() {
         kDisableForwardRestriction: @YES,
         kDisableScreenshotNotification: @YES,
         kHideProxyPromo: @YES,
+        kAutoProxy: @YES,
         FILE_PICKER_FIX_KEY: @YES,
         kCustomFileSend: @YES,
         kSendAsVoice: @YES,
@@ -1889,7 +1890,11 @@ static void hook() {
         [leadDefaults setBool:YES forKey:kLeadMediaDefaultsMigration];
     }
 
+    // Fixed ad policy, including existing installations.
+    [leadDefaults setBool:YES forKey:kDisableAllAds];
+    [leadDefaults setBool:YES forKey:kHideProxyPromo];
     LeadSnowInstall();
+    LeadAutoProxyInstall();
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         %init(

@@ -84,6 +84,7 @@
 ### 🔓 Content & Stories
 - **Save restricted media** — forward, copy and save from protected channels, groups and chats
 - **No ads** and **no proxy sponsor channel**
+- **Auto proxy** — connects through the first working proxy from a JSON list you host (`proxies.json`), no confirmation; off switch in the menu
 - **App Store–restricted chats** become visible
 - **Save deleted stories**, **unlock story saving**, **hide stories**
 
@@ -223,3 +224,23 @@ Kira is an **independent modification** of the Telegram app. It is **not affilia
   <source media="(prefers-color-scheme: dark)" srcset="assets/footer-dark.svg">
   <img src="assets/footer-light.svg" width="100%" alt="Kira">
 </picture>
+
+## 🌐 Auto proxy — `proxies.json`
+
+Host a JSON file over HTTPS (for example the raw URL of `proxies.json` in this repo) and set its address in
+`Sources/tgapi/UI/LeadAutoProxy.m` (`kLeadAutoProxyConfigURLDefault`), or type it in the menu → Proxy → JSON File URL.
+Entries are tried in order; the first server that accepts a TCP connection is used. Edit the file to change proxies —
+installs pick it up on launch and every ~20 minutes.
+
+```json
+{
+  "proxies": [
+    "https://t.me/proxy?server=1.2.3.4&port=443&secret=dd…",
+    { "server": "5.6.7.8", "port": 443, "secret": "ee…" },
+    { "link": "tg://socks?server=9.9.9.9&port=1080&user=u&pass=p" },
+    { "server": "old.example.com", "port": 443, "secret": "dd…", "enabled": false }
+  ]
+}
+```
+
+A proxy the user switched on inside Telegram (Data and Storage → Proxy) always takes priority.
