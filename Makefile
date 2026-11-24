@@ -1,4 +1,8 @@
 ARCHS = arm64 arm64e
+# Opt-in arm64 experiment; keep the existing arm64e build unchanged by default.
+ifneq ($(strip $(LEAD_WARP_ARCHIVE)),)
+ARCHS = arm64
+endif
 TARGET = iphone:16.5:14.0
 # xz: the default lzma can't be unpacked by RootHidePatcher's dpkg-deb.
 THEOS_PLATFORM_DEB_COMPRESSION_TYPE = xz
@@ -13,6 +17,11 @@ $(TWEAK_NAME)_CFLAGS = -fobjc-arc -ISources/tgapiC/include -Wno-deprecated-decla
 $(TWEAK_NAME)_LDFLAGS = -Wl,-dead_strip
 $(TWEAK_NAME)_FRAMEWORKS = CoreServices CallKit AVFoundation AVKit AudioToolbox CoreMedia CoreVideo CoreImage ImageIO Photos PhotosUI QuartzCore UniformTypeIdentifiers
 $(TWEAK_NAME)_LIBRARIES = z
+ifneq ($(strip $(LEAD_WARP_ARCHIVE)),)
+$(TWEAK_NAME)_CFLAGS += -DLEAD_WARP_EXPERIMENTAL=1
+$(TWEAK_NAME)_LDFLAGS += "$(abspath $(LEAD_WARP_ARCHIVE))" -lresolv
+$(TWEAK_NAME)_FRAMEWORKS += Security CoreFoundation SystemConfiguration
+endif
 $(TWEAK_NAME)_LOGOS_DEFAULT_GENERATOR = internal
 $(TWEAK_NAME)_RESOURCE_FILES = Sources/tgapi/Resources
 
