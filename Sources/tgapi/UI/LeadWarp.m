@@ -14,7 +14,9 @@ extern void LeadWarpStop(void);
 #endif
 
 static NSDictionary *sWarpRoute;
+#if LEAD_WARP_EXPERIMENTAL
 static BOOL sWarpBusy;
+#endif
 
 #if LEAD_WARP_EXPERIMENTAL
 // Access only within the app's own Keychain group; never use a shared profile.
