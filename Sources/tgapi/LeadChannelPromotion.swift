@@ -20,38 +20,35 @@ final class LeadChannelPromotion: NSObject {
         return buffer.makeData() as NSData
     }
 
-    #if canImport(ObjectiveC)
-    @objc(promoPayloadFromResolved:)
-    #endif
-    static func promoPayload(fromResolved bytes: NSData) -> NSData {
-        let now = Int32(clamping: Int64(Date().timeIntervalSince1970))
-        let empty = Api.help.PromoData.promoDataEmpty(.init(expires: now + 120))
-        var promo = empty
-        if case let .resolvedPeer(resolved)? = Api.parse(Buffer(data: bytes as Data)) as? Api.contacts.ResolvedPeer,
-           case let .peerChannel(peer) = resolved.peer {
-            let channel = resolved.chats.first { chat in
-                guard case let .channel(item) = chat,
-                      item.id == peer.channelId, item.accessHash != nil,
-                      item.flags & (1 << 5) != 0 else { return false }
-                if item.username?.lowercased() == username.lowercased() { return true }
-                return item.usernames?.contains { entry in
-                    guard case let .username(value) = entry else { return false }
-                    return value.username.lowercased() == username.lowercased() && value.flags & (1 << 1) != 0
-                } ?? false
-            }
-            if let channel = channel {
-                // Use the native additional-chat-list item. A proxy-only item has
-                // includeIfNoHistory=false in Telegram iOS; a text-bearing announcement
-                // uses the same list slot even when the channel is not in local history.
-                // Explicitly label the content as a Kira advertisement.
-                promo = .promoData(.init(flags: (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3), expires: now + 1200,
-                    peer: resolved.peer, psaType: "kira_promotion", psaMessage: "إعلان قناة iKiraPlus",
-                    pendingSuggestions: [], dismissedSuggestions: [], customPendingSuggestion: nil,
-                    chats: [channel], users: resolved.users))
-            }
+    private static func sponsor(_ bytes: NSData) -> Api.help.PromoData.Cons_promoData? {
+        guard case let .promoData(data)? = Api.parse(Buffer(data: bytes as Data)) as? Api.help.PromoData,
+              data.flags & 1 != 0, data.psaType == nil, data.psaMessage == nil,
+              case .peerChannel? = data.peer else { return nil }
+        return data
+    }
+
+    @objc static func containsSponsor(_ bytes: NSData) -> Bool {
+        return sponsor(bytes) != nil
+    }
+
+    @objc(replaceSponsor:resolved:)
+    static func replaceSponsor(_ bytes: NSData, resolved: NSData) -> NSData? {
+        guard let data = sponsor(bytes),
+              case let .resolvedPeer(value)? = Api.parse(Buffer(data: resolved as Data)) as? Api.contacts.ResolvedPeer,
+              case let .peerChannel(peer) = value.peer,
+              let chat = value.chats.first(where: {
+                  guard case let .channel(channel) = $0 else { return false }
+                  return channel.id == peer.channelId && channel.accessHash != nil && channel.flags & (1 << 5) != 0
+              }) else { return nil }
+
+        data.peer = value.peer
+        data.chats.removeAll {
+            if case let .channel(channel) = $0 { return channel.id == peer.channelId }
+            return false
         }
+        data.chats.append(chat)
         let out = Buffer()
-        promo.serialize(out, true)
+        Api.help.PromoData.promoData(data).serialize(out, true)
         return out.makeData() as NSData
     }
 }

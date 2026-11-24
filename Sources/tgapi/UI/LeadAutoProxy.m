@@ -327,6 +327,24 @@ id LeadAutoProxyCurrentSettings(void) {
   }
 }
 
+// Match the effective settings of this request's account, including manual selections.
+NSString *LeadListedProxyForService(id service) {
+  @try {
+    id settings = [service valueForKeyPath:@"context.apiEnvironment.socksProxySettings"];
+    NSString *ip = [settings valueForKey:@"ip"];
+    NSNumber *port = [settings valueForKey:@"port"];
+    NSData *secret = [settings valueForKey:@"secret"];
+    if (!ip.length || !secret.length) return nil;
+    for (NSString *link in [[NSUserDefaults standardUserDefaults] arrayForKey:kAutoProxyList]) {
+      NSDictionary *p = LeadProxyParseLink(link);
+      if ([p[@"kind"] isEqual:@"proxy"] && [p[@"port"] isEqual:port] &&
+          [ip caseInsensitiveCompare:p[@"server"]] == NSOrderedSame &&
+          [secret isEqual:LeadProxySecretData(p[@"secret"])]) return link;
+    }
+  } @catch (__unused NSException *e) {}
+  return nil;
+}
+
 void LeadAutoProxyRememberContext(id context) {
   if (!context) return;
   @synchronized(LeadProxyLock()) {
@@ -415,7 +433,7 @@ static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *sum
 
     // 1. The list: fresh from the file, else the last good one, else the built-in proxy.
     NSArray<NSString *> *links = LeadProxyLinksFromJSON(LeadProxyFetch(LeadProxyConfigURLString()));
-    if (links.count) {
+    if (links != nil) {
       [defaults setObject:links forKey:kAutoProxyList];
     } else {
       links = [defaults arrayForKey:kAutoProxyList];
