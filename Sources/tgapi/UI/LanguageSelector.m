@@ -12,7 +12,7 @@
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.title = LeadL(@"LANGUAGE_SECTION_HEADER");
-  self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.view.backgroundColor = LeadThemeBackground();
   self.currentCode = [[NSUserDefaults standardUserDefaults] stringForKey:@"LeadLanguage"] ?: @"en";
   self.languages = @[
     @{ @"code" : @"en", @"name" : @"English", @"flag" : @"🇺🇸" },
@@ -31,7 +31,9 @@
   self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
   self.tableView.dataSource = self;
   self.tableView.delegate = self;
-  self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.tableView.backgroundColor = LeadThemeBackground();
+  self.tableView.tintColor = LeadThemeAccent();
+  self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
   self.tableView.rowHeight = UITableViewAutomaticDimension;
   self.tableView.estimatedRowHeight = 52;
   [self.tableView registerClass:[LeadCell class] forCellReuseIdentifier:@"LeadCell"];
@@ -56,10 +58,11 @@
   [cell.tile setText:language[@"flag"]];
   BOOL selected = [language[@"code"] isEqualToString:self.currentCode];
   [cell showValue:nil chevron:NO];
+  cell.accessoryView = nil;
   if (selected) {
     UIImageView *check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"
                                                                      withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold]]];
-    check.tintColor = UIColor.labelColor;
+    check.tintColor = LeadThemeAccent();
     cell.accessoryView = check;
   }
   return cell;
