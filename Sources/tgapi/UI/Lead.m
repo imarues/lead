@@ -407,13 +407,14 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   [cell setDestructive:row.destructive];
   if (row.style == LeadRowStyleToggle) {
     [cell showToggle:row.isOn];
+    cell.toggle.enabled = row.enabledBlock ? row.enabledBlock() : YES;
     NSString *key = row.defaultsKey;
     __weak typeof(self) weakSelf = self;
     cell.onToggle = ^(BOOL on) {
       if ([key isEqualToString:kGhostModeEnabled] && on) {
         LeadEnableGhostMode(weakSelf);
       } else {
-        LeadSetBool(key, on);
+        if (key.length) LeadSetBool(key, on);
         if (row.toggleBlock) row.toggleBlock(on, weakSelf);
       }
     };
@@ -457,7 +458,8 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
       [self openPage:item];
     } else if ([(LeadRow *)item style] == LeadRowStyleToggle) {
       LeadCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-      [cell.toggle setOn:!cell.toggle.on animated:YES];
+      if (!cell.toggle.enabled) return;
+    [cell.toggle setOn:!cell.toggle.on animated:YES];
       [cell.toggle sendActionsForControlEvents:UIControlEventValueChanged];
     } else if ([(LeadRow *)item tapBlock]) {
       [(LeadRow *)item tapBlock](self);
