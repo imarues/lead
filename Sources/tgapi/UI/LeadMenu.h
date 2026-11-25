@@ -19,6 +19,10 @@ typedef NS_ENUM(NSInteger, LeadRowStyle) {
 @property (nonatomic, copy) void (^tapBlock)(UIViewController *host);
 // Runs after a toggle row changes its setting.
 @property (nonatomic, copy) void (^toggleBlock)(BOOL on, UIViewController *host);
+// Session-only switches have no preferences key and must reflect real runtime state.
+@property (nonatomic, copy) BOOL (^stateBlock)(void);
+@property (nonatomic, copy) BOOL (^enabledBlock)(void);
+@property (nonatomic, copy) NSString *(^subtitleBlock)(void);
 + (instancetype)toggle:(NSString *)key title:(NSString *)titleKey subtitle:(NSString *)subtitleKey symbol:(NSString *)symbol;
 + (instancetype)link:(NSString *)titleKey symbol:(NSString *)symbol tap:(void (^)(UIViewController *host))tap;
 - (NSString *)title;
