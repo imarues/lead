@@ -102,5 +102,7 @@ UIColor *LeadThemeCard(void);
 UIColor *LeadThemeAccent(void);
 UIColor *LeadThemeInk(void);
 UIColor *LeadThemeMuted(void);
+// Shared Kira gradient for ordinary native table cells, including scanning tools.
+void KiraStyleListCell(UITableViewCell *cell);
 @interface LeadThemeHeader : UIView
 @end
