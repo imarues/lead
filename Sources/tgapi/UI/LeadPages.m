@@ -413,7 +413,7 @@ NSString *LeadRegistrationEstimate(long long userId) {
 
 #pragma mark - Settings transfer
 
-static NSString *const kLeadSettingsMarker = @"lead-settings";
+static NSString *const kLeadSettingsMarker = @"kira-settings";
 
 // Everything a user would expect to carry over: every switch in the menu plus the
 // values behind its links. Import only ever writes these keys.
@@ -438,7 +438,7 @@ void LeadExportSettings(UIViewController *host) {
     id value = [defaults objectForKey:key];
     if (value && [NSJSONSerialization isValidJSONObject:@{ key : value }]) values[key] = value;
   }
-  NSDictionary *payload = @{ @"lead" : kLeadSettingsMarker, @"v" : @1, @"version" : kLeadTweakVersion, @"values" : values };
+  NSDictionary *payload = @{ @"kira" : kLeadSettingsMarker, @"v" : @1, @"version" : kLeadTweakVersion, @"values" : values };
   NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:NSJSONWritingSortedKeys error:nil];
   if (!json) return;
   [UIPasteboard generalPasteboard].string = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -463,7 +463,8 @@ void LeadImportSettings(UIViewController *host) {
   for (NSString *key in values) {
     if ([allowed containsObject:key]) accepted[key] = values[key];
   }
-  if (![payload[@"lead"] isEqual:kLeadSettingsMarker] || accepted.count == 0) {
+  BOOL validMarker = [payload[@"kira"] isEqual:kLeadSettingsMarker] || [payload[@"lead"] isEqual:@"lead-settings"];
+  if (!validMarker || accepted.count == 0) {
     LeadImpactHaptic(UIImpactFeedbackStyleRigid);
     [LeadToast showText:LeadL(@"UI_IMPORT_INVALID") symbol:@"exclamationmark.circle" inView:host.view];
     return;
