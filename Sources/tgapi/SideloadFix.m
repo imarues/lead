@@ -155,13 +155,16 @@ static void LeadRecordHost(NSURL *base, NSURL *client) {
   if (LeadIsAppExtension()) return;
   NSString *folder = [base.path stringByAppendingPathComponent:@"Lead/_hosts"];
   [[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
-  [client.lastPathComponent writeToFile:[folder stringByAppendingPathComponent:LeadHostKey()] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  // "." denotes the real group root, not a Lead/<client> fallback.
+  NSString *name = [base.path isEqualToString:client.path] ? @"." : client.lastPathComponent;
+  [name writeToFile:[folder stringByAppendingPathComponent:LeadHostKey()] atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 static NSString *LeadRecordedHostFolder(NSURL *base) {
   NSString *record = [base.path stringByAppendingPathComponent:[@"Lead/_hosts" stringByAppendingPathComponent:LeadHostKey()]];
   NSString *name = [NSString stringWithContentsOfFile:record encoding:NSUTF8StringEncoding error:nil];
-  return name.length ? name : nil;
+  if (!name.length || [name containsString:@"/"] || [name isEqualToString:@".."]) return nil;
+  return name;
 }
 
 // Every extension that runs leaves "<what it asked for> → <folder it got>" in one
@@ -207,7 +210,20 @@ static NSURL *LeadResolveContainer(id self, SEL _cmd, NSString *group) {
   if (url) {
     // The signature has this client's own group: nothing to share, nothing to move
     // except what the old fixer left in <Documents>/AppGroup.
-    LeadClaimData(LeadPrivateGroupFolder(), url);
+    if (LeadIsAppExtension()) {
+      NSString *recorded = LeadRecordedHostFolder(url);
+      if (recorded.length && ![recorded isEqualToString:@"."]) {
+        NSURL *client = [[url URLByAppendingPathComponent:@"Lead"] URLByAppendingPathComponent:recorded isDirectory:YES];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:client.path]) {
+          LeadNoteExtension(url, group, client);
+          LeadMarkExtension(client, group);
+          return client;
+        }
+      }
+    } else {
+      LeadClaimData(LeadPrivateGroupFolder(), url);
+      LeadRecordHost(url, url);
+    }
     LeadMarkExtension(url, group);
     return url;
   }
@@ -232,7 +248,9 @@ static NSURL *LeadResolveContainer(id self, SEL _cmd, NSString *group) {
     for (NSString *entitled in candidates) {
       NSString *recorded = LeadRecordedHostFolder(urls[entitled]);
       if (recorded) {
-        NSURL *client = [[urls[entitled] URLByAppendingPathComponent:@"Lead"] URLByAppendingPathComponent:recorded isDirectory:YES];
+        NSURL *client = [recorded isEqualToString:@"."] ? urls[entitled] :
+            [[urls[entitled] URLByAppendingPathComponent:@"Lead"] URLByAppendingPathComponent:recorded isDirectory:YES];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:client.path]) continue;
         os_unfair_lock_lock(&sResolvedLock);
         sChosenGroups[group] = entitled;
         os_unfair_lock_unlock(&sResolvedLock);
