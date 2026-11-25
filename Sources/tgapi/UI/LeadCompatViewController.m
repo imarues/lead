@@ -125,7 +125,8 @@ static NSArray<NSDictionary *> *LeadCompatItems(void) {
   [super viewDidLoad];
   self.title = LeadL(@"UI_COMPAT_TITLE");
   self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-  self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.tableView.backgroundColor = LeadThemeBackground(); self.tableView.tintColor = LeadThemeAccent();
+  self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
   self.tableView.estimatedRowHeight = 72;
   self.tableView.rowHeight = UITableViewAutomaticDimension;
   [self.tableView registerClass:[LeadCell class] forCellReuseIdentifier:kCompatCellId];
