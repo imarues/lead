@@ -32,11 +32,11 @@
 }
 
 - (NSString *)subtitle {
-  return self.subtitleKey ? LeadL(self.subtitleKey) : nil;
+  return self.subtitleBlock ? self.subtitleBlock() : (self.subtitleKey ? LeadL(self.subtitleKey) : nil);
 }
 
 - (BOOL)isOn {
-  return self.defaultsKey && [[NSUserDefaults standardUserDefaults] boolForKey:self.defaultsKey];
+  return self.stateBlock ? self.stateBlock() : (self.defaultsKey && [[NSUserDefaults standardUserDefaults] boolForKey:self.defaultsKey]);
 }
 
 @end
@@ -422,7 +422,7 @@ static NSArray<NSString *> *LeadTransferableKeys(void) {
   NSMutableArray *pages = [NSMutableArray arrayWithObject:LeadGhostPage()];
   [pages addObjectsFromArray:LeadFeaturePages()];
   for (LeadPage *page in pages) {
-    for (LeadRow *row in page.toggleRows) [keys addObject:row.defaultsKey];
+    for (LeadRow *row in page.toggleRows) if (row.defaultsKey.length) [keys addObject:row.defaultsKey];
   }
   [keys addObjectsFromArray:@[ kVisualStarsAmount, FAKE_LATITUDE_KEY, FAKE_LONGITUDE_KEY,
                                kGhostPeerRecords, kGhostPeerKeys, @"LeadLanguage", kFakeDeviceName ]];
@@ -771,13 +771,15 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     });
   }];
   proxyRotate.style = LeadRowStyleAction;
-  extern void LeadWarpShow(UIViewController *host);
+  extern void LeadWarpSetEnabled(BOOL enabled, UIViewController *host);
+  extern BOOL LeadWarpIsOn(void);
+  extern BOOL LeadWarpCanToggle(void);
   extern NSString *LeadWarpStatus(void);
-  LeadRow *warp = [LeadRow link:@"UI_WARP_BYPASS" symbol:@"lock.shield" tap:^(UIViewController *host) {
-    LeadWarpShow(host);
-  }];
-  warp.style = LeadRowStyleLink;
-  warp.valueBlock = ^NSString * { return LeadWarpStatus(); };
+  LeadRow *warp = [LeadRow toggle:nil title:@"UI_WARP_BYPASS" subtitle:nil symbol:@"lock.shield"];
+  warp.stateBlock = ^BOOL { return LeadWarpIsOn(); };
+  warp.enabledBlock = ^BOOL { return LeadWarpCanToggle(); };
+  warp.subtitleBlock = ^NSString * { return LeadWarpStatus(); };
+  warp.toggleBlock = ^(BOOL on, UIViewController *host) { LeadWarpSetEnabled(on, host); };
   LeadSection *proxySection = [LeadSection title:nil rows:@[ warp, autoProxy, proxyStatus, proxyRotate ]];
 
   LeadPage *proxy = [LeadPage new];
