@@ -15,7 +15,7 @@ $(TWEAK_NAME)_FILES = $(shell find Sources \( -name '*.swift' -o -name '*.m' -o 
 $(TWEAK_NAME)_SWIFTFLAGS = -ISources/tgapiC/include -Osize
 $(TWEAK_NAME)_CFLAGS = -fobjc-arc -ISources/tgapiC/include -Wno-deprecated-declarations -Os
 $(TWEAK_NAME)_LDFLAGS = -Wl,-dead_strip
-$(TWEAK_NAME)_FRAMEWORKS = CoreServices CallKit AVFoundation AVKit AudioToolbox CoreMedia CoreVideo CoreImage ImageIO Photos PhotosUI QuartzCore UniformTypeIdentifiers
+$(TWEAK_NAME)_FRAMEWORKS = CoreServices CoreText CallKit AVFoundation AVKit AudioToolbox CoreMedia CoreVideo CoreImage ImageIO Photos PhotosUI QuartzCore UniformTypeIdentifiers
 $(TWEAK_NAME)_LIBRARIES = z
 ifneq ($(strip $(LEAD_WARP_ARCHIVE)),)
 $(TWEAK_NAME)_CFLAGS += -DLEAD_WARP_EXPERIMENTAL=1

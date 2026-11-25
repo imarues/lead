@@ -1,6 +1,7 @@
 #import "LeadMenu.h"
 #import "Headers.h"
 #import <objc/message.h>
+#import <CoreText/CoreText.h>
 
 // Entries come from TLParser.messageLogEntries (Swift): dictionaries with
 // kind ("deleted"/"edited"), peer ("u…"/"g…"/"c…"), id, text, old, date, name, username.
@@ -211,6 +212,52 @@ static UIImage *LeadLogAvatar(NSString *peer) {
 
 #pragma mark - Formatting
 
+// UIKit normally selects its own fallback fonts, including Apple Color Emoji.
+// Only substitute a Unicode compatibility form when the original cluster is
+// not renderable. Keep the original string in the log and search data.
+static BOOL LeadLogHasGlyph(NSString *text) {
+  if (!text.length) return NO;
+  NSAttributedString *value = [[NSAttributedString alloc] initWithString:text
+    attributes:@{ NSFontAttributeName: [UIFont systemFontOfSize:16] }];
+  CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)value);
+  BOOL visible = NO, missing = NO;
+  CFArrayRef runs = CTLineGetGlyphRuns(line);
+  for (CFIndex i = 0; i < CFArrayGetCount(runs); i++) {
+    CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, i);
+    for (CFIndex j = 0; j < CTRunGetGlyphCount(run); j++) {
+      CGGlyph glyph = 0;
+      CTRunGetGlyphs(run, CFRangeMake(j, 1), &glyph);
+      if (glyph) visible = YES; else missing = YES;
+    }
+  }
+  CFRelease(line);
+  return visible && !missing;
+}
+
+static NSString *LeadLogDisplayGlyphs(NSString *text) {
+  if (!text.length) return text;
+  NSMutableString *output = [NSMutableString stringWithCapacity:text.length];
+  [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+    options:NSStringEnumerationByComposedCharacterSequences
+    usingBlock:^(NSString *cluster, NSRange range, NSRange enclosingRange, BOOL *stop) {
+      NSString *chosen = cluster;
+      if (cluster.length && [cluster characterAtIndex:0] >= 0x80 && !LeadLogHasGlyph(cluster)) {
+        NSString *canonical = [cluster precomposedStringWithCanonicalMapping];
+        NSString *compatible = [cluster precomposedStringWithCompatibilityMapping];
+        NSString *withoutVariant = [[cluster stringByReplacingOccurrencesOfString:@"\uFE0F" withString:@""]
+          stringByReplacingOccurrencesOfString:@"\uFE0E" withString:@""];
+        for (NSString *candidate in @[canonical, withoutVariant, compatible]) {
+          if (![candidate isEqualToString:cluster] && LeadLogHasGlyph(candidate)) {
+            chosen = candidate;
+            break;
+          }
+        }
+      }
+      [output appendString:chosen ?: @""];
+    }];
+  return output;
+}
+
 NSString *LeadProfileChangeText(NSDictionary *entry) {
   NSString *field = entry[@"field"];
   NSString *old = [entry[@"old"] isKindOfClass:[NSString class]] ? entry[@"old"] : nil;
@@ -229,7 +276,8 @@ NSString *LeadProfileChangeText(NSDictionary *entry) {
     if (now.length) now = [@"@" stringByAppendingString:now];
   }
   NSString *empty = LeadL(@"UI_PROFILE_EMPTY_VALUE");
-  NSString *change = [NSString stringWithFormat:LeadL(@"UI_PROFILE_CHANGE_FORMAT"), old.length ? old : empty, now.length ? now : empty];
+  NSString *change = [NSString stringWithFormat:LeadL(@"UI_PROFILE_CHANGE_FORMAT"),
+    old.length ? LeadLogDisplayGlyphs(old) : empty, now.length ? LeadLogDisplayGlyphs(now) : empty];
   return [NSString stringWithFormat:@"%@\n%@", [NSString stringWithFormat:LeadL(@"UI_PROFILE_CHANGE_FIELD"), label], change];
 }
 
@@ -331,7 +379,7 @@ static NSString *LeadLogText(id value) {
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
   NSDictionary *entry = self.entries[indexPath.row];
   LeadCell *cell = [tableView dequeueReusableCellWithIdentifier:@"LeadCell" forIndexPath:indexPath];
-  NSString *title = [self titleForEntry:entry];
+  NSString *title = LeadLogDisplayGlyphs([self titleForEntry:entry]);
   [cell configureTitle:title subtitle:@" " symbol:nil];
   BOOL named = [entry[@"name"] length] > 0 || [entry[@"username"] length] > 0;
   UIImage *avatar = [entry[@"kind"] isEqualToString:@"profile"] ? LeadLogAvatar(entry[@"peer"]) : nil;
