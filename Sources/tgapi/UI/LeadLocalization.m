@@ -110,6 +110,12 @@ NSString *LeadBundlePath(void) {
   NSMutableDictionary *merged = [LeadUIStrings(@"en") mutableCopy];
   [merged addEntriesFromDictionary:LeadUIStrings(lang)];
   [merged addEntriesFromDictionary:dict ?: @{}];
+  // Rebrand user-facing legacy translations without renaming persistent identifiers.
+  NSRegularExpression *brand = [NSRegularExpression regularExpressionWithPattern:@"\\bLead\\b" options:0 error:nil];
+  for (NSString *key in [merged.allKeys copy]) {
+    id value = merged[key];
+    if ([value isKindOfClass:NSString.class]) merged[key] = [brand stringByReplacingMatchesInString:value options:0 range:NSMakeRange(0, [value length]) withTemplate:@"Kira"] ?: value;
+  }
   dict = merged;
   self.strings = dict;
 
