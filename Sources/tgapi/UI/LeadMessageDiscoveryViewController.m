@@ -6,6 +6,7 @@
 #import "Headers.h"
 
 #import <zlib.h>
+#import <QuartzCore/QuartzCore.h>
 
 // Local gzip decoder: the gzip function in Hooks.xm is static to that file.
 // Limit expanded MTProto responses to avoid decompression bombs.
@@ -128,7 +129,9 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"كشف الرسائل";
-    self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    self.tableView.backgroundColor = LeadThemeBackground();
+    self.tableView.tintColor = LeadThemeAccent(); self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight = 68;
     self.groups = [NSMutableArray array];
@@ -153,11 +156,14 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 }
 
 - (void)configureHeader {
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 238)];
+    UIView *header = [[LeadThemeHeader alloc] initWithFrame:CGRectMake(0, 0, 320, 238)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(16, 9, 215, 42)];
-    field.borderStyle = UITextBorderStyleRoundedRect;
-    field.placeholder = @"@username";
+    field.borderStyle = UITextBorderStyleNone; field.backgroundColor = LeadThemeCard();
+    field.layer.cornerRadius = 12; field.layer.borderWidth = 1; field.layer.borderColor = [LeadThemeAccent() colorWithAlphaComponent:0.32].CGColor;
+    field.textColor = LeadThemeInk(); field.tintColor = LeadThemeAccent(); field.font = LeadFont(15, UIFontWeightMedium);
+    field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,12,1)]; field.leftViewMode = UITextFieldViewModeAlways;
+    field.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"@username" attributes:@{NSForegroundColorAttributeName:LeadThemeMuted()}];
     field.autocapitalizationType = UITextAutocapitalizationTypeNone;
     field.autocorrectionType = UITextAutocorrectionTypeNo;
     field.clearButtonMode = UITextFieldViewModeWhileEditing;
@@ -170,15 +176,17 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 
     UIButton *search = [UIButton buttonWithType:UIButtonTypeSystem];
     [search setTitle:@"بحث" forState:UIControlStateNormal];
-    search.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    search.titleLabel.font = LeadRoundedFont(15, UIFontWeightSemibold);
+    search.backgroundColor = LeadThemeAccent(); search.layer.cornerRadius = 12;
+    [search setTitleColor:LeadThemeBackground() forState:UIControlStateNormal];
     [search addTarget:self action:@selector(searchUsername) forControlEvents:UIControlEventTouchUpInside];
     search.translatesAutoresizingMaskIntoConstraints = NO;
     [header addSubview:search];
 
     UILabel *status = [UILabel new];
     status.text = @"اكتب اليوزر: نفحص كروبات حسابك حتى لو الشخص غادرها، ونحاول اكتشاف كروبات عامة. النتائج مو شاملة كل تيليگرام.";
-    status.font = [UIFont systemFontOfSize:12];
-    status.textColor = UIColor.secondaryLabelColor;
+    status.font = LeadFont(13, UIFontWeightRegular);
+    status.textColor = LeadThemeMuted();
     status.numberOfLines = 5;
     status.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusLabel = status;
@@ -230,6 +238,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         [search.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-15],
         [search.widthAnchor constraintEqualToConstant:63],
         [search.centerYAnchor constraintEqualToAnchor:field.centerYAnchor],
+        [search.heightAnchor constraintEqualToConstant:42],
         [status.leadingAnchor constraintEqualToAnchor:field.leadingAnchor],
         [status.trailingAnchor constraintEqualToAnchor:search.trailingAnchor],
         [status.topAnchor constraintEqualToAnchor:field.bottomAnchor constant:9],
@@ -537,8 +546,9 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 - (void)styleChips {
     for (UIButton *chip in self.chips) {
         BOOL on = chip.tag == self.category;
-        chip.backgroundColor = on ? UIColor.systemBlueColor : UIColor.secondarySystemFillColor;
-        [chip setTitleColor:on ? UIColor.whiteColor : UIColor.labelColor forState:UIControlStateNormal];
+        chip.backgroundColor = on ? LeadThemeAccent() : LeadThemeCard();
+        chip.layer.borderWidth = 1; chip.layer.borderColor = [LeadThemeAccent() colorWithAlphaComponent:on ? 0.9 : 0.28].CGColor;
+        [chip setTitleColor:on ? LeadThemeBackground() : LeadThemeInk() forState:UIControlStateNormal];
     }
 }
 
@@ -889,11 +899,13 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuse];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuse];
     cell.accessoryType = UITableViewCellAccessoryNone;
-    cell.textLabel.textColor = UIColor.labelColor;
+    cell.backgroundColor = LeadThemeCard(); cell.tintColor = LeadThemeAccent();
+    UIView *selected = [UIView new]; selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.22]; cell.selectedBackgroundView = selected;
+    cell.textLabel.textColor = LeadThemeInk(); cell.detailTextLabel.textColor = LeadThemeMuted();
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.detailTextLabel.numberOfLines = 2;
-    cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+    cell.textLabel.font = LeadFont(15, UIFontWeightMedium);
+    cell.detailTextLabel.font = LeadFont(12, UIFontWeightRegular);
     if (path.section == 0) {
         NSDictionary *group = self.sources[path.row];
         BOOL included = ![self.excluded containsObject:group[@"key"]];
@@ -916,7 +928,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         cell.textLabel.text = [NSString stringWithFormat:@"تحميل رسائل أقدم (%lu مصدر)",
            (unsigned long)self.olderOffsets.count];
         cell.detailTextLabel.text = @"متابعة فحص رسائل المرسل القديمة على دفعات";
-        cell.textLabel.textColor = UIColor.systemBlueColor;
+        cell.textLabel.textColor = LeadThemeAccent();
     }
     return cell;
 }
