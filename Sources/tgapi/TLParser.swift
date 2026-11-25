@@ -1772,7 +1772,11 @@ class TLParser: NSObject {
         case let .updateNewChannelMessage(data):
             observeMessages([data.message])
             return stripTTLMessage(data.message)
+        case let .updateUserName(data):
+            observeProfileNameUpdate(data)
+            return false
         case let .updateStory(data):
+            observeProfileStoryUpdate(data)
             let kept = keepDeletedStory(data)
             let unlocked = unlockStories([data.story])
             return kept || unlocked
@@ -1910,6 +1914,7 @@ class TLParser: NSObject {
             defaults.bool(forKey: "disableForwardRestriction") ||
             defaults.bool(forKey: "LeadAntiEdit") ||
             defaults.bool(forKey: "LeadAntiRevoke") ||
+            defaults.bool(forKey: "LeadProfileChangesLog") ||
             defaults.bool(forKey: "LeadHideProxyPromo") || defaults.bool(forKey: "disableAllAds") ||
             visualStarsAmount() != nil || isStories || isSavingDeletedStories
     }
@@ -2081,6 +2086,7 @@ class TLParser: NSObject {
             case let .userFull(data):
                 let changedUser = stripProtectionFromUserFull(data.fullUser)
                 let changedChats = processPeers(users: data.users, chats: data.chats)
+                observeFullProfile(data.fullUser, users: data.users)
                 modified = changedUser || changedChats
             }
         } else if let chats = result as? Api.messages.Chats {
@@ -2150,6 +2156,7 @@ class TLParser: NSObject {
                 } else {
                     var changed = false
                     for peerStories in data.peerStories {
+                        observeProfileStorySnapshot(peerStories)
                         let kept = keepDeletedStories(in: peerStories)
                         let unlocked = unlockPeerStories(peerStories)
                         if kept || unlocked { changed = true }
@@ -2165,6 +2172,7 @@ class TLParser: NSObject {
         } else if let peerStories = result as? Api.stories.PeerStories {
             switch peerStories {
             case let .peerStories(data):
+                observeProfileStorySnapshot(data.stories)
                 let kept = keepDeletedStories(in: data.stories)
                 let changedStories = unlockPeerStories(data.stories) || kept
                 let changedPeers = processPeers(users: data.users, chats: data.chats)
@@ -2483,6 +2491,9 @@ extension TLParser {
     private static var globalIdPeers: [Int32: String] = [:]  // private/basic-group id -> "u…"/"g…"
     private static var peerNames: [String: [String: String]] = [:] // "c123" -> name/username
     private static var peerProfiles: [String: [String: String]] = [:] // "u123" -> name/username/photo id
+    // Only metadata from normally received story updates; no caption or media.
+    private static var profileStoryStates: [String: [String: Int32]] = [:]
+    private static var profileStoryBaselines: [String: Double] = [:]
     private static var recentLoaded = false
     private static var recentSaveScheduled = false
     private static let logUdKey = "LeadMessageLog"
@@ -2529,6 +2540,8 @@ extension TLParser {
         recentOrder = stored["order"] as? [String] ?? Array(recentTexts.keys)
         peerNames = stored["names"] as? [String: [String: String]] ?? [:]
         peerProfiles = stored["profiles"] as? [String: [String: String]] ?? [:]
+        profileStoryStates = stored["profileStoryStates"] as? [String: [String: Int32]] ?? [:]
+        profileStoryBaselines = stored["profileStoryBaselines"] as? [String: Double] ?? [:]
         for key in recentOrder {
             let parts = key.split(separator: ":")
             if parts.count == 2, !parts[0].hasPrefix("c"), let id = Int32(parts[1]) {
@@ -2543,7 +2556,7 @@ extension TLParser {
         recentSaveScheduled = true
         logQueue.asyncAfter(deadline: .now() + 8) {
             recentSaveScheduled = false
-            let payload: NSDictionary = ["texts": recentTexts, "order": recentOrder, "names": peerNames, "profiles": peerProfiles]
+            let payload: NSDictionary = ["texts": recentTexts, "order": recentOrder, "names": peerNames, "profiles": peerProfiles, "profileStoryStates": profileStoryStates, "profileStoryBaselines": profileStoryBaselines]
             payload.write(toFile: recentFilePath, atomically: true)
         }
     }
@@ -2603,11 +2616,13 @@ extension TLParser {
             if case let .user(data) = user {
                 let name = [data.firstName, data.lastName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
                 var info = ["name": name]
-                if let username = data.username { info["username"] = username }
+                if let username = visibleProfileUsername(data.usernames, fallback: data.username) { info["username"] = username }
                 if !name.isEmpty || info["username"] != nil { found["u\(data.id)"] = info }
                 // min:flags.20 objects are partial, self:flags.10 is you, deleted:flags.13 has no profile.
                 if data.flags & Int32((1 << 20) | (1 << 10) | (1 << 13)) == 0, !name.isEmpty {
                     var profile = info
+                    // Empty is a known absence, distinct from a profile without a name snapshot.
+                    profile["username"] = info["username"] ?? ""
                     switch data.photo {
                     case let .userProfilePhoto(photo)?: profile["photo"] = "\(photo.photoId)"
                     default: profile["photo"] = "none"
@@ -2634,11 +2649,13 @@ extension TLParser {
             var changed = false
             if UserDefaults.standard.bool(forKey: "LeadProfileChangesLog") {
                 for (key, profile) in profiles {
+                    var merged = profile
                     if let previous = peerProfiles[key] {
-                        logProfileChanges(tag: key, old: previous, new: profile)
+                        merged["bio"] = previous["bio"] // Basic user objects do not carry the bio.
+                        logProfileChanges(tag: key, old: previous, new: merged)
                     }
-                    if peerProfiles[key] != profile {
-                        peerProfiles[key] = profile
+                    if peerProfiles[key] != merged {
+                        peerProfiles[key] = merged
                         changed = true
                     }
                 }
@@ -2719,25 +2736,199 @@ extension TLParser {
         }
     }
 
-    // Called on logQueue.
+    private static var isProfileLogging: Bool {
+        return !isExtension && UserDefaults.standard.bool(forKey: "LeadProfileChangesLog")
+    }
+
+    // Prefer the editable active username, then another active one. Basic User
+    // objects may instead supply only the legacy username field.
+    private static func visibleProfileUsername(_ names: [Api.Username]?, fallback: String? = nil) -> String? {
+        var active: [String] = []
+        for item in names ?? [] {
+            if case let .username(data) = item, data.flags & Int32(1 << 1) != 0, !data.username.isEmpty {
+                if data.flags & Int32(1 << 0) != 0 { return data.username }
+                active.append(data.username)
+            }
+        }
+        return active.first ?? fallback
+    }
+
+    // Called on logQueue. The date is observation time unless the server
+    // supplied the publication date of a visible story.
+    private static func appendProfileEvent(tag: String, field: String, profile: [String: String],
+                                           old: String? = nil, new: String? = nil,
+                                           date: Double = Date().timeIntervalSince1970,
+                                           published: Bool = false, story: Int32? = nil) {
+        var entry: [String: Any] = ["kind": "profile", "peer": tag, "field": field, "id": 0, "date": date]
+        if let name = profile["name"], !name.isEmpty { entry["name"] = name }
+        if let username = profile["username"], !username.isEmpty { entry["username"] = username }
+        if let old = old { entry["old"] = old }
+        if let new = new { entry["text"] = new }
+        if published { entry["dateSource"] = "published" }
+        if let story = story { entry["storyId"] = story }
+        appendLogEntry(entry)
+    }
+
+    // Called on logQueue. First observations establish baselines; only
+    // comparisons of known values generate events.
     private static func logProfileChanges(tag: String, old: [String: String], new: [String: String]) {
         let now = Date().timeIntervalSince1970
-        func add(_ field: String, _ before: String?, _ after: String?) {
-            var entry: [String: Any] = ["kind": "profile", "peer": tag, "field": field, "id": 0, "date": now]
-            if let name = new["name"], !name.isEmpty { entry["name"] = name }
-            if let username = new["username"] { entry["username"] = username }
-            if let before = before { entry["old"] = before }
-            if let after = after { entry["text"] = after }
-            appendLogEntry(entry)
-        }
         if let before = old["name"], let after = new["name"], before != after, !before.isEmpty {
-            add("name", before, after)
+            appendProfileEvent(tag: tag, field: "name", profile: new, old: before, new: after, date: now)
         }
-        if old["username"] != new["username"], old["username"] != nil || new["username"] != nil {
-            add("username", old["username"], new["username"])
+        if old["name"] != nil, new["name"] != nil {
+            let before = old["username"] ?? ""
+            let after = new["username"] ?? ""
+            if before != after {
+                appendProfileEvent(tag: tag, field: "username", profile: new, old: before, new: after, date: now)
+            }
+        }
+        if let before = old["bio"], let after = new["bio"], before != after {
+            appendProfileEvent(tag: tag, field: "bio", profile: new, old: before, new: after, date: now)
         }
         if let before = old["photo"], let after = new["photo"], before != after {
-            add(after == "none" ? "photo_removed" : "photo", nil, nil)
+            let field = after == "none" ? "photo_removed" : (before == "none" ? "photo_added" : "photo")
+            appendProfileEvent(tag: tag, field: field, profile: new, date: now)
+        }
+    }
+
+    private static func observeProfileNameUpdate(_ update: Api.Update.Cons_updateUserName) {
+        guard isProfileLogging else { return }
+        let tag = "u\(update.userId)"
+        let name = [update.firstName, update.lastName].filter { !$0.isEmpty }.joined(separator: " ")
+        guard !name.isEmpty else { return }
+        let username = visibleProfileUsername(update.usernames) ?? ""
+        logQueue.async {
+            guard isProfileLogging else { return }
+            loadRecentIfNeeded()
+            // Only update established, non-self user profiles.
+            guard let old = peerProfiles[tag], old["name"] != nil else { return }
+            var new = old
+            new["name"] = name
+            new["username"] = username
+            guard new != old else { return }
+            logProfileChanges(tag: tag, old: old, new: new)
+            peerProfiles[tag] = new
+            peerNames[tag] = ["name": name, "username": username]
+            scheduleRecentSave()
+        }
+    }
+
+    private static func observeFullProfile(_ full: Api.UserFull, users: [Api.User]) {
+        guard isProfileLogging, case let .userFull(data) = full else { return }
+        // UserFull supplies the visible about field, not a guarantee about
+        // private profile fields. Never infer deletion from a partial User.
+        let tag = "u\(data.id)"
+        guard users.contains(where: { user in
+            if case let .user(item) = user {
+                return item.id == data.id && item.flags & Int32((1 << 20) | (1 << 10) | (1 << 13)) == 0
+            }
+            return false
+        }) else { return }
+        let bio = data.about ?? ""
+        if let stories = data.stories { observeProfileStorySnapshot(stories) }
+        logQueue.async {
+            guard isProfileLogging else { return }
+            loadRecentIfNeeded()
+            guard let old = peerProfiles[tag] else { return }
+            var new = old
+            new["bio"] = bio
+            guard new != old else { return }
+            logProfileChanges(tag: tag, old: old, new: new)
+            peerProfiles[tag] = new
+            scheduleRecentSave()
+        }
+    }
+
+    private struct ProfileStoryObservation {
+        let id: Int32
+        let published: Int32
+        let expires: Int32
+        let removed: Bool
+    }
+
+    private static func profileStoryObservation(_ story: Api.StoryItem) -> ProfileStoryObservation? {
+        switch story {
+        case let .storyItem(item):
+            guard item.flags & Int32(1 << 16) == 0, item.date > 0, item.expireDate > item.date else { return nil }
+            return ProfileStoryObservation(id: item.id, published: item.date, expires: item.expireDate, removed: false)
+        case let .storyItemDeleted(item):
+            return ProfileStoryObservation(id: item.id, published: 0, expires: 0, removed: true)
+        default:
+            return nil
+        }
+    }
+
+    private static func observeProfileStoryUpdate(_ update: Api.Update.Cons_updateStory) {
+        guard isProfileLogging, !isHideStories, let tag = peerTag(update.peer), tag.hasPrefix("u"),
+              let item = profileStoryObservation(update.story) else { return }
+        observeProfileStories(tag: tag, items: [item], snapshot: false)
+    }
+
+    private static func observeProfileStorySnapshot(_ stories: Api.PeerStories) {
+        guard isProfileLogging, !isHideStories, case let .peerStories(data) = stories,
+              let tag = peerTag(data.peer), tag.hasPrefix("u") else { return }
+        observeProfileStories(tag: tag, items: data.stories.compactMap(profileStoryObservation), snapshot: true)
+    }
+
+    private static func observeProfileStories(tag: String, items: [ProfileStoryObservation], snapshot: Bool) {
+        let now = Date().timeIntervalSince1970
+        logQueue.async {
+            guard isProfileLogging else { return }
+            loadRecentIfNeeded()
+            let baseline = profileStoryBaselines[tag]
+            let profile = peerProfiles[tag] ?? peerNames[tag] ?? [:]
+            var changed = false
+            for item in items {
+                let key = "\(tag):\(item.id)"
+                let previous = profileStoryStates[key]
+                if item.removed {
+                    // Only a previously seen, unexpired story and an explicit
+                    // deletion update. Do not infer deletion from a missing list entry.
+                    guard var state = previous, state["removed"] != 1,
+                          let expiry = state["expires"], Double(expiry) > now else { continue }
+                    state["removed"] = 1
+                    profileStoryStates[key] = state
+                    appendProfileEvent(tag: tag, field: "story_removed", profile: profile, date: now, story: item.id)
+                    changed = true
+                } else {
+                    guard Double(item.expires) > now, Double(item.published) <= now + 300 else { continue }
+                    if previous == nil {
+                        profileStoryStates[key] = ["published": item.published, "expires": item.expires, "removed": 0]
+                        // Initial feed establishes a baseline, not a history of
+                        // events. Live updates or newer stories in later feeds
+                        // are recorded with the server's publication date.
+                        if !snapshot || (baseline != nil && Double(item.published) >= (baseline ?? now)) {
+                            appendProfileEvent(tag: tag, field: "story_seen", profile: profile,
+                                               date: Double(item.published), published: true, story: item.id)
+                        }
+                        changed = true
+                    } else if var state = previous, state["removed"] != 1, state["expires"] != item.expires {
+                        state["expires"] = item.expires
+                        profileStoryStates[key] = state
+                        changed = true
+                    }
+                }
+            }
+            if snapshot {
+                profileStoryBaselines[tag] = now
+                changed = true
+            }
+            // Bounded local metadata only. Retain a short tombstone window
+            // to avoid repeated events when Telegram replays an update.
+            let cutoff = now - 7 * 86400
+            let expired = profileStoryStates.filter { Double($0.value["expires"] ?? 0) < cutoff }.map(\.key)
+            for key in expired { profileStoryStates.removeValue(forKey: key) }
+            if profileStoryStates.count > 1500 {
+                let excess = profileStoryStates.sorted { ($0.value["expires"] ?? 0) < ($1.value["expires"] ?? 0) }
+                    .prefix(profileStoryStates.count - 1500)
+                for (key, _) in excess { profileStoryStates.removeValue(forKey: key) }
+            }
+            if profileStoryBaselines.count > 3000 {
+                let excess = profileStoryBaselines.sorted { $0.value < $1.value }.prefix(profileStoryBaselines.count - 3000)
+                for (key, _) in excess { profileStoryBaselines.removeValue(forKey: key) }
+            }
+            if changed || !expired.isEmpty { scheduleRecentSave() }
         }
     }
 
