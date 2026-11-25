@@ -7,6 +7,8 @@ on:
       - 'Sources/tgapi/UI/**'
       - 'Sources/tgapi/Calls/LeadCallProxy.xm'
       - 'Sources/tgapi/TLParser.swift'
+      - 'Sources/tgapi/VideoToVoice.xm'
+      - 'Sources/tgapi/Headers.h'
       - 'Makefile'
       - '.github/workflows/warp-experimental.yml'
   workflow_dispatch:
@@ -47,6 +49,6 @@ jobs:
           nm packages/Kira.dylib | grep -q 'LeadWarpStart'
       - uses: actions/upload-artifact@v4
         with:
-          name: lead-warp-experimental-arm64
+          name: kira-warp-arm64
           path: packages/Kira.dylib
           if-no-files-found: error
