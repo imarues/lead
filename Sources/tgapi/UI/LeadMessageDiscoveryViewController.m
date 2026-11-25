@@ -222,7 +222,9 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 
     UIButton *groupsButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [groupsButton setTitle:@"مصادر البحث — إظهار" forState:UIControlStateNormal];
-    groupsButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    groupsButton.titleLabel.font = LeadRoundedFont(13, UIFontWeightSemibold);
+    groupsButton.tintColor = LeadThemeAccent();
+    [groupsButton setTitleColor:LeadThemeMuted() forState:UIControlStateDisabled];
     groupsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
     groupsButton.translatesAutoresizingMaskIntoConstraints = NO;
     [groupsButton addTarget:self action:@selector(toggleGroups) forControlEvents:UIControlEventTouchUpInside];
@@ -888,6 +890,14 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     return !self.scanning && self.olderOffsets.count && !self.selectionMode ? 1 : 0;
 }
 
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    if ([view isKindOfClass:UITableViewHeaderFooterView.class]) {
+        UITableViewHeaderFooterView *header = (UITableViewHeaderFooterView *)view;
+        header.textLabel.textColor = LeadThemeMuted();
+        header.textLabel.font = LeadRoundedFont(13, UIFontWeightSemibold);
+    }
+}
+
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0 && self.groupsExpanded) return @"مصادر البحث: مشتركة، بحسابك ولو غادرها الشخص، ومرشّحة عامة";
     if (section == 1 && self.target) return [NSString stringWithFormat:@"رسائل %@ — %lu", self.target[@"title"], (unsigned long)self.results.count];
@@ -899,8 +909,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuse];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuse];
     cell.accessoryType = UITableViewCellAccessoryNone;
-    cell.backgroundColor = LeadThemeCard(); cell.tintColor = LeadThemeAccent();
-    UIView *selected = [UIView new]; selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.22]; cell.selectedBackgroundView = selected;
+    KiraStyleListCell(cell);
     cell.textLabel.textColor = LeadThemeInk(); cell.detailTextLabel.textColor = LeadThemeMuted();
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.detailTextLabel.numberOfLines = 2;
