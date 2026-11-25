@@ -5,6 +5,8 @@
 
 static BOOL LeadIsNotificationExtensionProcess(void) {
 	NSBundle *bundle = [NSBundle mainBundle];
+	if ([bundle.bundlePath.pathExtension isEqualToString:@"appex"] ||
+	    bundle.infoDictionary[@"NSExtension"] != nil) return YES;
 	NSString *bundleId = bundle.bundleIdentifier ?: @"";
 	NSString *processName = [NSProcessInfo processInfo].processName ?: @"";
 	NSString *executableName = bundle.executablePath.lastPathComponent ?: @"";
