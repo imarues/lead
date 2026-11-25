@@ -1,5 +1,6 @@
 #import "LeadDesign.h"
 #import "Headers.h"
+#import "KiraLogoImage.h"
 
 NSString *const kLeadTweakVersion = @"2.0.3";
 NSString *const kLeadTweakBuild = @"122";
@@ -188,110 +189,74 @@ void LeadAnimateCellIn(UITableViewCell *cell, NSInteger order) {
 
 #pragma mark - Logo
 
-static CGPathRef LeadCreateLogoPath(CGRect r) {
-  // Right triangle with a vertical left edge, rounded like the app icon:
-  // soft top, wide bottom-left, tight bottom-right.
-  CGPoint top = CGPointMake(CGRectGetMinX(r), CGRectGetMinY(r));
-  CGPoint bottomLeft = CGPointMake(CGRectGetMinX(r), CGRectGetMaxY(r));
-  CGPoint bottomRight = CGPointMake(CGRectGetMaxX(r), CGRectGetMaxY(r));
-  CGFloat w = r.size.width;
-  CGMutablePathRef path = CGPathCreateMutable();
-  CGPathMoveToPoint(path, NULL, top.x, (top.y + bottomLeft.y) / 2.0);
-  CGPathAddArcToPoint(path, NULL, bottomLeft.x, bottomLeft.y, bottomRight.x, bottomRight.y, w * 0.20);
-  CGPathAddArcToPoint(path, NULL, bottomRight.x, bottomRight.y, top.x, top.y, w * 0.07);
-  CGPathAddArcToPoint(path, NULL, top.x, top.y, bottomLeft.x, bottomLeft.y, w * 0.10);
-  CGPathCloseSubpath(path);
-  return path;
+// The original transparent artwork is embedded, so injection requires only the dylib.
+static UIImage *KiraBrandArtwork(void) {
+  static UIImage *image;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSData *png = [[NSData alloc] initWithBase64EncodedString:kKiraLogoPNGBase64 options:0];
+    image = [UIImage imageWithData:png scale:3.0];
+  });
+  return image;
 }
 
 @implementation LeadLogoView {
-  CAGradientLayer *_gradient;
-  CAShapeLayer *_mask;
-  CAShapeLayer *_stroke;
+  CALayer *_artwork;
+  CALayer *_glow;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
   self = [super initWithFrame:frame];
   if (self) {
-    _gradient = [CAGradientLayer layer];
-    _gradient.startPoint = CGPointMake(0.3, 0.0);
-    _gradient.endPoint = CGPointMake(0.6, 1.0);
-    _mask = [CAShapeLayer layer];
-    _gradient.mask = _mask;
-    [self.layer addSublayer:_gradient];
-
-    _stroke = [CAShapeLayer layer];
-    _stroke.fillColor = UIColor.clearColor.CGColor;
-    _stroke.lineWidth = 1.5;
-    _stroke.lineJoin = kCALineJoinRound;
-    _stroke.lineCap = kCALineCapRound;
-    _stroke.strokeEnd = 0.0;
-    [self.layer addSublayer:_stroke];
-    [self updateColors];
+    UIImage *image = KiraBrandArtwork();
+    self.backgroundColor = UIColor.clearColor;
+    self.clipsToBounds = NO;
+    _glow = [CALayer layer];
+    _glow.contents = (__bridge id)image.CGImage;
+    _glow.contentsGravity = kCAGravityResizeAspect;
+    _glow.shadowColor = LeadThemeAccent().CGColor;
+    _glow.shadowRadius = 6;
+    _glow.shadowOpacity = 0.85;
+    _glow.shadowOffset = CGSizeZero;
+    _glow.opacity = 0;
+    [self.layer addSublayer:_glow];
+    _artwork = [CALayer layer];
+    _artwork.contents = (__bridge id)image.CGImage;
+    _artwork.contentsGravity = kCAGravityResizeAspect;
+    _artwork.contentsScale = UIScreen.mainScreen.scale;
+    [self.layer addSublayer:_artwork];
   }
   return self;
 }
 
 - (void)layoutSubviews {
   [super layoutSubviews];
-  CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height);
-  // The mark's visual mass sits low-left; nudge it so it reads centered.
-  CGRect box = CGRectMake((self.bounds.size.width - side * 0.78) / 2.0 - side * 0.04,
-                          (self.bounds.size.height - side * 0.80) / 2.0,
-                          side * 0.78, side * 0.80);
-  CGPathRef path = LeadCreateLogoPath(box);
-  _gradient.frame = self.bounds;
-  _mask.frame = self.bounds;
-  _stroke.frame = self.bounds;
-  _mask.path = path;
-  _stroke.path = path;
-  CGPathRelease(path);
-}
-
-- (void)updateColors {
-  UIColor *top = LeadThemeInk();
-  UIColor *bottom = LeadThemeAccent();
-  _gradient.colors = @[ (id)top.CGColor, (id)bottom.CGColor ];
-  _stroke.strokeColor = [LeadThemeInk() resolvedColorWithTraitCollection:self.traitCollection].CGColor;
-}
-
-- (void)traitCollectionDidChange:(UITraitCollection *)previous {
-  [super traitCollectionDidChange:previous];
-  [self updateColors];
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  _artwork.frame = self.bounds;
+  _glow.frame = self.bounds;
+  [CATransaction commit];
 }
 
 - (void)playIntro {
   [self layoutIfNeeded];
-  // Outline draws itself, the gradient fills in behind it, then the outline leaves.
-  CABasicAnimation *draw = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
-  draw.fromValue = @0;
-  draw.toValue = @1;
-  draw.duration = 0.65;
-  draw.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-
-  CABasicAnimation *fadeStroke = [CABasicAnimation animationWithKeyPath:@"opacity"];
-  fadeStroke.fromValue = @1;
-  fadeStroke.toValue = @0;
-  fadeStroke.beginTime = 0.75;
-  fadeStroke.duration = 0.35;
-  fadeStroke.fillMode = kCAFillModeBoth;
-
-  CAAnimationGroup *strokeGroup = [CAAnimationGroup animation];
-  strokeGroup.animations = @[ draw, fadeStroke ];
-  strokeGroup.duration = 1.1;
-  _stroke.strokeEnd = 1.0;
-  _stroke.opacity = 0.0;
-  [_stroke addAnimation:strokeGroup forKey:@"intro"];
+  // Preserve the intro timing, glow and spring while revealing the PNG
+  // without recoloring, stretching or drawing the obsolete triangle.
+  CAKeyframeAnimation *glow = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+  glow.values = @[ @0, @0.9, @0.85, @0 ];
+  glow.keyTimes = @[ @0, @0.32, @0.68, @1 ];
+  glow.duration = 1.1;
+  _glow.opacity = 0;
+  [_glow addAnimation:glow forKey:@"intro"];
 
   CABasicAnimation *fill = [CABasicAnimation animationWithKeyPath:@"opacity"];
   fill.fromValue = @0;
   fill.toValue = @1;
-  fill.beginTime = CACurrentMediaTime() + 0.35;
+  fill.beginTime = [_artwork convertTime:CACurrentMediaTime() fromLayer:nil] + 0.35;
   fill.duration = 0.55;
   fill.fillMode = kCAFillModeBackwards;
   fill.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-  [_gradient addAnimation:fill forKey:@"intro"];
-
+  [_artwork addAnimation:fill forKey:@"intro"];
   self.transform = CGAffineTransformMakeScale(0.88, 0.88);
   [UIView animateWithDuration:0.9 delay:0.1 usingSpringWithDamping:0.62 initialSpringVelocity:0.3 options:0 animations:^{
     self.transform = CGAffineTransformIdentity;
