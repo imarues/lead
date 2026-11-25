@@ -54,11 +54,11 @@ static void LeadWarpSaveProfile(NSString *profile) {
   // If signing prevents Keychain access, reuse the profile in this process only.
 }
 static NSString *LeadWarpRegistrationError(int status) {
-  if (status == 429) return @"خدمة WARP حدّت طلبات التسجيل. حاول لاحقاً.";
-  if (status == 403 || status == 401) return @"خدمة WARP رفضت التسجيل غير الرسمي.";
-  if (status == -11) return @"تعذر الاتصال بخدمة تسجيل WARP.";
-  if (status == -12) return @"لم ترسل خدمة WARP إعدادات WireGuard صالحة.";
-  return [NSString stringWithFormat:@"فشل تسجيل WARP (%d).", status];
+  if (status == 429) return @"تعذر الاتصال حالياً. حاول لاحقاً.";
+  if (status == 403 || status == 401) return @"تعذر تفعيل الاتصال.";
+  if (status == -11) return @"تعذر الاتصال بالخدمة.";
+  if (status == -12) return @"تعذر تجهيز إعدادات الاتصال.";
+  return [NSString stringWithFormat:@"تعذر تفعيل الاتصال (%d).", status];
 }
 #endif
 
@@ -71,7 +71,7 @@ NSString *LeadWarpStatus(void) {
 #if LEAD_WARP_EXPERIMENTAL
   @synchronized([NSUserDefaults class]) {
     if (sWarpBusy) return sWarpStarting ? @"جاري الاتصال…" : @"جاري الإيقاف…";
-    return sWarpRoute ? @"WARP · متصل" : @"متوقف";
+    return sWarpRoute ? @"متصل" : @"متوقف";
   }
 #else
   return @"تجريبي · غير مضمّن";
@@ -123,7 +123,7 @@ static void KiraWarpStart(UIViewController *host) {
     int port = profile.length ? LeadWarpStart((char *)profile.UTF8String, (char *)user.UTF8String, (char *)pass.UTF8String) : -10;
     BOOL ok = port > 0 && port <= 65535;
     NSString *message = !profile.length ? LeadWarpRegistrationError(registrationStatus) :
-      [NSString stringWithFormat:@"تعذر الاتصال عبر WARP (%d)", port];
+      [NSString stringWithFormat:@"تعذر الاتصال (%d)", port];
     dispatch_async(dispatch_get_main_queue(), ^{
       @synchronized([NSUserDefaults class]) {
         sWarpRoute = ok ? @{@"kind":@"socks", @"server":@"127.0.0.1", @"port":@(port), @"user":user, @"pass":pass} : nil;
@@ -164,7 +164,7 @@ void LeadWarpSetEnabled(BOOL enabled, UIViewController *host) {
   KiraWarpRefresh(host);
   if (!host.viewIfLoaded.window || host.presentedViewController) return;
   UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تفعيل الاتصال لأول مرة"
-    message:@"يُنشئ Kira ملف WARP عبر Cloudflare. بالتفعيل توافق على شروط الخدمة."
+    message:@"سيستخدم Kira خدمة Cloudflare للاتصال. بالتفعيل توافق على شروط الخدمة."
     preferredStyle:UIAlertControllerStyleAlert];
   [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
   [alert addAction:[UIAlertAction actionWithTitle:@"الشروط" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
