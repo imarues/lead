@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "LeadMenu.h"
 #import "../Headers.h"
+#import <QuartzCore/QuartzCore.h>
 
 extern NSData *LeadDiscoveryUnpack(NSData *data);
 @interface LeadUsernameScanner : NSObject
@@ -19,12 +20,16 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 @implementation LeadUsernameSourceController
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"مصادر النتيجة";
+    self.tableView.backgroundColor = LeadThemeBackground(); self.tableView.tintColor = LeadThemeAccent();
+    self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.messageIds.count; }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"source"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"source"];
     NSNumber *mid = self.messageIds[indexPath.row];
     cell.textLabel.text = mid.longLongValue > 0 ? [NSString stringWithFormat:@"الرسالة #%@",mid] : @"نبذة القناة";
+    cell.backgroundColor = LeadThemeCard(); cell.textLabel.textColor = LeadThemeInk();
+    cell.textLabel.font = LeadFont(15, UIFontWeightMedium); cell.tintColor = LeadThemeAccent();
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; return cell;
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -50,17 +55,26 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 - (instancetype)init { return [super initWithStyle:UITableViewStyleInsetGrouped]; }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"فحص اليوزرات";
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
+    self.tableView.backgroundColor = LeadThemeBackground(); self.tableView.tintColor = LeadThemeAccent();
+    self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
+    self.tableView.rowHeight = UITableViewAutomaticDimension; self.tableView.estimatedRowHeight = 72;
     self.rows = @[]; self.unique = [NSMutableDictionary dictionary]; self.sources = [NSMutableDictionary dictionary]; self.warnings = [NSMutableArray array];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"نسخ الكل" style:UIBarButtonItemStylePlain target:self action:@selector(copyAll)];
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0,0,320,178)];
+    UIView *header = [[LeadThemeHeader alloc] initWithFrame:CGRectMake(0,0,320,194)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    self.field = [UITextField new]; self.field.borderStyle = UITextBorderStyleRoundedRect;
-    self.field.placeholder = @"https://t.me/channel أو رابط دعوة"; self.field.keyboardType = UIKeyboardTypeURL;
+    self.field = [UITextField new]; self.field.borderStyle = UITextBorderStyleNone; self.field.backgroundColor = LeadThemeCard();
+    self.field.layer.cornerRadius = 12; self.field.layer.borderWidth = 1; self.field.layer.borderColor = [LeadThemeAccent() colorWithAlphaComponent:0.32].CGColor;
+    self.field.textColor = LeadThemeInk(); self.field.tintColor = LeadThemeAccent(); self.field.font = LeadFont(15, UIFontWeightMedium);
+    self.field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,12,1)]; self.field.leftViewMode = UITextFieldViewModeAlways;
+    self.field.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"https://t.me/channel أو رابط دعوة" attributes:@{NSForegroundColorAttributeName:LeadThemeMuted()}]; self.field.keyboardType = UIKeyboardTypeURL;
     self.field.autocapitalizationType = UITextAutocapitalizationTypeNone; self.field.autocorrectionType = UITextAutocorrectionTypeNo;
     self.field.clearButtonMode = UITextFieldViewModeWhileEditing; self.field.returnKeyType = UIReturnKeySearch; self.field.delegate = self;
     self.start = [UIButton buttonWithType:UIButtonTypeSystem]; [self.start setTitle:@"بدء الفحص" forState:UIControlStateNormal];
+    self.start.backgroundColor = LeadThemeAccent(); self.start.layer.cornerRadius = 12; self.start.titleLabel.font = LeadRoundedFont(15, UIFontWeightSemibold);
+    [self.start setTitleColor:LeadThemeBackground() forState:UIControlStateNormal];
     [self.start addTarget:self action:@selector(startScan) forControlEvents:UIControlEventTouchUpInside];
-    self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = [UIFont systemFontOfSize:13]; self.status.textColor = UIColor.secondaryLabelColor;
+    self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = LeadFont(13, UIFontWeightRegular); self.status.textColor = LeadThemeMuted();
     self.status.text = @"يفحص النبذة والمثبتات وسجل الرسائل المتاح لحسابك. لا ينضم للقنوات ولا يفحص الأعضاء.";
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[self.field,self.start,self.status]];
     stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 8; stack.translatesAutoresizingMaskIntoConstraints = NO; [header addSubview:stack];
@@ -180,9 +194,9 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"referenceActions"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"referenceActions"];
     NSString *ref = self.rows[indexPath.row];
     NSArray *ids = [self sourcesFor:ref];
-    cell.textLabel.text = ref; cell.textLabel.font = [UIFont systemFontOfSize:15]; cell.textLabel.numberOfLines = 0;
+    cell.textLabel.text = ref; cell.textLabel.font = LeadFont(15, UIFontWeightSemibold); cell.textLabel.textColor = LeadThemeInk(); cell.backgroundColor = LeadThemeCard(); cell.textLabel.numberOfLines = 0;
     cell.detailTextLabel.text = ids.count == 1 ? ([ids.firstObject longLongValue] == 0 ? @"نبذة القناة" : [NSString stringWithFormat:@"الرسالة #%@",ids.firstObject]) : [NSString stringWithFormat:@"%lu مصادر",(unsigned long)ids.count];
-    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.detailTextLabel.textColor = LeadThemeMuted(); cell.detailTextLabel.font = LeadFont(12, UIFontWeightRegular);
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     __weak typeof(self) weakSelf = self;
     UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -196,9 +210,15 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     [open setTitle:@"فتح" forState:UIControlStateNormal];
     [open addAction:[UIAction actionWithHandler:^(__unused UIAction *action) { [weakSelf openReference:ref]; }] forControlEvents:UIControlEventTouchUpInside];
     open.enabled = ids.count > 0;
+    for (UIButton *button in @[copy, open]) {
+        button.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.18];
+        button.layer.cornerRadius = 10; button.titleLabel.font = LeadFont(13, UIFontWeightSemibold);
+        [button setTitleColor:LeadThemeInk() forState:UIControlStateNormal];
+        [button setTitleColor:[LeadThemeMuted() colorWithAlphaComponent:0.5] forState:UIControlStateDisabled];
+    }
     UIStackView *actions = [[UIStackView alloc] initWithArrangedSubviews:@[copy,open]];
     actions.axis = UILayoutConstraintAxisHorizontal; actions.distribution = UIStackViewDistributionFillEqually; actions.spacing = 4;
-    actions.frame = CGRectMake(0,0,104,44);
+    actions.frame = CGRectMake(0,0,104,34);
     cell.accessoryView = actions;
     return cell;
 }
