@@ -9,6 +9,8 @@ on:
       - 'Sources/tgapi/UI/LeadAutoProxy.m'
       - 'Sources/tgapi/UI/LeadPages.m'
       - 'Sources/tgapi/UI/LeadUIStrings.h'
+      - 'Sources/tgapi/TLParser.swift'
+      - 'Sources/tgapi/UI/LeadMessageLogViewController.m'
       - 'Makefile'
       - '.github/workflows/warp-experimental.yml'
   workflow_dispatch:
