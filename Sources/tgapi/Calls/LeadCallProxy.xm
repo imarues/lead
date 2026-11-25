@@ -1,6 +1,16 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <stdlib.h>
+
+#ifndef LEAD_WARP_EXPERIMENTAL
+#define LEAD_WARP_EXPERIMENTAL 0
+#endif
+#if LEAD_WARP_EXPERIMENTAL
+extern "C" char *LeadWarpGroupRewrite(char *, char *);
+extern "C" void LeadWarpGroupClose(char *);
+extern "C" NSDictionary *LeadWarpCallProxy(void);
+#endif
 
 // Telegram-iOS native ObjC WebRTC bridge, verified against VoidGram's
 // pinned upstream revision fb0e62ba8a147f0821da6aa63c09da7d79a10111.
@@ -52,6 +62,63 @@ static void LeadDetachGroupProxy(id context) {
 %end
 %end
 
+
+#if LEAD_WARP_EXPERIMENTAL
+// A separate lifetime for each native group context. No process-wide socket
+// interception: only remote ICE candidates in the group join response are changed.
+static char kLeadWarpGroupToken;
+@interface LeadWarpGroupLifetime : NSObject
+@property (nonatomic, copy) NSString *token;
+@end
+@implementation LeadWarpGroupLifetime
+- (instancetype)init {
+  if ((self = [super init])) _token = NSUUID.UUID.UUIDString;
+  return self;
+}
+- (void)dealloc {
+  if (_token.length) LeadWarpGroupClose((char *)_token.UTF8String);
+}
+@end
+
+%group LeadWarpGroupMedia
+%hook GroupCallThreadLocalContext
+- (void)setJoinResponsePayload:(NSString *)payload {
+  if (!LeadWarpCallProxy() || ![payload isKindOfClass:NSString.class] || !payload.length) {
+    %orig(payload);
+    return;
+  }
+  NSString *rewritten = nil;
+  @synchronized(self) {
+    LeadWarpGroupLifetime *lifetime = objc_getAssociatedObject(self, &kLeadWarpGroupToken);
+    if (!lifetime) {
+      lifetime = [LeadWarpGroupLifetime new];
+      objc_setAssociatedObject(self, &kLeadWarpGroupToken, lifetime, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    char *result = LeadWarpGroupRewrite((char *)lifetime.token.UTF8String, (char *)payload.UTF8String);
+    if (result) {
+      rewritten = [NSString stringWithUTF8String:result];
+      free(result);
+    }
+  }
+  if (rewritten.length) {
+    NSLog(@"[Kira] WARP group UDP candidates installed");
+    %orig(rewritten);
+  } else {
+    // Preserve the client's normal call behavior on an unsupported payload.
+    NSLog(@"[Kira] WARP group UDP unavailable; using native candidates");
+    %orig(payload);
+  }
+}
+- (void)stop:(id)completion {
+  %orig(completion);
+  @synchronized(self) {
+    objc_setAssociatedObject(self, &kLeadWarpGroupToken, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+}
+%end
+%end
+#endif
+
 %group LeadNativeCallProxy
 %hook OngoingCallThreadLocalContextWebrtc
 - (id)initWithVersion:(NSString *)version customParameters:(NSString *)customParameters queue:(id)queue proxy:(id)proxy networkType:(int32_t)networkType dataSaving:(int32_t)dataSaving derivedState:(NSData *)derivedState key:(NSData *)key isOutgoing:(bool)isOutgoing connections:(NSArray *)connections maxLayer:(int32_t)maxLayer allowP2P:(BOOL)allowP2P allowTCP:(BOOL)allowTCP enableStunMarking:(BOOL)enableStunMarking logPath:(NSString *)logPath statsLogPath:(NSString *)statsLogPath sendSignalingData:(id)sendSignalingData videoCapturer:(id)videoCapturer preferredVideoCodec:(NSString *)preferredVideoCodec audioInputDeviceId:(NSString *)audioInputDeviceId audioDevice:(id)audioDevice directConnection:(id)directConnection {
@@ -96,5 +163,11 @@ static void LeadDetachGroupProxy(id context) {
         class_getInstanceMethod(group, NSSelectorFromString(@"stop:"))) {
       %init(LeadGroupSignalingProxy);
     }
+#if LEAD_WARP_EXPERIMENTAL
+    if (group && class_getInstanceMethod(group, NSSelectorFromString(@"setJoinResponsePayload:")) &&
+        class_getInstanceMethod(group, NSSelectorFromString(@"stop:"))) {
+      %init(LeadWarpGroupMedia);
+    }
+#endif
   }
 }
