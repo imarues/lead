@@ -2653,9 +2653,20 @@ extension TLParser {
                     var profile = info
                     // Empty is a known absence, distinct from a profile without a name snapshot.
                     profile["username"] = info["username"] ?? ""
+                    // A saved contact name may be our own alias, not their public name.
+                    if data.flags & Int32(1 << 11) == 0 { profile["realName"] = name }
                     switch data.photo {
-                    case let .userProfilePhoto(photo)?: profile["photo"] = "\(photo.photoId)"
-                    default: profile["photo"] = "none"
+                    case let .userProfilePhoto(photo)?:
+                        if photo.flags & Int32(1 << 2) != 0 {
+                            // Telegram marks custom photos that only we can see.
+                            profile["personalPhoto"] = "1"
+                        } else {
+                            profile["realPhoto"] = "\(photo.photoId)"
+                            if let bytes = photo.strippedThumb?.makeData(), bytes.count >= 3, bytes.count <= 8192 {
+                                profile["avatarThumb"] = bytes.base64EncodedString()
+                            }
+                        }
+                    default: profile["realPhoto"] = "none"
                     }
                     profiles["u\(data.id)"] = profile
                 }
@@ -2705,6 +2716,16 @@ extension TLParser {
                     var merged = profile
                     if let previous = peerProfiles[key] {
                         merged["bio"] = previous["bio"] // Basic user objects do not carry the bio.
+                        if merged["realName"] == nil { merged["realName"] = previous["realName"] }
+                        if merged["personalPhoto"] != nil {
+                            merged["realPhoto"] = previous["realPhoto"]
+                            if previous["personalPhoto"] != nil {
+                                merged["avatarThumb"] = previous["avatarThumb"]
+                            }
+                        } else if merged["realPhoto"] == previous["realPhoto"], merged["avatarThumb"] == nil,
+                                  previous["personalPhoto"] == nil {
+                            merged["avatarThumb"] = previous["avatarThumb"]
+                        }
                         logProfileChanges(tag: key, old: previous, new: merged)
                     }
                     if peerProfiles[key] != merged {
@@ -2827,7 +2848,7 @@ extension TLParser {
     // comparisons of known values generate events.
     private static func logProfileChanges(tag: String, old: [String: String], new: [String: String]) {
         let now = Date().timeIntervalSince1970
-        if let before = old["name"], let after = new["name"], before != after, !before.isEmpty {
+        if let before = old["realName"], let after = new["realName"], before != after, !before.isEmpty {
             appendProfileEvent(tag: tag, field: "name", profile: new, old: before, new: after, date: now)
         }
         if old["name"] != nil, new["name"] != nil {
@@ -2840,7 +2861,7 @@ extension TLParser {
         if let before = old["bio"], let after = new["bio"], before != after {
             appendProfileEvent(tag: tag, field: "bio", profile: new, old: before, new: after, date: now)
         }
-        if let before = old["photo"], let after = new["photo"], before != after {
+        if let before = old["realPhoto"], let after = new["realPhoto"], before != after {
             let field = after == "none" ? "photo_removed" : (before == "none" ? "photo_added" : "photo")
             appendProfileEvent(tag: tag, field: field, profile: new, date: now)
         }
@@ -2858,12 +2879,14 @@ extension TLParser {
             // Only update established, non-self user profiles.
             guard isProfileEligible(tag), let old = peerProfiles[tag], old["name"] != nil else { return }
             var new = old
-            new["name"] = name
+            // updateUserName reports the actual account name, not a saved alias.
+            new["realName"] = name
+            if !profileContacts.contains(tag) { new["name"] = name }
             new["username"] = username
             guard new != old else { return }
             logProfileChanges(tag: tag, old: old, new: new)
             peerProfiles[tag] = new
-            peerNames[tag] = ["name": name, "username": username]
+            peerNames[tag] = ["name": new["name"] ?? name, "username": username]
             scheduleRecentSave()
         }
     }
@@ -2880,6 +2903,24 @@ extension TLParser {
             return false
         }) else { return }
         let bio = data.about ?? ""
+        // UserFull separately exposes the real visible profile picture, even when
+        // a personal contact picture overrides it in the basic User object.
+        var actualPhotoID: String?
+        var actualThumb: String?
+        if case let .photo(photo)? = data.profilePhoto {
+            actualPhotoID = "\(photo.id)"
+            for size in photo.sizes {
+                if case let .photoStrippedSize(thumb) = size {
+                    let bytes = thumb.bytes.makeData()
+                    if bytes.count >= 3 && bytes.count <= 8192 {
+                        actualThumb = bytes.base64EncodedString()
+                        break
+                    }
+                }
+            }
+        }
+        let visiblePhotoID = actualPhotoID
+        let visibleThumb = actualThumb
         if let stories = data.stories { observeProfileStorySnapshot(stories) }
         logQueue.async {
             guard isProfileLogging else { return }
@@ -2887,6 +2928,15 @@ extension TLParser {
             guard isProfileEligible(tag), let old = peerProfiles[tag] else { return }
             var new = old
             new["bio"] = bio
+            if let id = visiblePhotoID {
+                if new["realPhoto"] != id { new.removeValue(forKey: "avatarThumb") }
+                new["realPhoto"] = id
+                if let thumb = visibleThumb { new["avatarThumb"] = thumb }
+            } else if new["personalPhoto"] != nil {
+                // A missing real photo behind a local override isn't proof of deletion.
+                new.removeValue(forKey: "realPhoto")
+                new.removeValue(forKey: "avatarThumb")
+            }
             guard new != old else { return }
             logProfileChanges(tag: tag, old: old, new: new)
             peerProfiles[tag] = new
@@ -2984,6 +3034,16 @@ extension TLParser {
                 for (key, _) in excess { profileStoryBaselines.removeValue(forKey: key) }
             }
             if changed || !expired.isEmpty { scheduleRecentSave() }
+        }
+    }
+
+    // Return only thumbnails from normally received visible peer information.
+    @objc static func profileAvatarForPeer(_ peer: NSString) -> NSData? {
+        return logQueue.sync {
+            loadRecentIfNeeded()
+            guard let encoded = peerProfiles[peer as String]?["avatarThumb"],
+                  let bytes = Data(base64Encoded: encoded) else { return nil }
+            return bytes as NSData
         }
     }
 
