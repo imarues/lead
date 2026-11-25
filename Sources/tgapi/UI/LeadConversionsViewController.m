@@ -149,7 +149,7 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title=_url.lastPathComponent;
-    self.view.backgroundColor=UIColor.systemBackgroundColor;
+    self.view.backgroundColor=LeadThemeBackground();
     _imageView=[[UIImageView alloc] initWithFrame:self.view.bounds];
     _imageView.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
     _imageView.contentMode=UIViewContentModeScaleAspectFit;
@@ -217,7 +217,8 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     self.title=@"صور إلى PDF";
     self.fileName=@"الصور";
     self.pageSizeIndex=0;
-    self.tableView.backgroundColor=UIColor.systemGroupedBackgroundColor;
+    self.tableView.backgroundColor=LeadThemeBackground(); self.tableView.tintColor=LeadThemeAccent();
+    self.tableView.separatorColor=[LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.tableView.rowHeight=UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight=58;
 }
@@ -236,8 +237,9 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     static NSString *reuse=@"LeadPDFOptionCell";
     UITableViewCell *cell=[tableView dequeueReusableCellWithIdentifier:reuse];
     if (!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:reuse];
+    cell.backgroundColor=LeadThemeCard(); cell.textLabel.textColor=LeadThemeInk(); cell.detailTextLabel.textColor=LeadThemeMuted(); cell.tintColor=LeadThemeAccent();
     cell.imageView.image=nil;
-    cell.textLabel.textColor=UIColor.labelColor;
+    cell.textLabel.textColor=LeadThemeInk();
     cell.detailTextLabel.text=@"";
     cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;
     if (index.section==0) {
@@ -518,7 +520,8 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title=@"PDF إلى صور";
-    self.tableView.backgroundColor=UIColor.systemGroupedBackgroundColor;
+    self.tableView.backgroundColor=LeadThemeBackground(); self.tableView.tintColor=LeadThemeAccent();
+    self.tableView.separatorColor=[LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.tableView.rowHeight=UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight=85;
 }
@@ -537,9 +540,10 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     static NSString *reuse=@"LeadPDFImageCell";
     UITableViewCell *cell=[tableView dequeueReusableCellWithIdentifier:reuse];
     if(!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuse];
+    cell.backgroundColor=LeadThemeCard(); cell.textLabel.textColor=LeadThemeInk(); cell.detailTextLabel.textColor=LeadThemeMuted(); cell.tintColor=LeadThemeAccent();
     cell.imageView.image=nil;
     cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;
-    cell.textLabel.textColor=UIColor.labelColor;
+    cell.textLabel.textColor=LeadThemeInk();
     cell.detailTextLabel.text=@"";
     if(index.section==0) {
         cell.textLabel.text=@"اختيار PDF من الملفات";
@@ -739,7 +743,8 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title=@"التحويلات";
-    self.tableView.backgroundColor=UIColor.systemGroupedBackgroundColor;
+    self.tableView.backgroundColor=LeadThemeBackground(); self.tableView.tintColor=LeadThemeAccent();
+    self.tableView.separatorColor=[LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.tableView.rowHeight=76;
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 2; }
@@ -753,6 +758,7 @@ static NSArray<NSDictionary *> *LeadPDFPageSizes(void) {
     static NSString *reuse=@"LeadConversionChoice";
     UITableViewCell *cell=[tableView dequeueReusableCellWithIdentifier:reuse];
     if(!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuse];
+    cell.backgroundColor=LeadThemeCard(); cell.textLabel.textColor=LeadThemeInk(); cell.detailTextLabel.textColor=LeadThemeMuted(); cell.tintColor=LeadThemeAccent();
     cell.textLabel.text=index.row==0?@"صور إلى PDF":@"PDF إلى صور";
     cell.detailTextLabel.text=index.row==0?
        @"حدد الصور ثم الاسم والمقاس وThumbnail، وبعدها شارك الملف":
