@@ -198,6 +198,7 @@ func LeadWarpStart(config,user,pass *C.char) C.int {
 //export LeadWarpStop
 func LeadWarpStop(){
  stateMu.Lock();defer stateMu.Unlock()
+ closeAllGroupSets()
  if current!=nil{current.close();current=nil}
 }
 
