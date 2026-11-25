@@ -2546,6 +2546,17 @@ extension TLParser {
         recentOrder = stored["order"] as? [String] ?? Array(recentTexts.keys)
         peerNames = stored["names"] as? [String: [String: String]] ?? [:]
         peerProfiles = stored["profiles"] as? [String: [String: String]] ?? [:]
+        // V3 starts with fresh identity baselines, never comparing legacy aliases
+        // or locally assigned photos with authoritative server observations.
+        if stored["profileSchema"] as? Int != 3 {
+            peerProfiles = peerProfiles.mapValues { old in
+                var clean = old
+                for key in ["realName", "realPhoto", "username", "photo", "personalPhoto", "avatarThumb", "bio"] {
+                    clean.removeValue(forKey: key)
+                }
+                return clean
+            }
+        }
         profileStoryStates = stored["profileStoryStates"] as? [String: [String: Int32]] ?? [:]
         profileStoryBaselines = stored["profileStoryBaselines"] as? [String: Double] ?? [:]
         profileContacts = Set(stored["profileContacts"] as? [String] ?? [])
@@ -2575,7 +2586,7 @@ extension TLParser {
         recentSaveScheduled = true
         logQueue.asyncAfter(deadline: .now() + 8) {
             recentSaveScheduled = false
-            let payload: NSDictionary = ["texts": recentTexts, "order": recentOrder, "names": peerNames, "profiles": peerProfiles, "profileStoryStates": profileStoryStates, "profileStoryBaselines": profileStoryBaselines, "profileContacts": Array(profileContacts), "profilePrivatePeers": Array(profilePrivatePeers)]
+            let payload: NSDictionary = ["profileSchema": 3, "texts": recentTexts, "order": recentOrder, "names": peerNames, "profiles": peerProfiles, "profileStoryStates": profileStoryStates, "profileStoryBaselines": profileStoryBaselines, "profileContacts": Array(profileContacts), "profilePrivatePeers": Array(profilePrivatePeers)]
             payload.write(toFile: recentFilePath, atomically: true)
         }
     }
@@ -2652,21 +2663,37 @@ extension TLParser {
                 if data.flags & Int32((1 << 20) | (1 << 10) | (1 << 13) | (1 << 14)) == 0, !name.isEmpty {
                     var profile = info
                     // Empty is a known absence, distinct from a profile without a name snapshot.
-                    profile["username"] = info["username"] ?? ""
-                    // A saved contact name may be our own alias, not their public name.
-                    if data.flags & Int32(1 << 11) == 0 { profile["realName"] = name }
+                    let contact = data.flags & Int32(1 << 11) != 0
+                    profile["contact"] = contact ? "1" : "0"
+                    // Contact names may be local aliases; only non-contact names
+                    // can establish an independently comparable name baseline.
+                    if !contact { profile["realName"] = name }
+                    // An absent username in a general snapshot is not evidence of removal.
+                    if let username = info["username"] { profile["username"] = username }
                     switch data.photo {
                     case let .userProfilePhoto(photo)?:
                         if photo.flags & Int32(1 << 2) != 0 {
-                            // Telegram marks custom photos that only we can see.
                             profile["personalPhoto"] = "1"
                         } else {
-                            profile["realPhoto"] = "\(photo.photoId)"
+                            profile["avatarId"] = "\(photo.photoId)"
+                            profile["avatarDC"] = "\(photo.dcId)"
+                            if !contact { profile["realPhoto"] = "\(photo.photoId)" }
                             if let bytes = photo.strippedThumb?.makeData(), bytes.count >= 3, bytes.count <= 8192 {
                                 profile["avatarThumb"] = bytes.base64EncodedString()
                             }
                         }
-                    default: profile["realPhoto"] = "none"
+                    case .userProfilePhotoEmpty?:
+                        if !contact { profile["realPhoto"] = "none" }
+                    case nil:
+                        break
+                    }
+                    // Only explicit, ordinarily received status values; nil is unknown.
+                    if let status = data.status {
+                        switch status {
+                        case .userStatusRecently, .userStatusOnline: profile["visibleStatus"] = "recent"
+                        case .userStatusEmpty: profile["visibleStatus"] = "unavailable"
+                        default: profile["visibleStatus"] = "other"
+                        }
                     }
                     profiles["u\(data.id)"] = profile
                 }
@@ -2715,16 +2742,25 @@ extension TLParser {
                 for (key, profile) in profiles where isProfileEligible(key) {
                     var merged = profile
                     if let previous = peerProfiles[key] {
-                        merged["bio"] = previous["bio"] // Basic user objects do not carry the bio.
-                        if merged["realName"] == nil { merged["realName"] = previous["realName"] }
-                        if merged["personalPhoto"] != nil {
+                        merged["bio"] = previous["bio"]
+                        if merged["username"] == nil { merged["username"] = previous["username"] }
+                        if merged["visibleStatus"] == nil { merged["visibleStatus"] = previous["visibleStatus"] }
+                        if merged["contact"] == "1" || merged["personalPhoto"] != nil {
+                            // For contacts only UserFull.profilePhoto is authoritative.
                             merged["realPhoto"] = previous["realPhoto"]
-                            if previous["personalPhoto"] != nil {
-                                merged["avatarThumb"] = previous["avatarThumb"]
-                            }
-                        } else if merged["realPhoto"] == previous["realPhoto"], merged["avatarThumb"] == nil,
-                                  previous["personalPhoto"] == nil {
+                        }
+                        if merged["personalPhoto"] != nil {
+                            // A local override must never replace a cached owner image.
+                            merged["avatarId"] = previous["avatarId"]
+                            merged["avatarDC"] = previous["avatarDC"]
                             merged["avatarThumb"] = previous["avatarThumb"]
+                        } else if merged["avatarId"] == previous["avatarId"], merged["avatarThumb"] == nil {
+                            merged["avatarThumb"] = previous["avatarThumb"]
+                        }
+                        if merged["realPhoto"] == "none" {
+                            merged.removeValue(forKey: "avatarId")
+                            merged.removeValue(forKey: "avatarDC")
+                            merged.removeValue(forKey: "avatarThumb")
                         }
                         logProfileChanges(tag: key, old: previous, new: merged)
                     }
@@ -2834,7 +2870,7 @@ extension TLParser {
                                            date: Double = Date().timeIntervalSince1970,
                                            published: Bool = false, story: Int32? = nil) {
         guard isProfileEligible(tag) else { return }
-        var entry: [String: Any] = ["kind": "profile", "peer": tag, "field": field, "id": 0, "date": date]
+        var entry: [String: Any] = ["kind": "profile", "peer": tag, "field": field, "id": 0, "date": date, "profileSchema": 3]
         if let name = profile["name"], !name.isEmpty { entry["name"] = name }
         if let username = profile["username"], !username.isEmpty { entry["username"] = username }
         if let old = old { entry["old"] = old }
@@ -2848,22 +2884,26 @@ extension TLParser {
     // comparisons of known values generate events.
     private static func logProfileChanges(tag: String, old: [String: String], new: [String: String]) {
         let now = Date().timeIntervalSince1970
-        if let before = old["realName"], let after = new["realName"], before != after, !before.isEmpty {
+        if old["contact"] == "0", new["contact"] == "0",
+           let before = old["realName"], let after = new["realName"], before != after, !before.isEmpty {
             appendProfileEvent(tag: tag, field: "name", profile: new, old: before, new: after, date: now)
         }
-        if old["name"] != nil, new["name"] != nil {
-            let before = old["username"] ?? ""
-            let after = new["username"] ?? ""
-            if before != after {
-                appendProfileEvent(tag: tag, field: "username", profile: new, old: before, new: after, date: now)
-            }
+        if let before = old["username"], let after = new["username"], before != after {
+            appendProfileEvent(tag: tag, field: "username", profile: new, old: before, new: after, date: now)
         }
         if let before = old["bio"], let after = new["bio"], before != after {
             appendProfileEvent(tag: tag, field: "bio", profile: new, old: before, new: after, date: now)
         }
-        if let before = old["realPhoto"], let after = new["realPhoto"], before != after {
+        if old["contact"] == new["contact"],
+           let before = old["realPhoto"], let after = new["realPhoto"], before != after {
             let field = after == "none" ? "photo_removed" : (before == "none" ? "photo_added" : "photo")
             appendProfileEvent(tag: tag, field: field, profile: new, date: now)
+        }
+        // A status transition is only an observation, not proof of blocking.
+        if old["visibleStatus"] == "recent", new["visibleStatus"] == "unavailable" {
+            appendProfileEvent(tag: tag, field: "status_unavailable", profile: new, date: now)
+        } else if old["visibleStatus"] == "unavailable", new["visibleStatus"] == "recent" {
+            appendProfileEvent(tag: tag, field: "status_recent", profile: new, date: now)
         }
     }
 
@@ -2879,9 +2919,12 @@ extension TLParser {
             // Only update established, non-self user profiles.
             guard isProfileEligible(tag), let old = peerProfiles[tag], old["name"] != nil else { return }
             var new = old
-            // updateUserName reports the actual account name, not a saved alias.
-            new["realName"] = name
-            if !profileContacts.contains(tag) { new["name"] = name }
+            // The server may replay a contact alias change as updateUserName.
+            // Never treat that as an independently verified owner rename.
+            if old["contact"] == "0" && !profileContacts.contains(tag) {
+                new["realName"] = name
+                new["name"] = name
+            }
             new["username"] = username
             guard new != old else { return }
             logProfileChanges(tag: tag, old: old, new: new)
@@ -2906,20 +2949,28 @@ extension TLParser {
         // UserFull separately exposes the real visible profile picture, even when
         // a personal contact picture overrides it in the basic User object.
         var actualPhotoID: String?
+        var actualDC: String?
         var actualThumb: String?
         if case let .photo(photo)? = data.profilePhoto {
             actualPhotoID = "\(photo.id)"
+            actualDC = "\(photo.dcId)"
             for size in photo.sizes {
-                if case let .photoStrippedSize(thumb) = size {
+                if case let .photoCachedSize(cached) = size {
+                    let bytes = cached.bytes.makeData()
+                    if bytes.count >= 3 && bytes.count <= 65536 {
+                        actualThumb = bytes.base64EncodedString()
+                        break
+                    }
+                } else if case let .photoStrippedSize(thumb) = size, actualThumb == nil {
                     let bytes = thumb.bytes.makeData()
                     if bytes.count >= 3 && bytes.count <= 8192 {
                         actualThumb = bytes.base64EncodedString()
-                        break
                     }
                 }
             }
         }
         let visiblePhotoID = actualPhotoID
+        let visibleDC = actualDC
         let visibleThumb = actualThumb
         if let stories = data.stories { observeProfileStorySnapshot(stories) }
         logQueue.async {
@@ -2929,12 +2980,16 @@ extension TLParser {
             var new = old
             new["bio"] = bio
             if let id = visiblePhotoID {
-                if new["realPhoto"] != id { new.removeValue(forKey: "avatarThumb") }
+                if new["avatarId"] != id { new.removeValue(forKey: "avatarThumb") }
                 new["realPhoto"] = id
+                new["avatarId"] = id
+                new["avatarDC"] = visibleDC
                 if let thumb = visibleThumb { new["avatarThumb"] = thumb }
             } else if new["personalPhoto"] != nil {
                 // A missing real photo behind a local override isn't proof of deletion.
                 new.removeValue(forKey: "realPhoto")
+                new.removeValue(forKey: "avatarId")
+                new.removeValue(forKey: "avatarDC")
                 new.removeValue(forKey: "avatarThumb")
             }
             guard new != old else { return }
@@ -3039,16 +3094,46 @@ extension TLParser {
 
     // Return only thumbnails from normally received visible peer information.
     @objc static func profileAvatarForPeer(_ peer: NSString) -> NSData? {
-        return logQueue.sync {
+        let profile: [String: String]? = logQueue.sync {
             loadRecentIfNeeded()
-            guard let encoded = peerProfiles[peer as String]?["avatarThumb"],
-                  let bytes = Data(base64Encoded: encoded) else { return nil }
-            return bytes as NSData
+            return peerProfiles[peer as String]
         }
+        guard let profile = profile else { return nil }
+        // Prefer the actual downloaded image in the active account's MediaBox.
+        // No directory crawling, other accounts, or new network requests.
+        if let context = sharedContext,
+           let account = diagChild(context, "account"),
+           let basePath = diagChild(account, "basePath") as? String,
+           let photo = profile["avatarId"], Int64(photo) != nil,
+           let dc = profile["avatarDC"], Int32(dc) != nil {
+            let root = URL(fileURLWithPath: basePath).appendingPathComponent("postbox/media", isDirectory: true)
+            let names = ["telegram-peer-photo-size-\(dc)-\(photo)-0-0-0",
+                         "telegram-peer-photo-size-\(dc)-\(photo)-1-0-0",
+                         "telegram-cloud-photo-size-\(dc)-\(photo)-s",
+                         "telegram-cloud-photo-size-\(dc)-\(photo)-m"]
+            for name in names {
+                let url = root.appendingPathComponent(name)
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let length = attrs[.size] as? NSNumber, length.intValue > 3, length.intValue <= 524288,
+                   let bytes = try? Data(contentsOf: url), bytes.count <= 524288 {
+                    return bytes as NSData
+                }
+            }
+        }
+        guard let encoded = profile["avatarThumb"], let bytes = Data(base64Encoded: encoded) else { return nil }
+        return bytes as NSData
     }
 
     @objc static func messageLogEntries() -> NSArray {
-        return (UserDefaults.standard.array(forKey: logUdKey) ?? []) as NSArray
+        let entries = UserDefaults.standard.array(forKey: logUdKey) as? [[String: Any]] ?? []
+        // Hide old unverified identity events without deleting underlying history.
+        // Story and message records are unaffected.
+        return entries.filter { entry in
+            guard entry["kind"] as? String == "profile" else { return true }
+            let field = entry["field"] as? String ?? ""
+            let legacyIdentity = ["name", "username", "photo", "photo_added", "photo_removed"].contains(field)
+            return !legacyIdentity || entry["profileSchema"] as? Int == 3
+        } as NSArray
     }
 
     @objc static func clearMessageLog() {
