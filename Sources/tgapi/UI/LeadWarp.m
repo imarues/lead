@@ -108,7 +108,7 @@ void LeadWarpShow(UIViewController *host) {
     [host presentViewController:alert animated:YES completion:nil];
     return;
   }
-  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تجاوز حظر الاتصالات" message:@"سيُنشئ Lead إعدادات WARP لهذا الجهاز تلقائياً باستخدام خدمة تسجيل Cloudflare غير الرسمية. المفتاح الخاص يبقى على الجهاز. هذه نسخة تجريبية للمكالمات الفردية عبر TCP. بالمتابعة توافق على شروط Cloudflare." preferredStyle:UIAlertControllerStyleAlert];
+  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تجاوز حظر الاتصالات" message:@"سيُنشئ Lead إعدادات WARP لهذا الجهاز تلقائياً باستخدام خدمة تسجيل Cloudflare غير الرسمية. المفتاح الخاص يبقى على الجهاز. نسخة تجريبية للمكالمات الفردية والجماعية عبر TCP وUDP. بالمتابعة توافق على شروط Cloudflare." preferredStyle:UIAlertControllerStyleAlert];
   [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
   [alert addAction:[UIAlertAction actionWithTitle:@"شروط الاستخدام" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
     [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://www.cloudflare.com/application/terms/"] options:@{} completionHandler:nil];
@@ -134,7 +134,7 @@ void LeadWarpShow(UIViewController *host) {
       }
       int port = profile.length ? LeadWarpStart((char *)profile.UTF8String, (char *)user.UTF8String, (char *)pass.UTF8String) : -10;
       NSString *message = !profile.length ? LeadWarpRegistrationError(registrationStatus) :
-        (port > 0 && port <= 65535 ? @"تم تأكيد اتصال WARP. جرّب مكالمة فردية جديدة." :
+        (port > 0 && port <= 65535 ? @"تم تأكيد اتصال WARP. جرّب مكالمة فردية أو جماعية جديدة. تأكيد النفق لا يعني نجاح الوسائط بعد." :
           [NSString stringWithFormat:@"فشل فحص النفق (%d). لم يتم تغيير مسار البروكسي الحالي.", port]);
       dispatch_async(dispatch_get_main_queue(), ^{
         @synchronized([NSUserDefaults class]) {
