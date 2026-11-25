@@ -70,6 +70,8 @@ static NSString *const kHeaderId = @"LeadHeader";
     LeadCell *leadCell = (LeadCell *)cell;
     if (!row || ![leadCell isKindOfClass:[LeadCell class]]) continue;
     if (row.style == LeadRowStyleToggle) {
+      leadCell.toggle.enabled = row.enabledBlock ? row.enabledBlock() : YES;
+      if (row.subtitleBlock) leadCell.subtitleLabel.text = row.subtitle;
       if (leadCell.toggle.on != row.isOn) {
         [leadCell.toggle setOn:row.isOn animated:YES];
         [leadCell.tile setActive:row.isOn animated:YES];
@@ -130,11 +132,12 @@ static NSString *const kHeaderId = @"LeadHeader";
   [cell setDestructive:row.destructive];
   if (row.style == LeadRowStyleToggle) {
     [cell showToggle:row.isOn];
+    cell.toggle.enabled = row.enabledBlock ? row.enabledBlock() : YES;
     NSString *key = row.defaultsKey;
     __weak typeof(self) weakSelf = self;
     void (^toggleBlock)(BOOL, UIViewController *) = row.toggleBlock;
     cell.onToggle = ^(BOOL on) {
-      LeadSetBool(key, on);
+      if (key.length) LeadSetBool(key, on);
       if (toggleBlock) toggleBlock(on, weakSelf);
     };
   } else {
@@ -190,6 +193,7 @@ static NSString *const kHeaderId = @"LeadHeader";
   if (row.style == LeadRowStyleToggle) {
     // The whole row is a hit target, not just the switch.
     LeadCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    if (!cell.toggle.enabled) return;
     [cell.toggle setOn:!cell.toggle.on animated:YES];
     [cell.toggle sendActionsForControlEvents:UIControlEventValueChanged];
     return;
