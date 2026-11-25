@@ -27,7 +27,7 @@ static NSString *LeadDiffWord(NSString *token) {
 
 // Word-level LCS diff of `text` against `previous`.
 static NSAttributedString *LeadDiffText(NSString *previous, NSString *text, UIFont *font) {
-  NSDictionary *plain = @{ NSFontAttributeName : font, NSForegroundColorAttributeName : UIColor.labelColor };
+  NSDictionary *plain = @{ NSFontAttributeName : font, NSForegroundColorAttributeName : LeadThemeInk() };
   if (previous.length == 0) return [[NSAttributedString alloc] initWithString:text attributes:plain];
   NSArray<NSString *> *a = LeadDiffTokens(previous);
   NSArray<NSString *> *b = LeadDiffTokens(text);
@@ -50,14 +50,14 @@ static NSAttributedString *LeadDiffText(NSString *previous, NSString *text, UIFo
 
   NSDictionary *added = @{
     NSFontAttributeName : font,
-    NSForegroundColorAttributeName : UIColor.labelColor,
+    NSForegroundColorAttributeName : LeadThemeInk(),
     NSBackgroundColorAttributeName : [UIColor.systemGreenColor colorWithAlphaComponent:0.22],
   };
   NSDictionary *removed = @{
     NSFontAttributeName : font,
-    NSForegroundColorAttributeName : UIColor.tertiaryLabelColor,
+    NSForegroundColorAttributeName : [LeadThemeMuted() colorWithAlphaComponent:0.70],
     NSStrikethroughStyleAttributeName : @(NSUnderlineStyleSingle),
-    NSStrikethroughColorAttributeName : UIColor.tertiaryLabelColor,
+    NSStrikethroughColorAttributeName : [LeadThemeMuted() colorWithAlphaComponent:0.70],
   };
   NSMutableAttributedString *result = [NSMutableAttributedString new];
   // Only the word carries the change style; its trailing space stays plain.
@@ -151,8 +151,8 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
-  self.view.tintColor = UIColor.labelColor;
+  self.view.backgroundColor = LeadThemeBackground();
+  self.view.tintColor = LeadThemeInk();
   self.title = LeadL(@"UI_EDIT_HISTORY_TITLE");
   self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(close)];
   if (self.versions.count > 0) {
@@ -189,7 +189,7 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
   UILabel *count = [UILabel new];
   count.text = [NSString stringWithFormat:LeadL(@"UI_EDIT_COUNT"), (long)self.versions.count];
   count.font = LeadFont(13, UIFontWeightMedium);
-  count.textColor = UIColor.secondaryLabelColor;
+  count.textColor = LeadThemeMuted();
   [stack addArrangedSubview:count];
   [stack setCustomSpacing:14 afterView:count];
 
@@ -234,8 +234,8 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
   dot.translatesAutoresizingMaskIntoConstraints = NO;
   dot.layer.cornerRadius = 5;
   dot.layer.borderWidth = 1.5;
-  dot.layer.borderColor = (current ? UIColor.labelColor : UIColor.tertiaryLabelColor).CGColor;
-  dot.backgroundColor = current ? UIColor.labelColor : UIColor.systemGroupedBackgroundColor;
+  dot.layer.borderColor = (current ? LeadThemeInk() : [LeadThemeMuted() colorWithAlphaComponent:0.70]).CGColor;
+  dot.backgroundColor = current ? LeadThemeInk() : LeadThemeBackground();
   UIView *line = [UIView new];
   line.translatesAutoresizingMaskIntoConstraints = NO;
   line.backgroundColor = UIColor.separatorColor;
@@ -247,12 +247,12 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
   title.translatesAutoresizingMaskIntoConstraints = NO;
   NSMutableAttributedString *heading = [[NSMutableAttributedString alloc] initWithString:label attributes:@{
     NSFontAttributeName : LeadFont(13, UIFontWeightSemibold),
-    NSForegroundColorAttributeName : current ? UIColor.labelColor : UIColor.secondaryLabelColor,
+    NSForegroundColorAttributeName : current ? LeadThemeInk() : LeadThemeMuted(),
   }];
   if (date.length) {
     [heading appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  " stringByAppendingString:date] attributes:@{
       NSFontAttributeName : LeadFont(13, UIFontWeightRegular),
-      NSForegroundColorAttributeName : UIColor.tertiaryLabelColor,
+      NSForegroundColorAttributeName : [LeadThemeMuted() colorWithAlphaComponent:0.70],
     }]];
   }
   title.attributedText = heading;
@@ -260,7 +260,7 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
 
   UIView *card = [UIView new];
   card.translatesAutoresizingMaskIntoConstraints = NO;
-  card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+  card.backgroundColor = LeadThemeCard();
   card.layer.cornerRadius = 16;
   card.layer.cornerCurve = kCACornerCurveContinuous;
   card.tag = (NSInteger)index;
@@ -276,7 +276,7 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
   textView.textContainer.lineFragmentPadding = 0;
   textView.attributedText = body.length ? body : [[NSAttributedString alloc] initWithString:LeadL(@"UI_LOG_NO_TEXT") attributes:@{
     NSFontAttributeName : LeadFont(16, UIFontWeightRegular),
-    NSForegroundColorAttributeName : UIColor.tertiaryLabelColor,
+    NSForegroundColorAttributeName : [LeadThemeMuted() colorWithAlphaComponent:0.70],
   }];
   [card addSubview:textView];
 
@@ -313,7 +313,7 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
   stack.layoutMarginsRelativeArrangement = YES;
   UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:self.mediaReplaced ? @"photo.on.rectangle" : @"pencil.and.outline"
                                                                  withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightLight]]];
-  icon.tintColor = UIColor.tertiaryLabelColor;
+  icon.tintColor = [LeadThemeMuted() colorWithAlphaComponent:0.70];
   UILabel *title = [UILabel new];
   title.text = LeadL(self.mediaReplaced ? @"UI_EDIT_MEDIA" : @"UI_EDIT_EMPTY");
   title.font = LeadFont(17, UIFontWeightSemibold);
@@ -326,7 +326,7 @@ static NSString *LeadHistoryDateText(NSNumber *timestamp) {
     UILabel *hint = [UILabel new];
     hint.text = LeadL(@"UI_EDIT_EMPTY_HINT");
     hint.font = LeadFont(14, UIFontWeightRegular);
-    hint.textColor = UIColor.secondaryLabelColor;
+    hint.textColor = LeadThemeMuted();
     hint.textAlignment = NSTextAlignmentCenter;
     hint.numberOfLines = 0;
     [stack addArrangedSubview:hint];
