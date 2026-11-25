@@ -2026,8 +2026,8 @@ class TLParser: NSObject {
             case .messagesNotModified:
                 break
             }
-            let changedChats = processPeers(users: users, chats: chats)
             let changedMsgs = stripTTLMessages(messages)
+            let changedChats = processPeers(users: users, chats: chats)
             modified = changedChats || changedMsgs
         } else if let chatFull = result as? Api.messages.ChatFull {
             switch chatFull {
@@ -2146,6 +2146,7 @@ class TLParser: NSObject {
         } else if let allStories = result as? Api.stories.AllStories {
             switch allStories {
             case let .allStories(data):
+                let changedPeers = processPeers(users: data.users, chats: data.chats)
                 if isHideStories {
                     // Empty feed; keep `state` so Telegram's incremental sync stays valid.
                     // has_more:flags.0
@@ -2163,19 +2164,17 @@ class TLParser: NSObject {
                     }
                     modified = changed
                 }
-                if processPeers(users: data.users, chats: data.chats) {
-                    modified = true
-                }
+                if changedPeers { modified = true }
             case .allStoriesNotModified:
                 break
             }
         } else if let peerStories = result as? Api.stories.PeerStories {
             switch peerStories {
             case let .peerStories(data):
+                let changedPeers = processPeers(users: data.users, chats: data.chats)
                 observeProfileStorySnapshot(data.stories)
                 let kept = keepDeletedStories(in: data.stories)
                 let changedStories = unlockPeerStories(data.stories) || kept
-                let changedPeers = processPeers(users: data.users, chats: data.chats)
                 modified = changedStories || changedPeers
             }
         } else if let stories = result as? Api.stories.Stories {
@@ -2491,6 +2490,13 @@ extension TLParser {
     private static var globalIdPeers: [Int32: String] = [:]  // private/basic-group id -> "u…"/"g…"
     private static var peerNames: [String: [String: String]] = [:] // "c123" -> name/username
     private static var peerProfiles: [String: [String: String]] = [:] // "u123" -> name/username/photo id
+    private static var profileContacts: Set<String> = []
+    private static var profilePrivatePeers: Set<String> = []
+
+    // Called on logQueue. Only known contacts or actual private-message peers.
+    private static func isProfileEligible(_ tag: String) -> Bool {
+        return tag.hasPrefix("u") && (profileContacts.contains(tag) || profilePrivatePeers.contains(tag))
+    }
     // Only metadata from normally received story updates; no caption or media.
     private static var profileStoryStates: [String: [String: Int32]] = [:]
     private static var profileStoryBaselines: [String: Double] = [:]
@@ -2542,12 +2548,25 @@ extension TLParser {
         peerProfiles = stored["profiles"] as? [String: [String: String]] ?? [:]
         profileStoryStates = stored["profileStoryStates"] as? [String: [String: Int32]] ?? [:]
         profileStoryBaselines = stored["profileStoryBaselines"] as? [String: Double] ?? [:]
+        profileContacts = Set(stored["profileContacts"] as? [String] ?? [])
+        profilePrivatePeers = Set(stored["profilePrivatePeers"] as? [String] ?? [])
+        // Migrate only actual private message keys, not previously seen profiles.
         for key in recentOrder {
             let parts = key.split(separator: ":")
             if parts.count == 2, !parts[0].hasPrefix("c"), let id = Int32(parts[1]) {
-                globalIdPeers[id] = String(parts[0])
+                let tag = String(parts[0])
+                globalIdPeers[id] = tag
+                if tag.hasPrefix("u"), id > 0 { profilePrivatePeers.insert(tag) }
             }
         }
+        // Discard old broad profile snapshots, while preserving existing log entries.
+        peerProfiles = peerProfiles.filter { isProfileEligible($0.key) }
+        profileStoryBaselines = profileStoryBaselines.filter { isProfileEligible($0.key) }
+        profileStoryStates = profileStoryStates.filter { entry in
+            guard let tag = entry.key.split(separator: ":").first else { return false }
+            return isProfileEligible(String(tag))
+        }
+        scheduleRecentSave()
     }
 
     // Called on logQueue. Batches disk writes: the cache changes with every update.
@@ -2556,7 +2575,7 @@ extension TLParser {
         recentSaveScheduled = true
         logQueue.asyncAfter(deadline: .now() + 8) {
             recentSaveScheduled = false
-            let payload: NSDictionary = ["texts": recentTexts, "order": recentOrder, "names": peerNames, "profiles": peerProfiles, "profileStoryStates": profileStoryStates, "profileStoryBaselines": profileStoryBaselines]
+            let payload: NSDictionary = ["texts": recentTexts, "order": recentOrder, "names": peerNames, "profiles": peerProfiles, "profileStoryStates": profileStoryStates, "profileStoryBaselines": profileStoryBaselines, "profileContacts": Array(profileContacts), "profilePrivatePeers": Array(profilePrivatePeers)]
             payload.write(toFile: recentFilePath, atomically: true)
         }
     }
@@ -2570,6 +2589,7 @@ extension TLParser {
 
     // Called on logQueue.
     private static func remember(tag: String, id: Int32, text: String) {
+        if tag.hasPrefix("u"), id > 0 { profilePrivatePeers.insert(tag) }
         let key = "\(tag):\(id)"
         if recentTexts[key] == nil {
             recentOrder.append(key)
@@ -2612,14 +2632,24 @@ extension TLParser {
         guard isLogging, !(users.isEmpty && chats.isEmpty) else { return }
         var found: [String: [String: String]] = [:]
         var profiles: [String: [String: String]] = [:]
+        var contactFlags: [String: Bool] = [:]
+        var excluded: Set<String> = []
         for user in users {
             if case let .user(data) = user {
                 let name = [data.firstName, data.lastName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
                 var info = ["name": name]
                 if let username = visibleProfileUsername(data.usernames, fallback: data.username) { info["username"] = username }
                 if !name.isEmpty || info["username"] != nil { found["u\(data.id)"] = info }
-                // min:flags.20 objects are partial, self:flags.10 is you, deleted:flags.13 has no profile.
-                if data.flags & Int32((1 << 20) | (1 << 10) | (1 << 13)) == 0, !name.isEmpty {
+                // Do not interpret a partial user as a contact removal.
+                let tag = "u\(data.id)"
+                if data.flags & Int32(1 << 20) == 0 {
+                    if data.flags & Int32((1 << 10) | (1 << 13) | (1 << 14)) != 0 {
+                        excluded.insert(tag) // Self, deleted users and bots.
+                    } else {
+                        contactFlags[tag] = data.flags & Int32(1 << 11) != 0
+                    }
+                }
+                if data.flags & Int32((1 << 20) | (1 << 10) | (1 << 13) | (1 << 14)) == 0, !name.isEmpty {
                     var profile = info
                     // Empty is a known absence, distinct from a profile without a name snapshot.
                     profile["username"] = info["username"] ?? ""
@@ -2643,12 +2673,35 @@ extension TLParser {
             default: break
             }
         }
-        guard !found.isEmpty else { return }
+        guard !found.isEmpty || !contactFlags.isEmpty || !excluded.isEmpty else { return }
         logQueue.async {
             loadRecentIfNeeded()
             var changed = false
-            if UserDefaults.standard.bool(forKey: "LeadProfileChangesLog") {
-                for (key, profile) in profiles {
+            for tag in excluded {
+                if profileContacts.remove(tag) != nil { changed = true }
+                if profilePrivatePeers.remove(tag) != nil { changed = true }
+                if peerProfiles.removeValue(forKey: tag) != nil { changed = true }
+                if profileStoryBaselines.removeValue(forKey: tag) != nil { changed = true }
+            }
+            for (tag, contact) in contactFlags {
+                if contact {
+                    if profileContacts.insert(tag).inserted { changed = true }
+                } else if profileContacts.remove(tag) != nil {
+                    changed = true
+                }
+                if !isProfileEligible(tag) {
+                    if peerProfiles.removeValue(forKey: tag) != nil { changed = true }
+                    if profileStoryBaselines.removeValue(forKey: tag) != nil { changed = true }
+                }
+            }
+            if changed {
+                profileStoryStates = profileStoryStates.filter { entry in
+                    guard let tag = entry.key.split(separator: ":").first else { return false }
+                    return isProfileEligible(String(tag))
+                }
+            }
+            if isProfileLogging {
+                for (key, profile) in profiles where isProfileEligible(key) {
                     var merged = profile
                     if let previous = peerProfiles[key] {
                         merged["bio"] = previous["bio"] // Basic user objects do not carry the bio.
@@ -2759,6 +2812,7 @@ extension TLParser {
                                            old: String? = nil, new: String? = nil,
                                            date: Double = Date().timeIntervalSince1970,
                                            published: Bool = false, story: Int32? = nil) {
+        guard isProfileEligible(tag) else { return }
         var entry: [String: Any] = ["kind": "profile", "peer": tag, "field": field, "id": 0, "date": date]
         if let name = profile["name"], !name.isEmpty { entry["name"] = name }
         if let username = profile["username"], !username.isEmpty { entry["username"] = username }
@@ -2802,7 +2856,7 @@ extension TLParser {
             guard isProfileLogging else { return }
             loadRecentIfNeeded()
             // Only update established, non-self user profiles.
-            guard let old = peerProfiles[tag], old["name"] != nil else { return }
+            guard isProfileEligible(tag), let old = peerProfiles[tag], old["name"] != nil else { return }
             var new = old
             new["name"] = name
             new["username"] = username
@@ -2830,7 +2884,7 @@ extension TLParser {
         logQueue.async {
             guard isProfileLogging else { return }
             loadRecentIfNeeded()
-            guard let old = peerProfiles[tag] else { return }
+            guard isProfileEligible(tag), let old = peerProfiles[tag] else { return }
             var new = old
             new["bio"] = bio
             guard new != old else { return }
@@ -2876,6 +2930,7 @@ extension TLParser {
         logQueue.async {
             guard isProfileLogging else { return }
             loadRecentIfNeeded()
+            guard isProfileEligible(tag) else { return }
             let baseline = profileStoryBaselines[tag]
             let profile = peerProfiles[tag] ?? peerNames[tag] ?? [:]
             var changed = false
