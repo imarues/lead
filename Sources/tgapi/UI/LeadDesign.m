@@ -42,6 +42,22 @@ UIColor *LeadThemeMuted(void) { return [UIColor colorWithRed:0.82 green:0.77 blu
 }
 @end
 
+void KiraStyleListCell(UITableViewCell *cell) {
+  cell.backgroundColor = LeadThemeCard();
+  if (![cell.backgroundView isKindOfClass:LeadVioletSurface.class])
+    cell.backgroundView = [[LeadVioletSurface alloc] initWithHero:NO];
+  cell.tintColor = LeadThemeAccent();
+  cell.textLabel.textColor = LeadThemeInk();
+  cell.textLabel.font = LeadFont(15, UIFontWeightMedium);
+  cell.detailTextLabel.textColor = LeadThemeMuted();
+  cell.detailTextLabel.font = LeadFont(13, UIFontWeightRegular);
+  if (!cell.selectedBackgroundView) {
+    UIView *selected = [UIView new];
+    selected.backgroundColor = [LeadThemeAccent() colorWithAlphaComponent:0.22];
+    cell.selectedBackgroundView = selected;
+  }
+}
+
 @implementation LeadThemeHeader
 + (Class)layerClass { return CAGradientLayer.class; }
 - (instancetype)initWithFrame:(CGRect)frame {
