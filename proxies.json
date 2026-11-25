@@ -4,42 +4,5 @@
     "tg://proxy?server=termsnal.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09",
     "tg://proxy?server=nocloudnew.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09"
   ],
-  "call_proxies": [
-    {
-      "name": "إتصال 1",
-      "link": "tg://socks?server=45.74.31.40&port=4161",
-      "calls": true,
-      "type": "socks5"
-    },
-    {
-      "name": "إتصال 2",
-      "link": "tg://socks?server=176.9.107.170&port=1083",
-      "calls": true,
-      "type": "socks5"
-    },
-    {
-      "name": "إتصال 3",
-      "link": "tg://socks?server=123.58.219.171&port=10808",
-      "calls": true,
-      "type": "socks5"
-    },
-    {
-      "name": "إتصال 4",
-      "link": "tg://socks?server=47.251.166.203&port=1080",
-      "calls": true,
-      "type": "socks5"
-    },
-    {
-      "name": "إتصال 5",
-      "link": "tg://socks?server=82.180.146.251&port=10800",
-      "calls": true,
-      "type": "socks5"
-    },
-    {
-      "name": "إتصال 6",
-      "link": "tg://socks?server=43.134.39.221&port=10000",
-      "calls": true,
-      "type": "socks5"
-    }
-  ]
+  "call_proxies": []
 }
