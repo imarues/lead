@@ -12,8 +12,9 @@ NSArray<NSDictionary *> *LeadMessageLogEntries(void) {
   return [entries isKindOfClass:[NSArray class]] ? entries : @[];
 }
 
-@interface LeadMessageLogViewController ()
+@interface LeadMessageLogViewController () <UISearchBarDelegate>
 @property (nonatomic, strong) UISegmentedControl *segments;
+@property (nonatomic, strong) UISearchBar *profileSearch;
 @property (nonatomic, strong) NSArray<NSDictionary *> *entries;
 @property (nonatomic, strong) UIView *emptyView;
 @property (nonatomic, strong) UILabel *emptyTitle;
@@ -40,10 +41,21 @@ NSArray<NSDictionary *> *LeadMessageLogEntries(void) {
   UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 52)];
   self.segments.translatesAutoresizingMaskIntoConstraints = NO;
   [header addSubview:self.segments];
+  self.profileSearch = [[UISearchBar alloc] initWithFrame:CGRectZero];
+  self.profileSearch.searchBarStyle = UISearchBarStyleMinimal;
+  self.profileSearch.placeholder = LeadL(@"UI_PROFILE_FILTER_HINT");
+  self.profileSearch.delegate = self;
+  self.profileSearch.hidden = YES;
+  self.profileSearch.translatesAutoresizingMaskIntoConstraints = NO;
+  [header addSubview:self.profileSearch];
   [NSLayoutConstraint activateConstraints:@[
     [self.segments.leadingAnchor constraintEqualToAnchor:header.layoutMarginsGuide.leadingAnchor],
     [self.segments.trailingAnchor constraintEqualToAnchor:header.layoutMarginsGuide.trailingAnchor],
-    [self.segments.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+    [self.segments.centerYAnchor constraintEqualToAnchor:header.topAnchor constant:26],
+    [self.profileSearch.topAnchor constraintEqualToAnchor:header.topAnchor constant:52],
+    [self.profileSearch.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:8],
+    [self.profileSearch.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-8],
+    [self.profileSearch.heightAnchor constraintEqualToConstant:48],
   ]];
   self.tableView.tableHeaderView = header;
 
@@ -65,18 +77,45 @@ NSArray<NSDictionary *> *LeadMessageLogEntries(void) {
 
 - (void)reload {
   NSString *kind = self.currentKind;
+  BOOL profiles = [kind isEqualToString:@"profile"];
+  UIView *header = self.tableView.tableHeaderView;
+  CGFloat height = profiles ? 104 : 52;
+  self.profileSearch.hidden = !profiles;
+  if (!profiles) [self.profileSearch resignFirstResponder];
+  if (header && CGRectGetHeight(header.frame) != height) {
+    CGRect frame = header.frame;
+    frame.size.height = height;
+    header.frame = frame;
+    self.tableView.tableHeaderView = header;
+  }
+  NSString *query = profiles ? [self.profileSearch.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : nil;
   NSMutableArray *filtered = [NSMutableArray array];
   for (NSDictionary *entry in LeadMessageLogEntries()) {
-    if ([entry isKindOfClass:[NSDictionary class]] && [entry[@"kind"] isEqualToString:kind]) [filtered addObject:entry];
+    if (![entry isKindOfClass:[NSDictionary class]] || ![entry[@"kind"] isEqualToString:kind]) continue;
+    if (query.length) {
+      NSString *haystack = [NSString stringWithFormat:@"%@ %@ %@ %@ %@", [self titleForEntry:entry],
+                           entry[@"username"] ?: @"", entry[@"peer"] ?: @"",
+                           LeadProfileChangeText(entry), [self profileTimestampForEntry:entry]];
+      if (![haystack localizedStandardContainsString:query]) continue;
+    }
+    [filtered addObject:entry];
   }
   self.entries = filtered;
   NSArray *emptyKeys = @[ @"UI_LOG_EMPTY_DELETED", @"UI_LOG_EMPTY_EDITED", @"UI_LOG_EMPTY_PROFILES" ];
   NSString *emptyKey = emptyKeys[MAX(0, MIN(2, self.segments.selectedSegmentIndex))];
-  self.emptyTitle.text = LeadL(emptyKey);
+  self.emptyTitle.text = LeadL(query.length ? @"UI_PROFILE_FILTER_EMPTY" : emptyKey);
   self.emptyHint.text = LeadL([kind isEqualToString:@"profile"] ? @"UI_LOG_EMPTY_PROFILES_HINT" : @"UI_LOG_EMPTY_HINT");
   self.tableView.backgroundView = filtered.count ? nil : self.emptyView;
   self.navigationItem.rightBarButtonItem.enabled = LeadMessageLogEntries().count > 0;
   [self.tableView reloadData];
+}
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+  if ([self.currentKind isEqualToString:@"profile"]) [self reload];
+}
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+  [searchBar resignFirstResponder];
 }
 
 - (void)segmentChanged {
@@ -126,12 +165,21 @@ NSString *LeadProfileChangeText(NSDictionary *entry) {
   NSString *old = [entry[@"old"] isKindOfClass:[NSString class]] ? entry[@"old"] : nil;
   NSString *now = [entry[@"text"] isKindOfClass:[NSString class]] ? entry[@"text"] : nil;
   if ([field isEqualToString:@"photo"]) return LeadL(@"UI_PROFILE_PHOTO_CHANGED");
+  if ([field isEqualToString:@"photo_added"]) return LeadL(@"UI_PROFILE_PHOTO_ADDED");
   if ([field isEqualToString:@"photo_removed"]) return LeadL(@"UI_PROFILE_PHOTO_REMOVED");
+  if ([field isEqualToString:@"story_seen"]) return LeadL(@"UI_PROFILE_STORY_SEEN");
+  if ([field isEqualToString:@"story_removed"]) return LeadL(@"UI_PROFILE_STORY_REMOVED");
+
+  NSString *label = LeadL(@"UI_PROFILE_NAME");
+  if ([field isEqualToString:@"bio"]) label = LeadL(@"UI_PROFILE_BIO");
   if ([field isEqualToString:@"username"]) {
-    return [NSString stringWithFormat:@"%@: %@ → %@", LeadL(@"UI_PROFILE_USERNAME"),
-            old.length ? [@"@" stringByAppendingString:old] : @"—", now.length ? [@"@" stringByAppendingString:now] : @"—"];
+    label = LeadL(@"UI_PROFILE_USERNAME");
+    if (old.length) old = [@"@" stringByAppendingString:old];
+    if (now.length) now = [@"@" stringByAppendingString:now];
   }
-  return [NSString stringWithFormat:@"%@: %@ → %@", LeadL(@"UI_PROFILE_NAME"), old ?: @"—", now ?: @"—"];
+  NSString *empty = LeadL(@"UI_PROFILE_EMPTY_VALUE");
+  NSString *change = [NSString stringWithFormat:LeadL(@"UI_PROFILE_CHANGE_FORMAT"), old.length ? old : empty, now.length ? now : empty];
+  return [NSString stringWithFormat:@"%@\n%@", [NSString stringWithFormat:LeadL(@"UI_PROFILE_CHANGE_FIELD"), label], change];
 }
 
 static NSString *LeadLogText(id value) {
@@ -163,13 +211,35 @@ static NSString *LeadLogText(id value) {
   return [NSCalendar.currentCalendar isDateInToday:date] ? [time stringFromDate:date] : [day stringFromDate:date];
 }
 
+- (NSString *)profileTimestampForEntry:(NSDictionary *)entry {
+  NSNumber *value = [entry[@"date"] isKindOfClass:NSNumber.class] ? entry[@"date"] : nil;
+  if (value.doubleValue <= 0) return @"";
+  NSDate *date = [NSDate dateWithTimeIntervalSince1970:value.doubleValue];
+  NSString *language = [[NSUserDefaults standardUserDefaults] stringForKey:@"LeadLanguage"] ?: @"en";
+  NSDateFormatter *format = [NSDateFormatter new];
+  format.locale = [NSLocale localeWithLocaleIdentifier:[language isEqualToString:@"ar"] ? @"ar_IQ" : language];
+  format.calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+  format.timeZone = NSTimeZone.localTimeZone;
+  format.dateFormat = @"d/M/yyyy HH:mm";
+  NSString *key = [entry[@"dateSource"] isEqualToString:@"published"] ? @"UI_PROFILE_PUBLISHED_AT" : @"UI_PROFILE_OBSERVED_AT";
+  return [NSString stringWithFormat:LeadL(key), [format stringFromDate:date] ?: @""];
+}
+
 - (NSAttributedString *)detailForEntry:(NSDictionary *)entry {
   UIFont *font = LeadFont(14, UIFontWeightRegular);
   if ([entry[@"kind"] isEqualToString:@"profile"]) {
-    return [[NSAttributedString alloc] initWithString:LeadProfileChangeText(entry) attributes:@{
+    NSMutableAttributedString *result = [[NSMutableAttributedString alloc] initWithString:LeadProfileChangeText(entry) attributes:@{
       NSFontAttributeName : font,
-      NSForegroundColorAttributeName : UIColor.secondaryLabelColor,
+      NSForegroundColorAttributeName : UIColor.labelColor,
     }];
+    NSString *stamp = [self profileTimestampForEntry:entry];
+    if (stamp.length) {
+      [result appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:stamp] attributes:@{
+        NSFontAttributeName : LeadFont(12, UIFontWeightRegular),
+        NSForegroundColorAttributeName : UIColor.secondaryLabelColor,
+      }]];
+    }
+    return result;
   }
   NSString *text = LeadLogText(entry[@"text"]);
   if ([entry[@"kind"] isEqualToString:@"edited"]) {
@@ -221,8 +291,9 @@ static NSString *LeadLogText(id value) {
     [cell.tile setSymbol:[entry[@"kind"] isEqualToString:@"edited"] ? @"pencil" : ([entry[@"kind"] isEqualToString:@"profile"] ? @"person" : @"trash")];
   }
   cell.subtitleLabel.attributedText = [self detailForEntry:entry];
-  cell.subtitleLabel.numberOfLines = 6;
-  [cell showValue:[self timeForEntry:entry] chevron:NO];
+  BOOL isProfile = [entry[@"kind"] isEqualToString:@"profile"];
+  cell.subtitleLabel.numberOfLines = isProfile ? 0 : 6;
+  [cell showValue:isProfile ? nil : [self timeForEntry:entry] chevron:NO];
   return cell;
 }
 
