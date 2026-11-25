@@ -4,13 +4,9 @@ on:
     branches: [main]
     paths:
       - 'tools/warp/**'
-      - 'Sources/tgapi/UI/LeadWarp.m'
+      - 'Sources/tgapi/UI/**'
       - 'Sources/tgapi/Calls/LeadCallProxy.xm'
-      - 'Sources/tgapi/UI/LeadAutoProxy.m'
-      - 'Sources/tgapi/UI/LeadPages.m'
-      - 'Sources/tgapi/UI/LeadUIStrings.h'
       - 'Sources/tgapi/TLParser.swift'
-      - 'Sources/tgapi/UI/LeadMessageLogViewController.m'
       - 'Makefile'
       - '.github/workflows/warp-experimental.yml'
   workflow_dispatch:
