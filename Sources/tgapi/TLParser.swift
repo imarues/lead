@@ -3473,6 +3473,7 @@ extension TLParser {
     // MX incoming file metadata converted into voice / round note wire format.
     private struct RoundVideoUpload {
         let duration: Double
+        let timer: Int32?
         let registeredAt: TimeInterval
     }
 
@@ -3485,12 +3486,17 @@ extension TLParser {
     private static var _roundFallbackUsed = Set<String>()
 
     @objc static func registerRoundVideoUpload(withFileName fileName: String,
-                                                duration: Int) {
+                                                duration: Int, timer: NSNumber?) {
         guard !fileName.isEmpty else { return }
+        let ttl = timer.flatMap { value -> Int32? in
+            let seconds = value.int64Value
+            return seconds > 0 && seconds <= Int64(Int32.max) ? Int32(seconds) : nil
+        }
         roundQueue.sync {
             if _roundUploads[fileName] == nil { _roundOrder.append(fileName) }
             _roundUploads[fileName] = RoundVideoUpload(
                 duration: Double(max(1, duration)),
+                timer: ttl,
                 registeredAt: Date().timeIntervalSince1970)
             _roundFallbackUsed.remove(fileName)
             while _roundOrder.count > 32 {
@@ -3521,7 +3527,7 @@ extension TLParser {
             let now = Date().timeIntervalSince1970
             let candidates = _roundOrder.filter {
                 guard let item = _roundUploads[$0] else { return false }
-                return now - item.registeredAt < 180 &&
+                return item.timer == nil && now - item.registeredAt < 180 &&
                        !_roundFallbackUsed.contains($0)
             }
             guard candidates.count == 1, let name = candidates.first,
@@ -3549,7 +3555,7 @@ extension TLParser {
         guard !fileName.isEmpty else { return }
         let entry = VoiceUpload(duration: Int32(max(1, duration)),
                                 waveform: waveform as Data?,
-                                viewOnce: fileName.hasPrefix("lead_once_"),
+                                viewOnce: fileName.hasPrefix("kira_once_") || fileName.hasPrefix("lead_once_"),
                                 registeredAt: Date().timeIntervalSince1970)
         // Must complete registration before TGMediaAssetsController returns
         // the file description. An asynchronous barrier raced the MTProto send.
@@ -3671,7 +3677,7 @@ extension TLParser {
         let names = [fileName, inputName].compactMap { $0 }.filter { !$0.isEmpty }
         var newAttributes: [Api.DocumentAttribute]?
         var newMimeType = data.mimeType
-        var viewOnce = false
+        var explicitTimer: Int32?
 
         if let round = roundUpload(forNames: names, mimeType: data.mimeType) {
             // Telegram recognizes Video Notes from documentAttributeVideo bit 0,
@@ -3679,12 +3685,13 @@ extension TLParser {
             diagLog("v2note wire: \(names) -> round video, \(round.duration)s")
             newAttributes = [roundVideoAttribute(round)]
             newMimeType = "video/mp4"
+            explicitTimer = round.timer
         } else if let upload = voiceUpload(forNames: names, mimeType: data.mimeType) {
             // Telegram recognizes a real voice message from bit 10 of
             // documentAttributeAudio; leave other file uploads unchanged.
             diagLog("v2v wire: \(names) -> voice, \(upload.duration)s")
             newAttributes = [voiceAttribute(upload)]
-            viewOnce = upload.viewOnce
+            explicitTimer = upload.viewOnce ? Int32.max : nil
             // Native Ogg/Opus voice must retain audio/ogg; converted
             // M4A media (video audio or Vorbis) remains audio/mp4.
             let oggOpus = names.contains { $0.lowercased().hasSuffix(".ogg") }
@@ -3693,13 +3700,14 @@ extension TLParser {
         }
 
         guard let attributes = newAttributes else { return nil }
+        let ttl = explicitTimer ?? data.ttlSeconds
 
         return Api.InputMedia.inputMediaUploadedDocument(
             Api.InputMedia.Cons_inputMediaUploadedDocument(
                 // TGMediaAssetsController's "file" branch sets force_file
                 // (bit 4), which overrides voice/round rendering. Clear it
                 // only for a conversion we positively recognized above.
-                flags: (data.flags & ~(1 << 4)) | (viewOnce ? (1 << 1) : 0),
+                flags: (data.flags & ~Int32((1 << 4) | (1 << 1))) | (ttl != nil ? Int32(1 << 1) : 0),
                 file: data.file,
                 thumb: data.thumb,
                 mimeType: newMimeType,
@@ -3707,7 +3715,7 @@ extension TLParser {
                 stickers: data.stickers,
                 videoCover: data.videoCover,
                 videoTimestamp: data.videoTimestamp,
-                ttlSeconds: viewOnce ? Int32.max : data.ttlSeconds))
+                ttlSeconds: ttl))
     }
 
     /// Reads one boxed object and throws the value away — used to step over the
