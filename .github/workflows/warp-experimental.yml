@@ -5,7 +5,8 @@ on:
     paths:
       - 'tools/warp/**'
       - 'Sources/tgapi/UI/**'
-      - 'Sources/tgapi/Calls/LeadCallProxy.xm'
+      - 'Sources/tgapi/Calls/**'
+      - 'Sources/tgapi/SideloadFix.m'
       - 'Sources/tgapi/TLParser.swift'
       - 'Sources/tgapi/VideoToVoice.xm'
       - 'Sources/tgapi/Headers.h'

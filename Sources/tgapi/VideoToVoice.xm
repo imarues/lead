@@ -1031,6 +1031,8 @@ static void mxUpdateVoiceButton(UIView *interfaceView) {
 %end
 
 %ctor {
+    if ([NSBundle.mainBundle.bundlePath.pathExtension isEqualToString:@"appex"] ||
+        [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSExtension"] != nil) return;
     // Deleting the leftovers is disk work, and a tweak constructor runs inside
     // dyld — before the app has drawn a single frame. Nothing needs the folder
     // gone until the user actually picks a video, so it happens off the launch

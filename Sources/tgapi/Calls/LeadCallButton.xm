@@ -410,6 +410,8 @@ static void LeadTryInstallCallScreenHooks(void) {
     }
 }
 %ctor {
+    if ([NSBundle.mainBundle.bundlePath.pathExtension isEqualToString:@"appex"] ||
+        [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSExtension"] != nil) return;
     NSString *process=NSProcessInfo.processInfo.processName.lowercaseString;
     if([process containsString:@"notificationservice"])return;
     LeadCallAudioInstallHooks();

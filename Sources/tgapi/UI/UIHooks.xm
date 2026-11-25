@@ -1789,6 +1789,12 @@ static void LeadInstallPeerInfoCallHooks(void) {
 __attribute__((constructor))
 static void hook() {
     NSBundle *bundle = [NSBundle mainBundle];
+    // Broadcast upload runs in its own extension process. App UI setup also
+    // starts auto-proxy and audio/UI observers, which must stay in the host.
+    if ([bundle.bundlePath.pathExtension isEqualToString:@"appex"] ||
+        bundle.infoDictionary[@"NSExtension"] != nil) {
+        return;
+    }
     NSString *bundleId = bundle.bundleIdentifier ?: @"";
     NSString *processName = [NSProcessInfo processInfo].processName ?: @"";
     NSString *executableName = bundle.executablePath.lastPathComponent ?: @"";
