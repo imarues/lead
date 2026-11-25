@@ -34,6 +34,7 @@ type groupUDPRelay struct {
  dial func(netip.AddrPort)(net.Conn,error)
  mu sync.Mutex
  flows map[netip.AddrPort]*groupPacketFlow
+ localIPs map[netip.Addr]bool
  closed bool
 }
 
@@ -43,7 +44,13 @@ func newGroupRelay(target netip.AddrPort, dial func(netip.AddrPort)(net.Conn,err
  if target.Addr().Is6(){family,ip="udp6",net.IPv6loopback}
  listener,e:=net.ListenUDP(family,&net.UDPAddr{IP:ip})
  if e!=nil{return nil,e}
- r:=&groupUDPRelay{local:listener,target:target,dial:dial,flows:make(map[netip.AddrPort]*groupPacketFlow)}
+ localIPs:=make(map[netip.Addr]bool)
+ if addrs,e:=net.InterfaceAddrs();e==nil{
+  for _,a:=range addrs{
+   if p,e:=netip.ParsePrefix(a.String());e==nil{localIPs[p.Addr().Unmap()]=true}
+  }
+ }
+ r:=&groupUDPRelay{local:listener,target:target,dial:dial,flows:make(map[netip.AddrPort]*groupPacketFlow),localIPs:localIPs}
  go r.run()
  return r,nil
 }
@@ -89,7 +96,7 @@ func (r *groupUDPRelay) run(){
   n,src,e:=r.local.ReadFromUDPAddrPort(buf);if e!=nil{return}
   // Other local processes cannot forward arbitrary destinations; destination
   // is fixed by the authenticated group call signaling payload.
-  if !src.Addr().IsLoopback(){continue}
+  if !src.Addr().IsLoopback()&&!r.localIPs[src.Addr().Unmap()]{continue}
   f,e:=r.flow(src);if e!=nil{continue}
   f.remote.SetWriteDeadline(time.Now().Add(2*time.Second))
   if _,e=f.remote.Write(buf[:n]);e!=nil{r.remove(src,f)}
