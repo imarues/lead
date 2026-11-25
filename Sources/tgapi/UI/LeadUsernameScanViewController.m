@@ -28,7 +28,7 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"source"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"source"];
     NSNumber *mid = self.messageIds[indexPath.row];
     cell.textLabel.text = mid.longLongValue > 0 ? [NSString stringWithFormat:@"الرسالة #%@",mid] : @"نبذة القناة";
-    cell.backgroundColor = LeadThemeCard(); cell.textLabel.textColor = LeadThemeInk();
+    KiraStyleListCell(cell);
     cell.textLabel.font = LeadFont(15, UIFontWeightMedium); cell.tintColor = LeadThemeAccent();
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; return cell;
 }
@@ -194,7 +194,8 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"referenceActions"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"referenceActions"];
     NSString *ref = self.rows[indexPath.row];
     NSArray *ids = [self sourcesFor:ref];
-    cell.textLabel.text = ref; cell.textLabel.font = LeadFont(15, UIFontWeightSemibold); cell.textLabel.textColor = LeadThemeInk(); cell.backgroundColor = LeadThemeCard(); cell.textLabel.numberOfLines = 0;
+    KiraStyleListCell(cell);
+    cell.textLabel.text = ref; cell.textLabel.font = LeadFont(15, UIFontWeightSemibold); cell.textLabel.numberOfLines = 0;
     cell.detailTextLabel.text = ids.count == 1 ? ([ids.firstObject longLongValue] == 0 ? @"نبذة القناة" : [NSString stringWithFormat:@"الرسالة #%@",ids.firstObject]) : [NSString stringWithFormat:@"%lu مصادر",(unsigned long)ids.count];
     cell.detailTextLabel.textColor = LeadThemeMuted(); cell.detailTextLabel.font = LeadFont(12, UIFontWeightRegular);
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
