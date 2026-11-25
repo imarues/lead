@@ -21,6 +21,9 @@ extern "C" NSDictionary *LeadCallProxyNext(void);
 extern "C" void LeadGroupCallProxyBegin(void);
 extern "C" void LeadGroupCallProxyEnd(void);
 
+#if LEAD_WARP_EXPERIMENTAL
+static char kLeadWarpGroupToken;
+#endif
 static char kLeadGroupProxyLifetime;
 @interface LeadGroupProxyLifetime : NSObject
 @end
@@ -58,6 +61,11 @@ static void LeadDetachGroupProxy(id context) {
 - (void)stop:(id)completion {
   %orig(completion);
   LeadDetachGroupProxy(self);
+#if LEAD_WARP_EXPERIMENTAL
+  @synchronized(self) {
+    objc_setAssociatedObject(self, &kLeadWarpGroupToken, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+#endif
 }
 %end
 %end
@@ -66,7 +74,6 @@ static void LeadDetachGroupProxy(id context) {
 #if LEAD_WARP_EXPERIMENTAL
 // A separate lifetime for each native group context. No process-wide socket
 // interception: only remote ICE candidates in the group join response are changed.
-static char kLeadWarpGroupToken;
 @interface LeadWarpGroupLifetime : NSObject
 @property (nonatomic, copy) NSString *token;
 @end
@@ -107,12 +114,6 @@ static char kLeadWarpGroupToken;
     // Preserve the client's normal call behavior on an unsupported payload.
     NSLog(@"[Kira] WARP group UDP unavailable; using native candidates");
     %orig(payload);
-  }
-}
-- (void)stop:(id)completion {
-  %orig(completion);
-  @synchronized(self) {
-    objc_setAssociatedObject(self, &kLeadWarpGroupToken, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   }
 }
 %end
