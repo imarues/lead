@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <stdlib.h>
+#import "LeadMenu.h"
 
 #ifndef LEAD_WARP_EXPERIMENTAL
 #define LEAD_WARP_EXPERIMENTAL 0
@@ -16,6 +17,7 @@ extern void LeadWarpStop(void);
 static NSDictionary *sWarpRoute;
 #if LEAD_WARP_EXPERIMENTAL
 static BOOL sWarpBusy;
+static BOOL sWarpStarting;
 #endif
 
 #if LEAD_WARP_EXPERIMENTAL
@@ -68,7 +70,7 @@ NSDictionary *LeadWarpCallProxy(void) {
 NSString *LeadWarpStatus(void) {
 #if LEAD_WARP_EXPERIMENTAL
   @synchronized([NSUserDefaults class]) {
-    if (sWarpBusy) return @"جاري الفحص…";
+    if (sWarpBusy) return sWarpStarting ? @"جاري الاتصال…" : @"جاري الإيقاف…";
     return sWarpRoute ? @"WARP · متصل" : @"متوقف";
   }
 #else
@@ -76,78 +78,101 @@ NSString *LeadWarpStatus(void) {
 #endif
 }
 
-static void LeadWarpMessage(UIViewController *host, NSString *message) {
-  if (!host.view.window || host.presentedViewController) return;
-  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تجاوز حظر الاتصالات" message:message preferredStyle:UIAlertControllerStyleAlert];
-  [alert addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
-  [host presentViewController:alert animated:YES completion:nil];
+BOOL LeadWarpIsOn(void) {
+#if LEAD_WARP_EXPERIMENTAL
+  @synchronized([NSUserDefaults class]) { return sWarpRoute != nil || (sWarpBusy && sWarpStarting); }
+#else
+  return NO;
+#endif
 }
 
-void LeadWarpShow(UIViewController *host) {
+BOOL LeadWarpCanToggle(void) {
 #if LEAD_WARP_EXPERIMENTAL
+  @synchronized([NSUserDefaults class]) { return !sWarpBusy; }
+#else
+  return NO;
+#endif
+}
+
+static void KiraWarpRefresh(UIViewController *host) {
+  if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
+  [[NSNotificationCenter defaultCenter] postNotificationName:LeadSettingsDidChangeNotification object:nil];
+}
+
+#if LEAD_WARP_EXPERIMENTAL
+static void KiraWarpStart(UIViewController *host) {
   @synchronized([NSUserDefaults class]) {
-    if (sWarpBusy) return;
+    if (sWarpBusy || sWarpRoute) { KiraWarpRefresh(host); return; }
+    sWarpBusy = YES;
+    sWarpStarting = YES;
   }
-  if (LeadWarpCallProxy()) {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تجاوز حظر الاتصالات" message:@"النفق متصل. أوقف المكالمات قبل قطع النفق." preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إيقاف WARP" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
-      @synchronized([NSUserDefaults class]) {
-        if (sWarpBusy) return;
-        sWarpBusy = YES;
-        sWarpRoute = nil;
+  KiraWarpRefresh(host);
+  NSString *user = NSUUID.UUID.UUIDString;
+  NSString *pass = NSUUID.UUID.UUIDString;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    NSString *profile = LeadWarpLoadProfile();
+    int registrationStatus = 0;
+    if (!profile.length) {
+      char *raw = LeadWarpRegister(&registrationStatus);
+      if (raw) {
+        profile = [NSString stringWithUTF8String:raw];
+        free(raw);
+        if (profile.length) LeadWarpSaveProfile(profile);
       }
-      dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        LeadWarpStop();
-        dispatch_async(dispatch_get_main_queue(), ^{
-          @synchronized([NSUserDefaults class]) { sWarpBusy = NO; }
-          if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
-        });
-      });
-    }]];
-    [host presentViewController:alert animated:YES completion:nil];
-    return;
-  }
-  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تجاوز حظر الاتصالات" message:@"سيُنشئ Lead إعدادات WARP لهذا الجهاز تلقائياً باستخدام خدمة تسجيل Cloudflare غير الرسمية. المفتاح الخاص يبقى على الجهاز. نسخة تجريبية للمكالمات الفردية والجماعية عبر TCP وUDP. بالمتابعة توافق على شروط Cloudflare." preferredStyle:UIAlertControllerStyleAlert];
-  [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-  [alert addAction:[UIAlertAction actionWithTitle:@"شروط الاستخدام" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-    [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://www.cloudflare.com/application/terms/"] options:@{} completionHandler:nil];
-  }]];
-  [alert addAction:[UIAlertAction actionWithTitle:@"اتصال" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-    @synchronized([NSUserDefaults class]) {
-      if (sWarpBusy || sWarpRoute) return;
-      sWarpBusy = YES;
     }
-    if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
-    NSString *user = NSUUID.UUID.UUIDString;
-    NSString *pass = NSUUID.UUID.UUIDString;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      NSString *profile = LeadWarpLoadProfile();
-      int registrationStatus = 0;
-      if (!profile.length) {
-        char *raw = LeadWarpRegister(&registrationStatus);
-        if (raw) {
-          profile = [NSString stringWithUTF8String:raw];
-          free(raw);
-          if (profile.length) LeadWarpSaveProfile(profile);
-        }
+    int port = profile.length ? LeadWarpStart((char *)profile.UTF8String, (char *)user.UTF8String, (char *)pass.UTF8String) : -10;
+    BOOL ok = port > 0 && port <= 65535;
+    NSString *message = !profile.length ? LeadWarpRegistrationError(registrationStatus) :
+      [NSString stringWithFormat:@"تعذر الاتصال عبر WARP (%d)", port];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      @synchronized([NSUserDefaults class]) {
+        sWarpRoute = ok ? @{@"kind":@"socks", @"server":@"127.0.0.1", @"port":@(port), @"user":user, @"pass":pass} : nil;
+        sWarpBusy = NO;
+        sWarpStarting = NO;
       }
-      int port = profile.length ? LeadWarpStart((char *)profile.UTF8String, (char *)user.UTF8String, (char *)pass.UTF8String) : -10;
-      NSString *message = !profile.length ? LeadWarpRegistrationError(registrationStatus) :
-        (port > 0 && port <= 65535 ? @"تم تأكيد اتصال WARP. جرّب مكالمة فردية أو جماعية جديدة. تأكيد النفق لا يعني نجاح الوسائط بعد." :
-          [NSString stringWithFormat:@"فشل فحص النفق (%d). لم يتم تغيير مسار البروكسي الحالي.", port]);
+      KiraWarpRefresh(host);
+      if (host.viewIfLoaded.window) [LeadToast showText:ok ? @"تم الاتصال" : message symbol:ok ? @"checkmark.circle" : @"exclamationmark.circle" inView:host.view];
+    });
+  });
+}
+#endif
+
+void LeadWarpSetEnabled(BOOL enabled, UIViewController *host) {
+#if LEAD_WARP_EXPERIMENTAL
+  if (!LeadWarpCanToggle()) { KiraWarpRefresh(host); return; }
+  if (!enabled) {
+    @synchronized([NSUserDefaults class]) {
+      if (!sWarpRoute) { KiraWarpRefresh(host); return; }
+      sWarpBusy = YES;
+      sWarpStarting = NO;
+      sWarpRoute = nil;
+    }
+    KiraWarpRefresh(host);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      LeadWarpStop();
       dispatch_async(dispatch_get_main_queue(), ^{
-        @synchronized([NSUserDefaults class]) {
-          if (port > 0 && port <= 65535) sWarpRoute = @{@"kind":@"socks", @"server":@"127.0.0.1", @"port":@(port), @"user":user, @"pass":pass};
-          sWarpBusy = NO;
-        }
-        if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
-        LeadWarpMessage(host, message);
+        @synchronized([NSUserDefaults class]) { sWarpBusy = NO; }
+        KiraWarpRefresh(host);
       });
     });
+    return;
+  }
+  if (LeadWarpCallProxy()) { KiraWarpRefresh(host); return; }
+  // Cached profiles were registered with the user's consent. Only first
+  // registration requires an explicit choice; normal ON/OFF is immediate.
+  if (LeadWarpLoadProfile().length) { KiraWarpStart(host); return; }
+  KiraWarpRefresh(host);
+  if (!host.viewIfLoaded.window || host.presentedViewController) return;
+  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تفعيل الاتصال لأول مرة"
+    message:@"يُنشئ Kira ملف WARP عبر Cloudflare. بالتفعيل توافق على شروط الخدمة."
+    preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"الشروط" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+    [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://www.cloudflare.com/application/terms/"] options:@{} completionHandler:nil];
   }]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"تفعيل" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { KiraWarpStart(host); }]];
   [host presentViewController:alert animated:YES completion:nil];
 #else
-  LeadWarpMessage(host, @"محرك WireGuard التجريبي غير مضمّن في هذا البناء. لم يتم تغيير اتصال تيليجرام.");
+  KiraWarpRefresh(host);
 #endif
 }
