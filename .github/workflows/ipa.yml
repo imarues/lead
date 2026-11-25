@@ -75,6 +75,7 @@ jobs:
           name: dependencies
           path: |
             decrypted.ipa
+            packages/Kira.dylib
             Kira.bundle
             SideloadFix.dylib
             com.ikiraplus.kira_*_iphoneos-arm.deb
@@ -88,6 +89,8 @@ jobs:
       IPA_VERSION: ${{ needs.prepareDependencies.outputs.ipa_version }}
       TGEXTRA_VERSION: ${{ needs.prepareDependencies.outputs.tgextra_version }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download dependencies
         uses: actions/download-artifact@v4
         with:
@@ -111,7 +114,8 @@ jobs:
 
           cyan -i "$DECRYPTED_IPA" -o "$OUT_IPA" -uwsgqf "$TGEXTRA_DEB" "$TGEXTRA_BUNDLE"
 
-          cp "$OUT_IPA" "$OUT_TIPA"
+          python3 tools/inject_ipa.py "$OUT_IPA" --dylib dependencies/packages/Kira.dylib -o "$OUT_TIPA"
+          cp "$OUT_TIPA" "$OUT_IPA"
           mkdir -p artifacts
           mv "$OUT_IPA" "$OUT_TIPA" artifacts/
 

@@ -176,11 +176,11 @@ def bundle_executable(bundle):
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     default_dylib = os.path.join(here, '..', '.theos', '_', 'Library', 'MobileSubstrate', 'DynamicLibraries', 'Kira.dylib')
-    parser = argparse.ArgumentParser(description='Inject Kira.dylib into a Telegram IPA and its notification extension.')
+    parser = argparse.ArgumentParser(description='Inject Kira.dylib into a Telegram IPA and its notification and broadcast extensions.')
     parser.add_argument('ipa')
     parser.add_argument('-o', '--output')
     parser.add_argument('--dylib', default=default_dylib)
-    parser.add_argument('--all-extensions', action='store_true', help='inject into every extension, not just notifications')
+    parser.add_argument('--all-extensions', action='store_true', help='inject into every extension, including extensions unrelated to notifications or screen sharing')
     parser.add_argument('--remove', action='append', default=[], metavar='NAME',
                         help='drop already injected dylibs whose path contains NAME (e.g. sideloadFixer)')
     parser.add_argument('--extra', action='append', default=[], metavar='DYLIB',
@@ -222,7 +222,8 @@ def main():
             executable, info = bundle_executable(appex)
             point = info.get('NSExtension', {}).get('NSExtensionPointIdentifier', '')
             is_nse = point == 'com.apple.usernotifications.service'
-            if not (is_nse or args.all_extensions):
+            is_broadcast = point == 'com.apple.broadcast-services-upload'
+            if not (is_nse or is_broadcast or args.all_extensions):
                 continue
             print('PlugIns/%s (%s):' % (name, point or 'extension'))
             # Extensions live in <app>/PlugIns/<x>.appex/, the app's Frameworks two levels up.
