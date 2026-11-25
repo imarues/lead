@@ -11,12 +11,6 @@
 </p>
 
 <p align="center">
-  <a href="https://t.me/leadgramm"><img src="https://img.shields.io/badge/Join%20the%20channel-t.me%2Fleadgramm-229ED9?style=flat-square&logo=telegram&logoColor=white" alt="Telegram channel"></a>
-  <a href="https://github.com/w3ltyyy/lead/stargazers"><img src="https://img.shields.io/github/stars/w3ltyyy/lead?style=flat-square&color=f5c518&logo=github" alt="Stars"></a>
-  <a href="https://github.com/w3ltyyy/lead/commits/main"><img src="https://img.shields.io/github/last-commit/w3ltyyy/lead?style=flat-square&color=8b949e" alt="Last commit"></a>
-</p>
-
-<p align="center">
   <a href="#-a-quick-look">Screenshots</a> &nbsp;•&nbsp;
   <a href="#-features">Features</a> &nbsp;•&nbsp;
   <a href="#-installation">Installation</a> &nbsp;•&nbsp;
@@ -110,7 +104,7 @@
 
 ### 📲 Sideload — no jailbreak
 
-Ready-made IPAs are posted in the [channel](https://t.me/leadgramm).
+Use the IPA distributed by the maintainer of this Kira edition.
 
 > [!IMPORTANT]
 > Kira is **already inside** the IPA — sign it as usual and **don't add the dylib again**.
@@ -127,7 +121,7 @@ python3 tools/inject_ipa.py Telegram.ipa --dylib packages/Kira.dylib
 
 ### 🔓 Jailbreak
 
-Install the `.deb` from the [channel](https://t.me/leadgramm) with your package manager, then restart Telegram.
+Install the `.deb` for this Kira edition with your package manager, then restart Telegram.
 
 <br>
 
