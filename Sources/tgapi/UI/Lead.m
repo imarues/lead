@@ -2,8 +2,8 @@
 #import "LeadMenu.h"
 #import <objc/runtime.h>
 
-// Announcements are fetched from this JSON file on GitHub
-static NSString *const kLeadAnnouncementsURL = @"https://raw.githubusercontent.com/w3ltyyy/lead/main/announcements.json";
+// Announcements are fetched only from the Kira configuration endpoint.
+static NSString *const kLeadAnnouncementsURL = @"https://ipastore.pages.dev/kira-announcements.json";
 
 static NSString *const kCellId = @"LeadCell";
 static NSString *const kHeroId = @"LeadHero";
@@ -212,8 +212,8 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   [NSLayoutConstraint activateConstraints:@[
     [self.logoView.topAnchor constraintEqualToAnchor:header.topAnchor constant:22],
     [self.logoView.centerXAnchor constraintEqualToAnchor:header.centerXAnchor],
-    [self.logoView.widthAnchor constraintEqualToConstant:72],
-    [self.logoView.heightAnchor constraintEqualToConstant:72],
+    [self.logoView.widthAnchor constraintEqualToConstant:96],
+    [self.logoView.heightAnchor constraintEqualToConstant:96],
     [titles.topAnchor constraintEqualToAnchor:self.logoView.bottomAnchor constant:10],
     [titles.centerXAnchor constraintEqualToAnchor:header.centerXAnchor],
     [self.announcementStack.topAnchor constraintEqualToAnchor:titles.bottomAnchor constant:18],
