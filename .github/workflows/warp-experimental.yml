@@ -5,6 +5,7 @@ on:
     paths:
       - 'tools/warp/**'
       - 'Sources/tgapi/UI/LeadWarp.m'
+      - 'Sources/tgapi/Calls/LeadCallProxy.xm'
       - 'Sources/tgapi/UI/LeadAutoProxy.m'
       - 'Sources/tgapi/UI/LeadPages.m'
       - 'Sources/tgapi/UI/LeadUIStrings.h'
@@ -34,6 +35,9 @@ jobs:
           sdks-branch: 'main'
       - name: Install dpkg
         run: brew install dpkg
+      - name: Test group ICE candidate and UDP relay logic
+        working-directory: tools/warp
+        run: go test -mod=mod -v ./...
       - name: Compile userspace WireGuard archive
         run: bash tools/warp/build.sh
       - name: Build experimental arm64 dylib
