@@ -5,7 +5,7 @@
 
 @interface TLParser : NSObject
 + (void)registerVoiceUploadWithFileName:(NSString *)fileName duration:(NSInteger)duration waveform:(NSData *)waveform;
-+ (void)registerRoundVideoUploadWithFileName:(NSString *)fileName duration:(NSInteger)duration;
++ (void)registerRoundVideoUploadWithFileName:(NSString *)fileName duration:(NSInteger)duration timer:(NSNumber *)timer;
 + (NSData *)rewriteVoiceUpload:(NSData *)data;
 + (void)registerCustomFileSendForOriginalName:(NSString *)original displayName:(NSString *)display thumbnailFileId:(NSNumber *)thumbId;
 + (void)registerCustomFileSendForOriginalName:(NSString *)original displayName:(NSString *)display thumbnailFileId:(NSNumber *)thumbId caption:(NSString *)caption;
