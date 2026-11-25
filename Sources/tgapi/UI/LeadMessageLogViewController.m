@@ -30,7 +30,8 @@ NSArray<NSDictionary *> *LeadMessageLogEntries(void) {
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.title = LeadL(@"UI_MESSAGE_LOG");
-  self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+  self.tableView.backgroundColor = LeadThemeBackground(); self.tableView.tintColor = LeadThemeAccent();
+  self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
   self.tableView.rowHeight = UITableViewAutomaticDimension;
   self.tableView.estimatedRowHeight = 72;
   [self.tableView registerClass:[LeadCell class] forCellReuseIdentifier:@"LeadCell"];
@@ -38,11 +39,15 @@ NSArray<NSDictionary *> *LeadMessageLogEntries(void) {
   self.segments = [[UISegmentedControl alloc] initWithItems:@[ LeadL(@"UI_LOG_DELETED"), LeadL(@"UI_LOG_EDITED"), LeadL(@"UI_LOG_PROFILES") ]];
   self.segments.selectedSegmentIndex = 0;
   [self.segments addTarget:self action:@selector(segmentChanged) forControlEvents:UIControlEventValueChanged];
-  UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 52)];
+  UIView *header = [[LeadThemeHeader alloc] initWithFrame:CGRectMake(0, 0, 320, 52)];
+  self.segments.backgroundColor = LeadThemeCard(); self.segments.selectedSegmentTintColor = LeadThemeAccent();
+  [self.segments setTitleTextAttributes:@{NSForegroundColorAttributeName:LeadThemeInk()} forState:UIControlStateNormal];
+  [self.segments setTitleTextAttributes:@{NSForegroundColorAttributeName:LeadThemeBackground()} forState:UIControlStateSelected];
   self.segments.translatesAutoresizingMaskIntoConstraints = NO;
   [header addSubview:self.segments];
   self.profileSearch = [[UISearchBar alloc] initWithFrame:CGRectZero];
   self.profileSearch.searchBarStyle = UISearchBarStyleMinimal;
+  self.profileSearch.searchTextField.backgroundColor = LeadThemeCard(); self.profileSearch.searchTextField.textColor = LeadThemeInk(); self.profileSearch.tintColor = LeadThemeAccent();
   self.profileSearch.placeholder = LeadL(@"UI_PROFILE_FILTER_HINT");
   self.profileSearch.delegate = self;
   self.profileSearch.hidden = YES;
@@ -132,13 +137,13 @@ NSArray<NSDictionary *> *LeadMessageLogEntries(void) {
   [tile setSymbol:@"tray"];
   tile.translatesAutoresizingMaskIntoConstraints = NO;
   self.emptyTitle = [UILabel new];
-  self.emptyTitle.font = LeadRoundedFont(18, UIFontWeightSemibold);
+  self.emptyTitle.font = LeadRoundedFont(18, UIFontWeightSemibold); self.emptyTitle.textColor = LeadThemeInk();
   self.emptyTitle.textAlignment = NSTextAlignmentCenter;
   UILabel *hint = [UILabel new];
   self.emptyHint = hint;
   hint.text = LeadL(@"UI_LOG_EMPTY_HINT");
   hint.font = LeadFont(14, UIFontWeightRegular);
-  hint.textColor = UIColor.secondaryLabelColor;
+  hint.textColor = LeadThemeMuted();
   hint.textAlignment = NSTextAlignmentCenter;
   hint.numberOfLines = 0;
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ tile, self.emptyTitle, hint ]];
@@ -230,13 +235,13 @@ static NSString *LeadLogText(id value) {
   if ([entry[@"kind"] isEqualToString:@"profile"]) {
     NSMutableAttributedString *result = [[NSMutableAttributedString alloc] initWithString:LeadProfileChangeText(entry) attributes:@{
       NSFontAttributeName : font,
-      NSForegroundColorAttributeName : UIColor.labelColor,
+      NSForegroundColorAttributeName : LeadThemeInk(),
     }];
     NSString *stamp = [self profileTimestampForEntry:entry];
     if (stamp.length) {
       [result appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:stamp] attributes:@{
         NSFontAttributeName : LeadFont(12, UIFontWeightRegular),
-        NSForegroundColorAttributeName : UIColor.secondaryLabelColor,
+        NSForegroundColorAttributeName : LeadThemeMuted(),
       }]];
     }
     return result;
@@ -248,26 +253,26 @@ static NSString *LeadLogText(id value) {
     if (old.length) {
       [result appendAttributedString:[[NSAttributedString alloc] initWithString:old attributes:@{
         NSFontAttributeName : font,
-        NSForegroundColorAttributeName : UIColor.tertiaryLabelColor,
+        NSForegroundColorAttributeName : [LeadThemeMuted() colorWithAlphaComponent:0.70],
         NSStrikethroughStyleAttributeName : @(NSUnderlineStyleSingle),
       }]];
       [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:@{ NSFontAttributeName : font }]];
     }
     [result appendAttributedString:[[NSAttributedString alloc] initWithString:text ?: @"" attributes:@{
       NSFontAttributeName : font,
-      NSForegroundColorAttributeName : UIColor.labelColor,
+      NSForegroundColorAttributeName : LeadThemeInk(),
     }]];
     return result;
   }
   if (text.length == 0) {
     return [[NSAttributedString alloc] initWithString:LeadL(@"UI_LOG_NO_TEXT") attributes:@{
       NSFontAttributeName : [UIFont italicSystemFontOfSize:14],
-      NSForegroundColorAttributeName : UIColor.tertiaryLabelColor,
+      NSForegroundColorAttributeName : [LeadThemeMuted() colorWithAlphaComponent:0.70],
     }];
   }
   return [[NSAttributedString alloc] initWithString:text attributes:@{
     NSFontAttributeName : font,
-    NSForegroundColorAttributeName : UIColor.secondaryLabelColor,
+    NSForegroundColorAttributeName : LeadThemeMuted(),
   }];
 }
 
@@ -438,7 +443,7 @@ NSString *LeadURLForLogEntry(NSDictionary *entry) {
   UILabel *detailLabel = [UILabel new];
   detailLabel.text = detail;
   detailLabel.font = LeadFont(14, UIFontWeightRegular);
-  detailLabel.textColor = UIColor.secondaryLabelColor;
+  detailLabel.textColor = LeadThemeMuted();
   detailLabel.numberOfLines = 2;
   UIStackView *texts = [[UIStackView alloc] initWithArrangedSubviews:@[ titleLabel, detailLabel ]];
   texts.axis = UILayoutConstraintAxisVertical;
