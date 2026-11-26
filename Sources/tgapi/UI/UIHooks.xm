@@ -1843,7 +1843,7 @@ static void hook() {
         kSensitiveContent: @NO,
         kGhostModeEnabled: @NO,
         kAntiRevoke: @NO,
-        kAntiEdit: @NO,
+        kAntiEdit: @YES,
         kAntiSelfDestruct: @NO,
         kHideStories: @NO,
         kDownloadStories: @NO,
@@ -1894,6 +1894,13 @@ static void hook() {
             [leadDefaults setBool:YES forKey:key];
         }
         [leadDefaults setBool:YES forKey:kLeadMediaDefaultsMigration];
+    }
+
+    // Enable edit history once on both upgrades and fresh installs; respect subsequent user changes.
+    static NSString *const kLeadEditHistoryMigration = @"LeadKiraEditHistoryDefaultsV1";
+    if (![leadDefaults boolForKey:kLeadEditHistoryMigration]) {
+        [leadDefaults setBool:YES forKey:kAntiEdit];
+        [leadDefaults setBool:YES forKey:kLeadEditHistoryMigration];
     }
 
     // Fixed ad policy, including existing installations.
