@@ -78,7 +78,7 @@
 ### 🔓 Content & Stories
 - **Save restricted media** — forward, copy and save from protected channels, groups and chats
 - **No ads** and **no proxy sponsor channel**
-- **Auto proxy** — connects through the first working proxy from a JSON list you host (`proxies.json`), no confirmation; off switch in the menu
+- **Auto proxy** — uses the private gateway after one-time device activation; automatic connection and server rotation remain available in the menu
 - **App Store–restricted chats** become visible
 - **Save deleted stories**, **unlock story saving**, **hide stories**
 
@@ -219,22 +219,21 @@ Kira is an **independent modification** of the Telegram app. It is **not affilia
   <img src="assets/footer-light.svg" width="100%" alt="Kira">
 </picture>
 
-## 🌐 Auto proxy — `proxies.json`
+## 🌐 Auto proxy — private gateway
 
-Host a JSON file over HTTPS (for example the raw URL of `proxies.json` in this repo) and set its address in
-`Sources/tgapi/UI/LeadAutoProxy.m` (`kLeadAutoProxyConfigURLDefault`), or type it in the menu → Proxy → JSON File URL.
-Entries are tried in order; the first server that accepts a TCP connection is used. Edit the file to change proxies —
-installs pick it up on launch and every ~20 minutes.
+The app obtains one proxy per authorized request through the configured HTTPS gateway.
+On first use, open the Kira proxy settings, select the activation action, and enter a one-time
+code supplied by the service administrator. The device token is stored in Keychain; the
+short-lived session and currently selected proxy stay in memory.
 
-```json
-{
-  "proxies": [
-    "https://t.me/proxy?server=1.2.3.4&port=443&secret=dd…",
-    { "server": "5.6.7.8", "port": 443, "secret": "ee…" },
-    { "link": "tg://socks?server=9.9.9.9&port=1080&user=u&pass=p" },
-    { "server": "old.example.com", "port": 443, "secret": "dd…", "enabled": false }
-  ]
-}
-```
+The auto-proxy switch is enabled by default, subject to successful activation.
+Refresh checks the assigned server and advances past unreachable servers; Change Proxy
+requests the next server. The UI shows only the ordinal server label. The public
+`proxies.json` is an empty legacy placeholder, and there are no embedded backup proxy links.
 
-A proxy the user switched on inside Telegram (Data and Storage → Proxy) always takes priority.
+The gateway origin is configured in `Sources/tgapi/UI/KiraProxyGateway.m`;
+never place administrative or activation credentials in the source.
+
+A proxy manually enabled inside Telegram's own settings takes priority. WARP remains an
+independent opt-in call-connectivity feature.
+

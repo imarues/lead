@@ -1,4 +1,5 @@
 #import "LeadMenu.h"
+#import "KiraProxyGateway.h"
 #import "Headers.h"
 #import "../Headers.h"
 #import <objc/message.h>
@@ -9,58 +10,9 @@
 #import <errno.h>
 #import <unistd.h>
 
-// ============================================================
-// Auto proxy
-//
-// Telegram connects through a proxy without asking. The proxy comes from a JSON list that
-// is fetched over HTTPS; the first entry that answers a TCP connect wins, so the list order
-// is the priority order. Change the file and every install follows on its next refresh.
-//
-// How it reaches Telegram: MtProtoKit asks its MTApiEnvironment for socksProxySettings when
-// it opens a connection. Hooks.xm answers with our MTSocksProxySettings whenever Telegram
-// itself has no proxy set, so a proxy the user switched on in Telegram always wins, and
-// Telegram's own proxy screen never sees or changes ours. When the choice changes while the
-// app runs, the new settings are pushed into the live MTContext(s) so connections reset.
-//
-// JSON file — any of these shapes:
-//   { "proxies": [ "https://t.me/proxy?server=…&port=443&secret=…",
-//                  { "server": "1.2.3.4", "port": 443, "secret": "dd…" },
-//                  { "link": "tg://socks?server=…&port=1080&user=…&pass=…" } ] }
-//   [ "https://t.me/proxy?…", … ]
-// An entry with "enabled": false is skipped.
-// ============================================================
-
-// Fixed first-party configuration endpoint. Never use a saved custom URL.
-static NSString *const kLeadAutoProxyConfigURLDefault = @"https://ipastore.pages.dev/proxies.json";
-
-// Offline bootstrap, identical to the published list at release time.
-static NSArray<NSString *> *LeadProxyBuiltInLinks(void) {
-  return @[
-    @"tg://proxy?server=mtproto.online&port=443&secret=7hOeDuNhUMHqO_KZeWWGtUV3d3cudnRiLnJ1",
-    @"tg://proxy?server=iq.edu2iq.net&port=443&secret=a4d9c2e8b1f6037ea5c8d4b29f1e6a0c",
-    @"tg://proxy?server=91.98.97.225&port=8443&secret=79e344818749bd7ac519130220c25d09",
-    @"tg://proxy?server=termsnal.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09",
-    @"tg://proxy?server=nocloudnew.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09"
-  ];
-}
-
-// Kept separate from the normal MTProto pool; these were tested by the owner.
-static NSArray<NSString *> *LeadCallProxyBuiltInLinks(void) {
-  return @[
-    @"tg://socks?server=45.74.31.40&port=4161",
-    @"tg://socks?server=176.9.107.170&port=1083",
-    @"tg://socks?server=123.58.219.171&port=10808",
-    @"tg://socks?server=47.251.166.203&port=1080",
-    @"tg://socks?server=82.180.146.251&port=10800",
-    @"tg://socks?server=43.134.39.221&port=10000"
-  ];
-}
-static NSString *const kLeadCallProxyCache = @"LeadCallProxyList";
-static NSString *const kLeadCallProxyReachable = @"KiraCallProxyReachableV2";
-
+// Private gateway: the Worker returns a single selected proxy and its ordinal.
 static const NSTimeInterval kLeadAutoProxyRefreshInterval = 20 * 60;
 static const NSUInteger kLeadAutoProxyMaxEntries = 20;
-static const NSUInteger kLeadAutoProxyMaxBytes = 64 * 1024;
 
 #pragma mark - Link parsing
 
@@ -159,73 +111,6 @@ NSString *LeadAutoProxyNormalizedLink(NSString *link) {
   return parsed ? LeadProxyLinkFromParsed(parsed) : nil;
 }
 
-#pragma mark - JSON list
-
-static NSString *LeadProxyString(id value) {
-  if ([value isKindOfClass:NSString.class]) return value;
-  if ([value isKindOfClass:NSNumber.class]) return [value stringValue];
-  return nil;
-}
-
-// One list entry (link string or object) -> canonical link, nil when unusable.
-static NSString *LeadProxyLinkFromEntry(id entry) {
-  if ([entry isKindOfClass:NSString.class]) return LeadAutoProxyNormalizedLink(entry);
-  if (![entry isKindOfClass:NSDictionary.class]) return nil;
-  NSDictionary *d = entry;
-  if ([d[@"enabled"] isKindOfClass:NSNumber.class] && ![d[@"enabled"] boolValue]) return nil;
-  NSString *link = LeadProxyString(d[@"link"]) ?: LeadProxyString(d[@"url"]);
-  if (link.length) return LeadAutoProxyNormalizedLink(link);
-  NSString *server = LeadProxyString(d[@"server"]) ?: LeadProxyString(d[@"host"]);
-  NSString *port = LeadProxyString(d[@"port"]);
-  if (!server.length || !port.length) return nil;
-  NSString *secret = LeadProxyString(d[@"secret"]);
-  NSString *user = LeadProxyString(d[@"user"]) ?: LeadProxyString(d[@"username"]);
-  NSString *pass = LeadProxyString(d[@"pass"]) ?: LeadProxyString(d[@"password"]);
-  NSMutableString *built = [NSMutableString stringWithFormat:@"tg://%@?server=%@&port=%@",
-                                                             secret.length ? @"proxy" : @"socks",
-                                                             LeadProxyEncode(server), LeadProxyEncode(port)];
-  if (secret.length) [built appendFormat:@"&secret=%@", LeadProxyEncode(secret)];
-  if (user.length) [built appendFormat:@"&user=%@", LeadProxyEncode(user)];
-  if (pass.length) [built appendFormat:@"&pass=%@", LeadProxyEncode(pass)];
-  return LeadAutoProxyNormalizedLink(built);
-}
-
-// -> canonical links in file order, or nil when the file isn't a proxy list at all.
-static NSArray<NSString *> *LeadProxyLinksFromJSON(NSData *data) {
-  if (data.length == 0 || data.length > kLeadAutoProxyMaxBytes) return nil;
-  id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-  NSArray *entries = nil;
-  if ([root isKindOfClass:NSArray.class]) entries = root;
-  else if ([root isKindOfClass:NSDictionary.class]) {
-    entries = root[@"proxies"] ?: root[@"servers"];
-  }
-  if (![entries isKindOfClass:NSArray.class]) return nil;
-  NSMutableOrderedSet<NSString *> *links = [NSMutableOrderedSet orderedSet];
-  for (id entry in entries) {
-    NSString *link = LeadProxyLinkFromEntry(entry);
-    if (link) [links addObject:link];
-    if (links.count >= kLeadAutoProxyMaxEntries) break;
-  }
-  return links.array;
-}
-
-// Only explicitly tagged SOCKS5 entries in the separate call pool are eligible.
-static NSArray<NSString *> *LeadCallProxyLinksFromJSON(NSData *data) {
-  if (data.length == 0 || data.length > kLeadAutoProxyMaxBytes) return nil;
-  id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-  if (![root isKindOfClass:NSDictionary.class]) return nil;
-  id entries = root[@"call_proxies"];
-  if (![entries isKindOfClass:NSArray.class]) return nil;
-  NSMutableOrderedSet<NSString *> *links = [NSMutableOrderedSet orderedSet];
-  for (id entry in entries) {
-    NSString *link = LeadProxyLinkFromEntry(entry);
-    NSDictionary *parsed = LeadProxyParseLink(link);
-    if ([parsed[@"kind"] isEqualToString:@"socks"]) [links addObject:link];
-    if (links.count >= kLeadAutoProxyMaxEntries) break;
-  }
-  return links.array;
-}
-
 #pragma mark - Reachability
 
 // Plain TCP connect, off the proxy, so a dead server is skipped instead of chosen.
@@ -281,59 +166,14 @@ static BOOL LeadProxyProbe(NSString *host, int port, int timeoutMs, BOOL socks, 
 }
 
 // First link, in list order, whose server answers; nil when none does.
-static NSArray<NSString *> *LeadProxyReachableLinks(NSArray<NSString *> *links) {
-  NSUInteger count = links.count;
-  if (count == 0) return @[];
-  NSMutableArray<NSNumber *> *answered = [NSMutableArray arrayWithCapacity:count];
-  for (NSUInteger i = 0; i < count; i++) [answered addObject:@NO];
-  dispatch_group_t group = dispatch_group_create();
-  for (NSUInteger i = 0; i < count; i++) {
-    NSDictionary *p = LeadProxyParseLink(links[i]);
-    if (!p) continue;
-    dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      BOOL ok = LeadProxyProbe(p[@"server"], [p[@"port"] intValue], 2500, [p[@"kind"] isEqual:@"socks"], [p[@"user"] length] > 0);
-      @synchronized(answered) { answered[i] = @(ok); }
-    });
-  }
-  dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
-  NSMutableArray<NSString *> *reachable = [NSMutableArray array];
-  @synchronized(answered) {
-    for (NSUInteger i = 0; i < count; i++) {
-      if ([answered[i] boolValue]) [reachable addObject:links[i]];
-    }
-  }
-  return reachable;
-}
-static NSString *LeadProxyFirstReachable(NSArray<NSString *> *links) {
-  return LeadProxyReachableLinks(links).firstObject;
-}
-
-// Both signaling and native media must use the same selected server during a call.
+// WARP remains first for calls; otherwise use only the call server last returned by the gateway.
 extern NSDictionary *LeadWarpCallProxy(void);
+static NSObject *LeadProxyLock(void);
+static NSDictionary *sLeadGatewayCallInfo;
 static NSDictionary *LeadCallProxyChoose(void) {
   NSDictionary *warp = LeadWarpCallProxy();
-  if (warp) return warp; // Activated only after a successful WARP trace.
-  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-  NSArray<NSString *> *configured = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
-  if (!configured.count) return nil;
-  NSMutableArray<NSString *> *reachable = [NSMutableArray array];
-  NSArray *checked = [defaults arrayForKey:kLeadCallProxyReachable];
-  for (NSString *link in checked) {
-    if ([configured containsObject:link]) [reachable addObject:link];
-  }
-  NSArray<NSString *> *pool = checked != nil ? reachable : configured;
-  if (!pool.count) return nil;
-  static NSUInteger next = 0;
-  static NSObject *lock;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{ lock = [NSObject new]; });
-  @synchronized(lock) {
-    for (NSUInteger i = 0; i < pool.count; i++) {
-      NSDictionary *p = LeadProxyParseLink(pool[next++ % pool.count]);
-      if ([p[@"kind"] isEqualToString:@"socks"]) return p;
-    }
-  }
-  return nil;
+  if (warp) return warp;
+  @synchronized(LeadProxyLock()) { return sLeadGatewayCallInfo; }
 }
 
 #pragma mark - State
@@ -360,7 +200,7 @@ NSDictionary *LeadCallProxyNext(void) {
 }
 static id sLeadProxySettings = nil;               // MTSocksProxySettings in use, nil = off
 static NSString *sLeadProxyLink = nil;            // canonical link behind it
-static NSDictionary *sLeadProxyInfo = nil;        // parsed form of that link
+static NSUInteger sLeadProxyIndex = NSNotFound;   // 0-based ordinal from the gateway
 static NSHashTable *sLeadProxyOwn = nil;          // every settings object we ever made (weak)
 static NSHashTable *sLeadProxyContexts = nil;     // live MTContexts (weak)
 
@@ -382,12 +222,12 @@ static id LeadProxyMakeSettings(NSDictionary *p) {
 }
 
 // Makes `link` the proxy in use. NO when nothing changed or it can't be built.
-static BOOL LeadProxyActivate(NSString *link) {
+static BOOL LeadProxyActivate(NSString *link, NSUInteger index) {
   NSDictionary *p = LeadProxyParseLink(link);
   if (!p) return NO;
   NSString *canonical = LeadProxyLinkFromParsed(p);
   @synchronized(LeadProxyLock()) {
-    if (sLeadProxySettings && [sLeadProxyLink isEqualToString:canonical]) return NO;
+    if (sLeadProxySettings && [sLeadProxyLink isEqualToString:canonical]) { sLeadProxyIndex = index; return NO; }
   }
   id settings = LeadProxyMakeSettings(p);
   if (!settings) return NO;
@@ -396,9 +236,8 @@ static BOOL LeadProxyActivate(NSString *link) {
     [sLeadProxyOwn addObject:settings];
     sLeadProxySettings = settings;
     sLeadProxyLink = canonical;
-    sLeadProxyInfo = p;
+    sLeadProxyIndex = index;
   }
-  [[NSUserDefaults standardUserDefaults] setObject:canonical forKey:kAutoProxyActive];
   NSLog(@"[Kira] AutoProxy: active server updated");
   return YES;
 }
@@ -407,16 +246,8 @@ static void LeadProxyDeactivate(void) {
   @synchronized(LeadProxyLock()) {
     sLeadProxySettings = nil;
     sLeadProxyLink = nil;
-    sLeadProxyInfo = nil;
+    sLeadProxyIndex = NSNotFound;
   }
-}
-
-// What a launch starts with: the last proxy that answered, else the built-in one.
-static void LeadProxyActivateCached(void) {
-  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-  NSString *link = [defaults stringForKey:kAutoProxyActive];
-  if (link.length && (LeadProxyActivate(link) || LeadAutoProxyCurrentSettings())) return;
-  LeadProxyActivate(LeadProxyBuiltInLinks().firstObject);
 }
 
 id LeadAutoProxyCurrentSettings(void) {
@@ -433,7 +264,9 @@ NSString *LeadListedProxyForService(id service) {
     NSNumber *port = [settings valueForKey:@"port"];
     NSData *secret = [settings valueForKey:@"secret"];
     if (!ip.length || !secret.length) return nil;
-    for (NSString *link in [[NSUserDefaults standardUserDefaults] arrayForKey:kAutoProxyList]) {
+    NSString *active;
+    @synchronized(LeadProxyLock()) { active = sLeadProxyLink; }
+    for (NSString *link in (active.length ? @[active] : @[])) {
       NSDictionary *p = LeadProxyParseLink(link);
       if ([p[@"kind"] isEqual:@"proxy"] && [p[@"port"] isEqual:port] &&
           [ip caseInsensitiveCompare:p[@"server"]] == NSOrderedSame &&
@@ -465,12 +298,9 @@ static NSString *LeadProxyDisplayName(NSUInteger index) {
 }
 
 NSString *LeadAutoProxySummary(void) {
-  NSString *active;
-  @synchronized(LeadProxyLock()) { active = sLeadProxyLink; }
-  if (!active.length) return nil;
-  NSArray<NSString *> *links = [[NSUserDefaults standardUserDefaults] arrayForKey:kAutoProxyList];
-  if (!links.count) links = LeadProxyBuiltInLinks();
-  return LeadProxyDisplayName([links indexOfObject:active]);
+  @synchronized(LeadProxyLock()) {
+    return sLeadProxySettings ? LeadProxyDisplayName(sLeadProxyIndex) : nil;
+  }
 }
 
 // Pushes the current choice into every live MTContext so open connections are rebuilt.
@@ -611,36 +441,42 @@ void LeadGroupCallProxyEnd(void) {
 
 #pragma mark - Refresh
 
-static NSString *LeadProxyConfigURLString(void) {
-  return kLeadAutoProxyConfigURLDefault;
+NSString *LeadAutoProxyConfigHost(void) { return KiraGatewayHost(); }
+
+static BOOL LeadGatewayProbe(NSDictionary *p) {
+  return p && LeadProxyProbe(p[@"server"], [p[@"port"] intValue], 2500,
+                             [p[@"kind"] isEqual:@"socks"], [p[@"user"] length] > 0);
 }
 
-static BOOL LeadProxyURLIsUsable(NSString *urlString) {
-  NSURL *url = [NSURL URLWithString:urlString];
-  return url && [url.scheme.lowercaseString isEqualToString:@"https"] && url.host.length > 0;
-}
-
-NSString *LeadAutoProxyConfigHost(void) {
-  NSURL *url = [NSURL URLWithString:LeadProxyConfigURLString()];
-  if (!LeadProxyURLIsUsable(LeadProxyConfigURLString())) return nil;
-  return url.host;
-}
-
-static NSData *LeadProxyFetch(NSString *urlString) {
-  if (!LeadProxyURLIsUsable(urlString)) return nil;
-  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]
-                                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                     timeoutInterval:10];
-  __block NSData *body = nil;
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  [[[NSURLSession sharedSession] dataTaskWithRequest:request
-                                   completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-    NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? [(NSHTTPURLResponse *)response statusCode] : 0;
-    if (!error && status == 200) body = data;
-    dispatch_semaphore_signal(done);
-  }] resume];
-  dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)));
-  return body;
+// Refresh the separate call pool without disclosing a list. An empty pool is
+// intentional; WARP continues to be selected independently when enabled.
+static void LeadGatewayRefreshCallPool(void) {
+  NSInteger status = 0;
+  NSDictionary *response = KiraGatewayProxy(@"call", @"current", &status);
+  if (status == 401 || (response && [response[@"total"] integerValue] == 0)) {
+    @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
+    if (status == 401) dispatch_async(dispatch_get_main_queue(), ^{
+      if (!KiraGatewayIsActivated()) {
+        LeadProxyDeactivate();
+        LeadProxyPushToContexts();
+      }
+    });
+    return;
+  }
+  if (!response) return;
+  NSUInteger total = MIN([response[@"total"] unsignedIntegerValue], kLeadAutoProxyMaxEntries);
+  for (NSUInteger i = 0; i < total; i++) {
+    id entry = response[@"proxy"];
+    if (![entry isKindOfClass:NSDictionary.class] || ![entry[@"link"] isKindOfClass:NSString.class]) break;
+    NSDictionary *p = LeadProxyParseLink(entry[@"link"]);
+    if ([p[@"kind"] isEqual:@"socks"] && LeadGatewayProbe(p)) {
+      @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = p; }
+      return;
+    }
+    if (i + 1 < total) response = KiraGatewayProxy(@"call", @"next", &status);
+    if (!response) break;
+  }
+  @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
 }
 
 static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *summary, BOOL reachable)) {
@@ -648,55 +484,61 @@ static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *sum
   static dispatch_once_t once;
   dispatch_once(&once, ^{ queue = dispatch_queue_create("kira.autoproxy.refresh", DISPATCH_QUEUE_SERIAL); });
   dispatch_async(queue, ^{
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     if (!LeadProxyEnabled()) {
       if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(nil, NO); });
       return;
     }
-
-    // 1. The list: fresh from the file, else the last good one, else the built-in proxy.
-    NSData *configData = LeadProxyFetch(LeadProxyConfigURLString());
-    NSArray<NSString *> *callLinks = LeadCallProxyLinksFromJSON(configData);
-    if (callLinks != nil) [defaults setObject:callLinks forKey:kLeadCallProxyCache];
-    else callLinks = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
-    // Probe calls independently so ordinary connection selection is not delayed.
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      NSArray *reachableCalls = LeadProxyReachableLinks(callLinks);
-      NSArray *current = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
-      if ([current isEqualToArray:callLinks]) [defaults setObject:reachableCalls forKey:kLeadCallProxyReachable];
-    });
-    NSArray<NSString *> *links = LeadProxyLinksFromJSON(configData);
-    if (links != nil) {
-      [defaults setObject:links forKey:kAutoProxyList];
-    } else {
-      links = [defaults arrayForKey:kAutoProxyList];
+    if (!KiraGatewayIsActivated()) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        LeadProxyDeactivate();
+        @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
+        LeadProxyPushToContexts();
+        if (done) done(nil, NO);
+      });
+      return;
     }
-    if (links.count == 0) links = LeadProxyBuiltInLinks();
 
-    // Prefer the last selected proxy on ordinary refreshes; rotate only on request.
-    NSString *active = [defaults stringForKey:kAutoProxyActive];
-    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
-    NSUInteger current = active.length ? [links indexOfObject:active] : NSNotFound;
-    if (rotate) {
-      for (NSUInteger i = 0; i < links.count; i++) {
-        NSUInteger index = current == NSNotFound ? i : (current + 1 + i) % links.count;
-        if (![links[index] isEqualToString:active]) [ordered addObject:links[index]];
+    NSString *active;
+    @synchronized(LeadProxyLock()) { active = sLeadProxyLink; }
+    NSString *chosen = nil;
+    NSUInteger chosenIndex = NSNotFound;
+    NSInteger status = 0;
+    NSDictionary *response = KiraGatewayProxy(@"normal", rotate ? @"next" : @"current", &status);
+    BOOL empty = response && [response[@"total"] integerValue] == 0;
+    NSUInteger total = MIN([response[@"total"] unsignedIntegerValue], kLeadAutoProxyMaxEntries);
+    for (NSUInteger i = 0; i < total; i++) {
+      id entry = response[@"proxy"];
+      if (![entry isKindOfClass:NSDictionary.class] || ![entry[@"link"] isKindOfClass:NSString.class]) break;
+      NSString *link = LeadAutoProxyNormalizedLink(entry[@"link"]);
+      NSUInteger index = [entry[@"index"] unsignedIntegerValue];
+      if (link.length && index >= 1 && index <= total &&
+          !(rotate && [link isEqualToString:active]) &&
+          LeadGatewayProbe(LeadProxyParseLink(link))) {
+        chosen = link; chosenIndex = index - 1; break;
       }
-    } else {
-      if (current != NSNotFound) [ordered addObject:active];
-      for (NSString *link in links) if (![link isEqualToString:active]) [ordered addObject:link];
+      if (i + 1 < total) response = KiraGatewayProxy(@"normal", @"next", &status);
+      if (!response) break;
     }
-    NSString *chosen = LeadProxyFirstReachable(ordered);
-    BOOL reachable = chosen != nil;
-    if (!chosen && !rotate) chosen = active.length ? active : links.firstObject;
-    [defaults setDouble:[NSDate date].timeIntervalSince1970 forKey:kAutoProxyChecked];
+    BOOL revoked = status == 401;
+    [[NSUserDefaults standardUserDefaults] setDouble:NSDate.date.timeIntervalSince1970 forKey:kAutoProxyChecked];
 
-    // 3. Apply it (and tell Telegram's live connections).
     dispatch_async(dispatch_get_main_queue(), ^{
-      BOOL enabled = LeadProxyEnabled();
-      if (enabled && chosen.length && LeadProxyActivate(chosen)) LeadProxyPushToContexts();
-      if (done) done(LeadAutoProxySummary(), enabled && reachable);
+      BOOL applied = NO;
+      if (LeadProxyEnabled()) {
+        if (revoked || empty) {
+          LeadProxyDeactivate();
+          @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
+          LeadProxyPushToContexts();
+        } else if (chosen.length) {
+          if (LeadProxyActivate(chosen, chosenIndex)) LeadProxyPushToContexts();
+          @synchronized(LeadProxyLock()) { applied = [sLeadProxyLink isEqualToString:chosen]; }
+        }
+      }
+      if (done) done(LeadAutoProxySummary(), applied);
     });
+
+    // A proxy rotation does not need to refresh the call pool.
+    if (!rotate && !revoked) LeadGatewayRefreshCallPool();
   });
 }
 
@@ -707,10 +549,7 @@ void LeadAutoProxyRotate(void (^done)(NSString *summary, BOOL reachable)) { Lead
 
 void LeadAutoProxySetEnabled(BOOL on) {
   if (on) {
-    LeadProxyActivateCached();
-    BOOL pushed = LeadProxyPushToContexts();
     LeadAutoProxyRefresh(nil);
-    if (!pushed) LeadNotifySettingsChanged(); // no connection seen yet: applies after a restart
   } else {
     LeadProxyDeactivate();
     if (!LeadProxyPushToContexts()) LeadNotifySettingsChanged();
@@ -725,17 +564,11 @@ void LeadAutoProxyInstall(void) {
   installed = YES;
 
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-  // Discard caches from the developer's previous endpoint on first upgrade.
-  NSString *sourceKey = @"LeadAutoProxyCacheSource";
-  if (![[defaults stringForKey:sourceKey] isEqualToString:kLeadAutoProxyConfigURLDefault]) {
-    for (NSString *key in @[kAutoProxyConfigURL, kAutoProxyList, kAutoProxyActive, kAutoProxyChecked]) {
-      [defaults removeObjectForKey:key];
-    }
-    [defaults setObject:kLeadAutoProxyConfigURLDefault forKey:sourceKey];
+  // Purge publicly distributed list data left in preferences by older versions.
+  for (NSString *key in @[kAutoProxyConfigURL, kAutoProxyList, kAutoProxyActive,
+                          @"LeadAutoProxyCacheSource", @"LeadCallProxyList", @"KiraCallProxyReachableV2"]) {
+    [defaults removeObjectForKey:key];
   }
-
-  // Synchronously, before Telegram opens its first connection: that one already goes through the proxy.
-  if (LeadProxyEnabled()) LeadProxyActivateCached();
 
   // Refresh every launch, and periodically while foregrounded (no background polling).
   if (LeadProxyEnabled()) {

@@ -1,10 +1,4 @@
 {
-  "proxies": [
-    "tg://proxy?server=mtproto.online&port=443&secret=7hOeDuNhUMHqO_KZeWWGtUV3d3cudnRiLnJ1",
-    "tg://proxy?server=iq.edu2iq.net&port=443&secret=a4d9c2e8b1f6037ea5c8d4b29f1e6a0c",
-    "tg://proxy?server=91.98.97.225&port=8443&secret=79e344818749bd7ac519130220c25d09",
-    "tg://proxy?server=termsnal.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09",
-    "tg://proxy?server=nocloudnew.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09"
-  ],
+  "proxies": [],
   "call_proxies": []
 }

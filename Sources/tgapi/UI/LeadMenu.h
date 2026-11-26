@@ -69,7 +69,7 @@ NSString *LeadAutoProxyNormalizedLink(NSString *link);
 NSString *LeadAutoProxySummary(void);
 // Host of the JSON list's URL, for the menu.
 NSString *LeadAutoProxyConfigHost(void);
-// Loads the cached proxy, installs the hooks and refreshes the list once after launch.
+// Clears obsolete public caches and requests one authorized server after launch.
 void LeadAutoProxyInstall(void);
 // The menu switch: puts the proxy in or takes it out of the running connection.
 void LeadAutoProxySetEnabled(BOOL on);
