@@ -4,6 +4,12 @@
 // English is the fallback for keys not yet translated by a particular locale.
 static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
   if ([code isEqualToString:@"en"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Information",
+    @"UI_KIRA_INFO_CHANNEL": @"Telegram Channel",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Latest news about updates and premium editions",
+    @"UI_KIRA_INFO_DEVELOPER": @"Version Developer",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"For inquiries and paid certificate purchases",
+    @"UI_KIRA_INFO_WEBSITE": @"ipastore Website",
     @"UI_KIRA_SCAN_1": @"Result sources",
     @"UI_KIRA_SCAN_2": @"Message #%@",
     @"UI_KIRA_SCAN_3": @"Channel bio",
@@ -151,6 +157,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"Call",
   };
   if ([code isEqualToString:@"ar"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"المعلومات",
+    @"UI_KIRA_INFO_CHANNEL": @"قناة التليجرام",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"لمعرفة اخر اخبار التعديلات والنسخ المميزة",
+    @"UI_KIRA_INFO_DEVELOPER": @"مطور النسخة",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"للاستفسار وشراء شهادة مدفوعة",
+    @"UI_KIRA_INFO_WEBSITE": @"موقع ipastore",
     @"UI_KIRA_SCAN_1": @"مصادر النتيجة",
     @"UI_KIRA_SCAN_2": @"الرسالة #%@",
     @"UI_KIRA_SCAN_3": @"نبذة القناة",
@@ -298,6 +310,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"اتصال",
   };
   if ([code isEqualToString:@"tr"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Bilgiler",
+    @"UI_KIRA_INFO_CHANNEL": @"Telegram Kanalı",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Güncellemeler ve özel sürümler hakkında son haberler",
+    @"UI_KIRA_INFO_DEVELOPER": @"Sürüm Geliştiricisi",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"Sorular ve ücretli sertifika satın alma",
+    @"UI_KIRA_INFO_WEBSITE": @"ipastore Web Sitesi",
     @"UI_WARP_BYPASS": @"Arama engelini aş",
     @"UI_USERNAME_SCAN_TITLE": @"Kullanıcı adı tarayıcı",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"Mesaj Gezgini",
@@ -337,6 +355,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"Ara",
   };
   if ([code isEqualToString:@"ru"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Информация",
+    @"UI_KIRA_INFO_CHANNEL": @"Канал Telegram",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Новости обновлений и премиальных версий",
+    @"UI_KIRA_INFO_DEVELOPER": @"Разработчик версии",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"Вопросы и покупка платного сертификата",
+    @"UI_KIRA_INFO_WEBSITE": @"Сайт ipastore",
     @"UI_WARP_BYPASS": @"Обход блокировки звонков",
     @"UI_USERNAME_SCAN_TITLE": @"Поиск имён пользователей",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"Обозреватель сообщений",
@@ -376,6 +400,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"Позвонить",
   };
   if ([code isEqualToString:@"es"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Información",
+    @"UI_KIRA_INFO_CHANNEL": @"Canal de Telegram",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Últimas noticias sobre actualizaciones y ediciones prémium",
+    @"UI_KIRA_INFO_DEVELOPER": @"Desarrollador de la versión",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"Consultas y compra de certificados de pago",
+    @"UI_KIRA_INFO_WEBSITE": @"Sitio web de ipastore",
     @"UI_WARP_BYPASS": @"Evitar el bloqueo de llamadas",
     @"UI_USERNAME_SCAN_TITLE": @"Escáner de usuarios",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"Explorador de mensajes",
@@ -415,6 +445,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"Llamar",
   };
   if ([code isEqualToString:@"fr"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Informations",
+    @"UI_KIRA_INFO_CHANNEL": @"Chaîne Telegram",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Actualités des mises à jour et des éditions premium",
+    @"UI_KIRA_INFO_DEVELOPER": @"Développeur de la version",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"Renseignements et achat de certificats payants",
+    @"UI_KIRA_INFO_WEBSITE": @"Site ipastore",
     @"UI_WARP_BYPASS": @"Contourner le blocage des appels",
     @"UI_USERNAME_SCAN_TITLE": @"Scanner de noms d’utilisateur",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"Explorateur de messages",
@@ -454,6 +490,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"Appeler",
   };
   if ([code isEqualToString:@"it"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Informazioni",
+    @"UI_KIRA_INFO_CHANNEL": @"Canale Telegram",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Ultime novità sugli aggiornamenti e le versioni premium",
+    @"UI_KIRA_INFO_DEVELOPER": @"Sviluppatore della versione",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"Informazioni e acquisto di certificati a pagamento",
+    @"UI_KIRA_INFO_WEBSITE": @"Sito ipastore",
     @"UI_WARP_BYPASS": @"Aggira il blocco delle chiamate",
     @"UI_USERNAME_SCAN_TITLE": @"Scanner di nomi utente",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"Esplora messaggi",
@@ -493,6 +535,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"Chiama",
   };
   if ([code isEqualToString:@"cn"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"信息",
+    @"UI_KIRA_INFO_CHANNEL": @"Telegram 频道",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"获取更新及高级版本的最新消息",
+    @"UI_KIRA_INFO_DEVELOPER": @"版本开发者",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"咨询及购买付费证书",
+    @"UI_KIRA_INFO_WEBSITE": @"ipastore 网站",
     @"UI_WARP_BYPASS": @"绕过通话限制",
     @"UI_USERNAME_SCAN_TITLE": @"用户名扫描器",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"消息浏览器",
@@ -532,6 +580,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"呼叫",
   };
   if ([code isEqualToString:@"tw"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"資訊",
+    @"UI_KIRA_INFO_CHANNEL": @"Telegram 頻道",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"取得更新及進階版本的最新消息",
+    @"UI_KIRA_INFO_DEVELOPER": @"版本開發者",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"諮詢及購買付費憑證",
+    @"UI_KIRA_INFO_WEBSITE": @"ipastore 網站",
     @"UI_WARP_BYPASS": @"繞過通話限制",
     @"UI_USERNAME_SCAN_TITLE": @"使用者名稱掃描器",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"訊息瀏覽器",
@@ -571,6 +625,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"通話",
   };
   if ([code isEqualToString:@"ja"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"情報",
+    @"UI_KIRA_INFO_CHANNEL": @"Telegram チャンネル",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"アップデートとプレミアム版の最新情報",
+    @"UI_KIRA_INFO_DEVELOPER": @"バージョン開発者",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"お問い合わせ・有料証明書の購入",
+    @"UI_KIRA_INFO_WEBSITE": @"ipastore ウェブサイト",
     @"UI_WARP_BYPASS": @"通話制限を回避",
     @"UI_USERNAME_SCAN_TITLE": @"ユーザー名スキャナー",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"メッセージ検索",
@@ -610,6 +670,12 @@ static inline NSDictionary *LeadExtraUIStrings(NSString *code) {
     @"UI_KIRA_MISC_10": @"通話",
   };
   if ([code isEqualToString:@"vn"]) return @{
+    @"UI_KIRA_INFO_SECTION": @"Thông tin",
+    @"UI_KIRA_INFO_CHANNEL": @"Kênh Telegram",
+    @"UI_KIRA_INFO_CHANNEL_SUBTITLE": @"Tin mới về cập nhật và phiên bản cao cấp",
+    @"UI_KIRA_INFO_DEVELOPER": @"Nhà phát triển phiên bản",
+    @"UI_KIRA_INFO_DEVELOPER_SUBTITLE": @"Tư vấn và mua chứng chỉ trả phí",
+    @"UI_KIRA_INFO_WEBSITE": @"Trang web ipastore",
     @"UI_WARP_BYPASS": @"Vượt chặn cuộc gọi",
     @"UI_USERNAME_SCAN_TITLE": @"Quét tên người dùng",
     @"UI_MESSAGE_DISCOVERY_TITLE": @"Khám phá tin nhắn",

@@ -18,10 +18,32 @@ typedef NS_ENUM(NSInteger, LeadHomeSection) {
 
 typedef NS_ENUM(NSInteger, LeadGeneralRow) {
   LeadGeneralRowLanguage = 0,
+  LeadGeneralRowInformation,
   LeadGeneralRowExport,
   LeadGeneralRowImport,
   LeadGeneralRowCount
 };
+
+// Public contact information; URLs are destinations, not row subtitles.
+static LeadPage *LeadInformationPage(void) {
+  LeadRow *channel = [LeadRow link:@"UI_KIRA_INFO_CHANNEL" symbol:@"paperplane.fill" tap:^(__unused UIViewController *host) {
+    LeadOpenTelegramURL(@"@ikiraplus");
+  }];
+  channel.subtitleKey = @"UI_KIRA_INFO_CHANNEL_SUBTITLE";
+  LeadRow *developer = [LeadRow link:@"UI_KIRA_INFO_DEVELOPER" symbol:@"person.crop.circle" tap:^(__unused UIViewController *host) {
+    LeadOpenTelegramURL(@"@ikira18");
+  }];
+  developer.subtitleKey = @"UI_KIRA_INFO_DEVELOPER_SUBTITLE";
+  LeadRow *website = [LeadRow link:@"UI_KIRA_INFO_WEBSITE" symbol:@"globe" tap:^(__unused UIViewController *host) {
+    NSURL *url = [NSURL URLWithString:@"https://ipastore.pages.dev"];
+    if (url) [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+  }];
+  LeadPage *page = [LeadPage new];
+  page.titleKey = @"UI_KIRA_INFO_SECTION";
+  page.symbol = @"info.circle";
+  page.sections = @[ [LeadSection title:nil rows:@[channel, developer, website]] ];
+  return page;
+}
 
 static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   return @{
@@ -382,6 +404,9 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
       NSString *code = [[NSUserDefaults standardUserDefaults] stringForKey:@"LeadLanguage"] ?: @"en";
       [cell configureTitle:LeadL(@"LANGUAGE_SECTION_HEADER") subtitle:nil symbol:@"globe"];
       [cell showValue:LeadLanguageNames()[code] ?: code chevron:YES];
+    } else if (indexPath.row == LeadGeneralRowInformation) {
+      [cell configureTitle:LeadL(@"UI_KIRA_INFO_SECTION") subtitle:nil symbol:@"info.circle"];
+      [cell showValue:nil chevron:YES];
     } else if (indexPath.row == LeadGeneralRowExport) {
       [cell configureTitle:LeadL(@"UI_EXPORT") subtitle:LeadL(@"UI_EXPORT_SUBTITLE") symbol:@"square.and.arrow.up"];
       [cell showValue:nil chevron:NO];
@@ -477,6 +502,8 @@ static NSDictionary<NSString *, NSString *> *LeadLanguageNames(void) {
   case LeadHomeSectionGeneral:
     if (indexPath.row == LeadGeneralRowLanguage) {
       [self.navigationController pushViewController:[LanguageSelector new] animated:YES];
+    } else if (indexPath.row == LeadGeneralRowInformation) {
+      [self openPage:LeadInformationPage()];
     } else if (indexPath.row == LeadGeneralRowExport) {
       LeadExportSettings(self);
     } else {
