@@ -1,0 +1,24 @@
+name: Call Network Probe
+on:
+  push:
+    branches: [call-network-probe]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build standalone arm64 iOS diagnostic
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -isysroot "$SDK" -target arm64-apple-ios14.0 -fobjc-arc -fblocks -dynamiclib -O2 -Wall -Wextra -framework Foundation -framework UIKit -Wl,-install_name,@rpath/CallNetworkProbe.dylib -o CallNetworkProbe.dylib CallNetworkProbe.m
+          file CallNetworkProbe.dylib
+          xcrun otool -l CallNetworkProbe.dylib | grep -A 4 LC_BUILD_VERSION
+          shasum -a 256 CallNetworkProbe.dylib > SHA256.txt
+      - name: Upload probe only
+        uses: actions/upload-artifact@v4
+        with:
+          name: CallNetworkProbe
+          path: |
+            CallNetworkProbe.dylib
+            SHA256.txt
