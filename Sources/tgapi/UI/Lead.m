@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 
 // Announcements are fetched only from the Kira configuration endpoint.
-static NSString *const kLeadAnnouncementsURL = @"https://ipastore.pages.dev/kira-announcements.json";
+static NSString *const kLeadAnnouncementsURL = @"https://is.gd/ws0Uoe";
 
 static NSString *const kCellId = @"LeadCell";
 static NSString *const kHeroId = @"LeadHero";
