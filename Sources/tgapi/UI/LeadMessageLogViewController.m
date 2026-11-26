@@ -20,7 +20,7 @@ static UIImage *LeadLogAvatar(NSString *peer) {
   SEL selector = NSSelectorFromString(@"profileAvatarForPeer:");
   if (![parser respondsToSelector:selector]) return nil;
   NSData *thumb = ((NSData *(*)(id, SEL, id))objc_msgSend)(parser, selector, peer);
-  if (thumb.length < 3 || thumb.length > 524288) return nil;
+  if (thumb.length < 3 || thumb.length > 2097152) return nil;
   const uint8_t *bytes = thumb.bytes;
   if (bytes[0] != 1) return [UIImage imageWithData:thumb];
   if (thumb.length > 8192) return nil;
@@ -112,8 +112,10 @@ static UIImage *LeadLogAvatar(NSString *peer) {
   ]];
   self.tableView.tableHeaderView = header;
 
-  self.navigationItem.rightBarButtonItem =
-      [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"trash"] style:UIBarButtonItemStylePlain target:self action:@selector(clearTapped)];
+  UIBarButtonItem *trash = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"trash"] style:UIBarButtonItemStylePlain target:self action:@selector(clearTapped)];
+  UIBarButtonItem *refresh = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.clockwise"] style:UIBarButtonItemStylePlain target:self action:@selector(refreshTapped)];
+  refresh.accessibilityLabel = LeadL(@"UI_KIRA_MISC_7");
+  self.navigationItem.rightBarButtonItems = @[trash, refresh];
   self.emptyView = [self buildEmptyView];
 
   [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:@"LeadMessageLogChanged" object:nil];
@@ -169,6 +171,16 @@ static UIImage *LeadLogAvatar(NSString *peer) {
 
 - (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
   [searchBar resignFirstResponder];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+  [super viewWillAppear:animated];
+  [self reload];
+}
+
+- (void)refreshTapped {
+  LeadSelectionHaptic();
+  [self reload];
 }
 
 - (void)segmentChanged {
@@ -266,11 +278,9 @@ NSString *LeadProfileChangeText(NSDictionary *entry) {
   NSString *now = [entry[@"text"] isKindOfClass:[NSString class]] ? entry[@"text"] : nil;
   if ([field isEqualToString:@"photo"]) return LeadL(@"UI_PROFILE_PHOTO_CHANGED");
   if ([field isEqualToString:@"photo_added"]) return LeadL(@"UI_PROFILE_PHOTO_ADDED");
-  NSString *language = [[NSUserDefaults standardUserDefaults] stringForKey:@"LeadLanguage"] ?: @"en";
-  BOOL arabic = [language hasPrefix:@"ar"];
-  if ([field isEqualToString:@"photo_removed"]) return arabic ? @"الصورة الشخصية لم تعد متاحة" : @"Profile photo no longer visible";
-  if ([field isEqualToString:@"status_unavailable"]) return arabic ? @"آخر ظهور أصبح غير متاح (حظر محتمل، غير مؤكد)" : @"Last seen became unavailable (possible block, unconfirmed)";
-  if ([field isEqualToString:@"status_recent"]) return arabic ? @"آخر ظهور عاد للظهور (إزالة حظر محتملة، غير مؤكدة)" : @"Last seen visible again (possible unblock, unconfirmed)";
+  if ([field isEqualToString:@"photo_removed"]) return LeadL(@"UI_KIRA_MISC_4");
+  if ([field isEqualToString:@"status_unavailable"]) return LeadL(@"UI_KIRA_MISC_5");
+  if ([field isEqualToString:@"status_recent"]) return LeadL(@"UI_KIRA_MISC_6");
   if ([field isEqualToString:@"story_seen"]) return LeadL(@"UI_PROFILE_STORY_SEEN");
   if ([field isEqualToString:@"story_removed"]) return LeadL(@"UI_PROFILE_STORY_REMOVED");
 

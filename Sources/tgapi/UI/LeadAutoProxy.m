@@ -54,7 +54,7 @@ static NSArray<NSString *> *LeadCallProxyBuiltInLinks(void) {
   ];
 }
 static NSString *const kLeadCallProxyCache = @"LeadCallProxyList";
-static NSString *const kLeadCallProxyReachable = @"LeadCallProxyReachable";
+static NSString *const kLeadCallProxyReachable = @"KiraCallProxyReachableV2";
 
 static const NSTimeInterval kLeadAutoProxyRefreshInterval = 20 * 60;
 static const NSUInteger kLeadAutoProxyMaxEntries = 20;
@@ -227,7 +227,26 @@ static NSArray<NSString *> *LeadCallProxyLinksFromJSON(NSData *data) {
 #pragma mark - Reachability
 
 // Plain TCP connect, off the proxy, so a dead server is skipped instead of chosen.
-static BOOL LeadProxyProbe(NSString *host, int port, int timeoutMs) {
+static BOOL LeadProxySOCKSGreeting(int fd, BOOL hasCredentials, int timeoutMs) {
+  // The socket is nonblocking and already connected. Check the actual protocol,
+  // not just whether an unrelated service happens to listen on the port.
+  int noSigPipe = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
+  const uint8_t hello[] = { 5, (uint8_t)(hasCredentials ? 2 : 1), 0, 2 };
+  size_t length = hasCredentials ? 4 : 3;
+  if (send(fd, hello, length, 0) != (ssize_t)length) return NO;
+  uint8_t reply[2];
+  size_t received = 0;
+  while (received < sizeof(reply)) {
+    struct pollfd ready = { .fd = fd, .events = POLLIN, .revents = 0 };
+    if (poll(&ready, 1, timeoutMs) <= 0) return NO;
+    ssize_t n = recv(fd, reply + received, sizeof(reply) - received, 0);
+    if (n <= 0) return NO;
+    received += (size_t)n;
+  }
+  return reply[0] == 5 && (reply[1] == 0 || (hasCredentials && reply[1] == 2));
+}
+static BOOL LeadProxyProbe(NSString *host, int port, int timeoutMs, BOOL socks, BOOL hasCredentials) {
   struct addrinfo hints;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
@@ -252,6 +271,7 @@ static BOOL LeadProxyProbe(NSString *host, int port, int timeoutMs) {
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) ok = YES;
       }
     }
+    if (ok && socks) ok = LeadProxySOCKSGreeting(fd, hasCredentials, timeoutMs);
     close(fd);
   }
   freeaddrinfo(res);
@@ -269,7 +289,7 @@ static NSArray<NSString *> *LeadProxyReachableLinks(NSArray<NSString *> *links) 
     NSDictionary *p = LeadProxyParseLink(links[i]);
     if (!p) continue;
     dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      BOOL ok = LeadProxyProbe(p[@"server"], [p[@"port"] intValue], 3000);
+      BOOL ok = LeadProxyProbe(p[@"server"], [p[@"port"] intValue], 2500, [p[@"kind"] isEqual:@"socks"], [p[@"user"] length] > 0);
       @synchronized(answered) { answered[i] = @(ok); }
     });
   }
@@ -295,10 +315,12 @@ static NSDictionary *LeadCallProxyChoose(void) {
   NSArray<NSString *> *configured = [defaults arrayForKey:kLeadCallProxyCache] ?: LeadCallProxyBuiltInLinks();
   if (!configured.count) return nil;
   NSMutableArray<NSString *> *reachable = [NSMutableArray array];
-  for (NSString *link in [defaults arrayForKey:kLeadCallProxyReachable]) {
+  NSArray *checked = [defaults arrayForKey:kLeadCallProxyReachable];
+  for (NSString *link in checked) {
     if ([configured containsObject:link]) [reachable addObject:link];
   }
-  NSArray<NSString *> *pool = reachable.count ? reachable : configured;
+  NSArray<NSString *> *pool = checked != nil ? reachable : configured;
+  if (!pool.count) return nil;
   static NSUInteger next = 0;
   static NSObject *lock;
   static dispatch_once_t once;
@@ -536,7 +558,23 @@ BOOL LeadCallSignalingBegin(id service) {
   });
   return YES;
 }
-void LeadCallSignalingEnd(void) {
+// A restarted local tunnel receives a different port and credentials.
+ // Discard only the managed call override and rebuild it for an active call.
+ void LeadWarpRouteDidChange(void) {
+   BOOL rebuild = NO;
+   @synchronized(LeadProxyLock()) {
+     if (sLeadGroupProxySettings) {
+       sLeadGroupProxySettings = nil;
+       sLeadCallProxyInfo = nil;
+       rebuild = YES;
+     }
+     if (sLeadCallRPCActive || sLeadGroupProxyUsers) {
+       rebuild = LeadEnsureCallProxy() || rebuild;
+     }
+   }
+   if (rebuild) LeadProxyPushToContexts();
+ }
+ void LeadCallSignalingEnd(void) {
   @synchronized(LeadProxyLock()) { sLeadCallRPCActive = NO; ++sLeadCallEpoch; }
   LeadRestoreCallProxyIfIdle();
 }

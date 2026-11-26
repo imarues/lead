@@ -1,5 +1,6 @@
 #import "EmbeddedLangs.h"
 #import "LeadUIStrings.h"
+#import "LeadExtraUIStrings.h"
 #import "Headers.h"
 #import <dlfcn.h>
 #import <objc/runtime.h>
@@ -108,7 +109,9 @@ NSString *LeadBundlePath(void) {
 
   // Menu strings (UI_*) go in first, so the long-standing feature strings win on overlap.
   NSMutableDictionary *merged = [LeadUIStrings(@"en") mutableCopy];
+  [merged addEntriesFromDictionary:LeadExtraUIStrings(@"en")];
   [merged addEntriesFromDictionary:LeadUIStrings(lang)];
+  [merged addEntriesFromDictionary:LeadExtraUIStrings(lang)];
   [merged addEntriesFromDictionary:dict ?: @{}];
   // Rebrand user-facing legacy translations without renaming persistent identifiers.
   NSRegularExpression *brand = [NSRegularExpression regularExpressionWithPattern:@"\\bLead\\b" options:0 error:nil];

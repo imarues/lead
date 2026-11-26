@@ -1607,13 +1607,13 @@ static BOOL LeadPresentCallChoice(NSString *label,BOOL allowShortVideo,
     gLeadCallPromptOpen=YES;
     void (^dial)(void)=[originalAction copy];
     UIAlertController *confirm=[UIAlertController
-        alertControllerWithTitle:@"تأكيد المكالمة"
+        alertControllerWithTitle:LeadL(@"UI_KIRA_MISC_8")
         message:nil preferredStyle:UIAlertControllerStyleAlert];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+    [confirm addAction:[UIAlertAction actionWithTitle:LeadL(@"CANCEL")
          style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action){
             gLeadCallPromptOpen=NO;
          }]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"اتصال"
+    [confirm addAction:[UIAlertAction actionWithTitle:LeadL(@"UI_KIRA_MISC_10")
          style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){
             gLeadCallPromptOpen=NO;
             dial();

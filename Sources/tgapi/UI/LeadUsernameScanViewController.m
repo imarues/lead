@@ -19,7 +19,7 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 @end
 @implementation LeadUsernameSourceController
 - (void)viewDidLoad {
-    [super viewDidLoad]; self.title = @"مصادر النتيجة";
+    [super viewDidLoad]; self.title = LeadL(@"UI_KIRA_SCAN_1");
     self.tableView.backgroundColor = LeadThemeBackground(); self.tableView.tintColor = LeadThemeAccent();
     self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
 }
@@ -27,7 +27,7 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"source"] ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"source"];
     NSNumber *mid = self.messageIds[indexPath.row];
-    cell.textLabel.text = mid.longLongValue > 0 ? [NSString stringWithFormat:@"الرسالة #%@",mid] : @"نبذة القناة";
+    cell.textLabel.text = mid.longLongValue > 0 ? [NSString stringWithFormat:LeadL(@"UI_KIRA_SCAN_2"),mid] : LeadL(@"UI_KIRA_SCAN_3");
     KiraStyleListCell(cell);
     cell.textLabel.font = LeadFont(15, UIFontWeightMedium); cell.tintColor = LeadThemeAccent();
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; return cell;
@@ -54,28 +54,28 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
 @implementation LeadUsernameScanViewController
 - (instancetype)init { return [super initWithStyle:UITableViewStyleInsetGrouped]; }
 - (void)viewDidLoad {
-    [super viewDidLoad]; self.title = @"فحص اليوزرات";
+    [super viewDidLoad]; self.title = LeadL(@"UI_USERNAME_SCAN_TITLE");
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.tableView.backgroundColor = LeadThemeBackground(); self.tableView.tintColor = LeadThemeAccent();
     self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.tableView.rowHeight = UITableViewAutomaticDimension; self.tableView.estimatedRowHeight = 72;
     self.rows = @[]; self.unique = [NSMutableDictionary dictionary]; self.sources = [NSMutableDictionary dictionary]; self.warnings = [NSMutableArray array];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"نسخ الكل" style:UIBarButtonItemStylePlain target:self action:@selector(copyAll)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:LeadL(@"UI_COPY_ALL") style:UIBarButtonItemStylePlain target:self action:@selector(copyAll)];
     UIView *header = [[LeadThemeHeader alloc] initWithFrame:CGRectMake(0,0,320,194)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     self.field = [UITextField new]; self.field.borderStyle = UITextBorderStyleNone; self.field.backgroundColor = LeadThemeCard();
     self.field.layer.cornerRadius = 12; self.field.layer.borderWidth = 1; self.field.layer.borderColor = [LeadThemeAccent() colorWithAlphaComponent:0.32].CGColor;
     self.field.textColor = LeadThemeInk(); self.field.tintColor = LeadThemeAccent(); self.field.font = LeadFont(15, UIFontWeightMedium);
     self.field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,12,1)]; self.field.leftViewMode = UITextFieldViewModeAlways;
-    self.field.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"https://t.me/channel أو رابط دعوة" attributes:@{NSForegroundColorAttributeName:LeadThemeMuted()}]; self.field.keyboardType = UIKeyboardTypeURL;
+    self.field.attributedPlaceholder = [[NSAttributedString alloc] initWithString:LeadL(@"UI_KIRA_SCAN_6") attributes:@{NSForegroundColorAttributeName:LeadThemeMuted()}]; self.field.keyboardType = UIKeyboardTypeURL;
     self.field.autocapitalizationType = UITextAutocapitalizationTypeNone; self.field.autocorrectionType = UITextAutocorrectionTypeNo;
     self.field.clearButtonMode = UITextFieldViewModeWhileEditing; self.field.returnKeyType = UIReturnKeySearch; self.field.delegate = self;
-    self.start = [UIButton buttonWithType:UIButtonTypeSystem]; [self.start setTitle:@"بدء الفحص" forState:UIControlStateNormal];
+    self.start = [UIButton buttonWithType:UIButtonTypeSystem]; [self.start setTitle:LeadL(@"UI_KIRA_SCAN_7") forState:UIControlStateNormal];
     self.start.backgroundColor = LeadThemeAccent(); self.start.layer.cornerRadius = 12; self.start.titleLabel.font = LeadRoundedFont(15, UIFontWeightSemibold);
     [self.start setTitleColor:LeadThemeBackground() forState:UIControlStateNormal];
     [self.start addTarget:self action:@selector(startScan) forControlEvents:UIControlEventTouchUpInside];
     self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = LeadFont(13, UIFontWeightRegular); self.status.textColor = LeadThemeMuted();
-    self.status.text = @"يفحص النبذة والمثبتات وسجل الرسائل المتاح لحسابك. لا ينضم للقنوات ولا يفحص الأعضاء.";
+    self.status.text = LeadL(@"UI_KIRA_SCAN_8");
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[self.field,self.start,self.status]];
     stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 8; stack.translatesAutoresizingMaskIntoConstraints = NO; [header addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[[stack.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:16],[stack.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-16],[stack.topAnchor constraintEqualToAnchor:header.topAnchor constant:8],[self.field.heightAnchor constraintEqualToConstant:44],[self.start.heightAnchor constraintEqualToConstant:36]]];
@@ -100,65 +100,65 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     [self refreshRows];
 }
 - (void)finish:(NSString *)reason {
-    self.running = NO; self.field.enabled = YES; [self.start setTitle:@"بدء الفحص" forState:UIControlStateNormal];
-    self.status.text = [NSString stringWithFormat:@"%@ — %ld رسالة، %lu نتيجة فريدة%@",reason,(long)self.scanned,(unsigned long)self.rows.count,self.warnings.count ? [@"\nفحص غير مكتمل: " stringByAppendingString:[self.warnings componentsJoinedByString:@"؛ "]] : @""];
+    self.running = NO; self.field.enabled = YES; [self.start setTitle:LeadL(@"UI_KIRA_SCAN_7") forState:UIControlStateNormal];
+    self.status.text = [NSString stringWithFormat:LeadL(@"UI_KIRA_SCAN_9"),reason,(long)self.scanned,(unsigned long)self.rows.count,self.warnings.count ? [LeadL(@"UI_KIRA_SCAN_10") stringByAppendingString:[self.warnings componentsJoinedByString:LeadL(@"UI_KIRA_SCAN_11")]] : @""];
 }
 // Request timeout prevents the screen from becoming stuck if the session is disconnected.
 - (void)send:(NSData *)payload generation:(NSInteger)gen completion:(void (^)(NSData *,NSString *))completion {
-    if (!payload.length) { completion(nil,@"تعذر تجهيز الطلب"); return; }
+    if (!payload.length) { completion(nil,LeadL(@"UI_KIRA_SCAN_12")); return; }
     __block BOOL delivered = NO;
     BOOL sent = LeadSendRawRequest(payload, ^(NSData *data, NSString *error) {
         if (delivered || gen != self.generation || !self.running) return;
         delivered = YES; completion(LeadDiscoveryUnpack(data),error);
     });
-    if (!sent) { delivered = YES; completion(nil,@"جلسة تيليكرام غير متاحة"); return; }
+    if (!sent) { delivered = YES; completion(nil,LeadL(@"UI_KIRA_SCAN_13")); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC),dispatch_get_main_queue(),^{
         if (delivered || gen != self.generation || !self.running) return;
-        delivered = YES; completion(nil,@"انتهت مهلة الطلب");
+        delivered = YES; completion(nil,LeadL(@"UI_KIRA_SCAN_14"));
     });
 }
 - (void)startScan {
-    if (self.running) { self.generation++; [self finish:@"أُوقف الفحص — النتائج جزئية"]; return; }
+    if (self.running) { self.generation++; [self finish:LeadL(@"UI_KIRA_SCAN_15")]; return; }
     [self.field resignFirstResponder]; NSDictionary *req = [LeadUsernameScanner resolveTarget:self.field.text ?: @""];
-    if (!req) { self.status.text = @"أدخل رابط قناة أو رابط دعوة صحيح، وليس رابط رسالة."; return; }
+    if (!req) { self.status.text = LeadL(@"UI_KIRA_SCAN_16"); return; }
     NSInteger gen = ++self.generation; self.running = YES; self.scanned = 0;
     [self.unique removeAllObjects]; [self.sources removeAllObjects]; self.bioURL = nil; [self.warnings removeAllObjects]; [self refreshRows]; self.field.enabled = NO;
-    [self.start setTitle:@"إيقاف الفحص" forState:UIControlStateNormal]; self.status.text = @"جاري التحقق من القناة…";
+    [self.start setTitle:LeadL(@"UI_KIRA_SCAN_17") forState:UIControlStateNormal]; self.status.text = LeadL(@"UI_KIRA_SCAN_18");
     [self send:req[@"payload"] generation:gen completion:^(NSData *data, NSString *error) {
         self.target = data.length && !error.length ? [LeadUsernameScanner parseTarget:data kind:req[@"kind"]] : nil;
-        if (!self.target[@"peer"]) { [self finish:error ?: self.target[@"error"] ?: @"تعذر الوصول إلى القناة أو الرابط ليس قناة"]; return; }
+        if (!self.target[@"peer"]) { [self finish:error ?: ([self.target[@"error"] isEqualToString:@"انضم للقناة أولاً بحسابك حتى تگدر تفحص الرسائل."] ? LeadL(@"UI_KIRA_SCAN_36") : self.target[@"error"]) ?: LeadL(@"UI_KIRA_SCAN_19")]; return; }
         NSString *name = self.target[@"username"];
         if (name.length) self.bioURL = [NSString stringWithFormat:@"tg://resolve?domain=%@",name];
         else if ([req[@"kind"] isEqual:@"invite"]) self.bioURL = [NSString stringWithFormat:@"tg://join?invite=%@",req[@"targetValue"]];
         else self.bioURL = [NSString stringWithFormat:@"tg://resolve?domain=%@",req[@"targetValue"]];
         [self send:[LeadUsernameScanner fullRequest:self.target] generation:gen completion:^(NSData *full, NSString *err) {
             NSArray *refs = !err.length && full.length ? [LeadUsernameScanner parseFull:full] : nil;
-            if (refs) [self addRefs:refs]; else [self.warnings addObject:@"تعذر فحص النبذة"];
+            if (refs) [self addRefs:refs]; else [self.warnings addObject:LeadL(@"UI_KIRA_SCAN_20")];
             [self scanPage:0 pinned:YES limit:100 generation:gen];
         }];
     }];
 }
 - (void)scanPage:(int32_t)offset pinned:(BOOL)pinned limit:(int32_t)limit generation:(NSInteger)gen {
     if (!self.running || gen != self.generation) return;
-    self.status.text = [NSString stringWithFormat:@"%@ — %@ — %ld رسالة، %lu نتيجة",self.target[@"title"],pinned ? @"المثبتات" : @"سجل الرسائل",(long)self.scanned,(unsigned long)self.rows.count];
+    self.status.text = [NSString stringWithFormat:LeadL(@"UI_KIRA_SCAN_21"),self.target[@"title"],pinned ? LeadL(@"UI_KIRA_SCAN_22") : LeadL(@"UI_KIRA_SCAN_23"),(long)self.scanned,(unsigned long)self.rows.count];
     [self send:[LeadUsernameScanner pageRequest:self.target offset:offset pinned:pinned limit:limit] generation:gen completion:^(NSData *data, NSString *error) {
         NSDictionary *page = !error.length && data.length ? [LeadUsernameScanner parsePage:data] : nil;
         if (!page) {
-            [self.warnings addObject:[NSString stringWithFormat:@"%@ (%@)",pinned ? @"المثبتات" : @"السجل",error ?: @"تعذر تحليل الرد"]];
-            if (pinned) [self scanPage:0 pinned:NO limit:100 generation:gen]; else [self finish:@"توقف الفحص"];
+            [self.warnings addObject:[NSString stringWithFormat:@"%@ (%@)",pinned ? LeadL(@"UI_KIRA_SCAN_22") : LeadL(@"UI_KIRA_SCAN_24"),error ?: LeadL(@"UI_KIRA_SCAN_25")]];
+            if (pinned) [self scanPage:0 pinned:NO limit:100 generation:gen]; else [self finish:LeadL(@"UI_KIRA_SCAN_26")];
             return;
         }
         [self addRefs:page[@"refs"]]; if (!pinned) self.scanned += [page[@"count"] integerValue];
         int32_t next = [page[@"offset"] intValue]; BOOL partial = [page[@"partial"] boolValue];
         if (partial && (!next || (offset && next >= offset))) {
             if (limit > 1) { [self scanPage:offset pinned:pinned limit:1 generation:gen]; return; }
-            [self.warnings addObject:pinned ? @"مثبت بتنسيق غير مدعوم" : @"رسالة بتنسيق غير مدعوم؛ لا يمكن ضمان بقية السجل"];
-            if (pinned) [self scanPage:0 pinned:NO limit:100 generation:gen]; else [self finish:@"توقف الفحص"];
+            [self.warnings addObject:pinned ? LeadL(@"UI_KIRA_SCAN_27") : LeadL(@"UI_KIRA_SCAN_28")];
+            if (pinned) [self scanPage:0 pinned:NO limit:100 generation:gen]; else [self finish:LeadL(@"UI_KIRA_SCAN_26")];
             return;
         }
         if (![page[@"returned"] integerValue] || !next || (offset && next >= offset)) {
-            if ([page[@"returned"] integerValue]) [self.warnings addObject:@"توقف مؤشر الصفحات"];
-            if (pinned) [self scanPage:0 pinned:NO limit:100 generation:gen]; else [self finish:self.warnings.count ? @"انتهى الفحص الجزئي" : @"اكتمل الفحص"];
+            if ([page[@"returned"] integerValue]) [self.warnings addObject:LeadL(@"UI_KIRA_SCAN_29")];
+            if (pinned) [self scanPage:0 pinned:NO limit:100 generation:gen]; else [self finish:self.warnings.count ? LeadL(@"UI_KIRA_SCAN_30") : LeadL(@"UI_KIRA_SCAN_31")];
             return;
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),dispatch_get_main_queue(),^{ [self scanPage:next pinned:pinned limit:100 generation:gen]; });
@@ -175,7 +175,7 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     else if ([self.target[@"username"] length]) url = [NSString stringWithFormat:@"tg://resolve?domain=%@&post=%@",self.target[@"username"],mid];
     else if ([self.target[@"channelId"] longLongValue] > 0) url = [NSString stringWithFormat:@"tg://privatepost?channel=%@&post=%@",self.target[@"channelId"],mid];
     if (url.length) {
-        if (self.running) { self.generation++; [self finish:@"أُوقف الفحص — النتائج جزئية"]; }
+        if (self.running) { self.generation++; [self finish:LeadL(@"UI_KIRA_SCAN_15")]; }
         LeadOpenTelegramURL(url); // Internal app delegate/scene router; never LaunchServices for tg://.
     }
 }
@@ -196,19 +196,19 @@ extern NSData *LeadDiscoveryUnpack(NSData *data);
     NSArray *ids = [self sourcesFor:ref];
     KiraStyleListCell(cell);
     cell.textLabel.text = ref; cell.textLabel.font = LeadFont(15, UIFontWeightSemibold); cell.textLabel.numberOfLines = 0;
-    cell.detailTextLabel.text = ids.count == 1 ? ([ids.firstObject longLongValue] == 0 ? @"نبذة القناة" : [NSString stringWithFormat:@"الرسالة #%@",ids.firstObject]) : [NSString stringWithFormat:@"%lu مصادر",(unsigned long)ids.count];
+    cell.detailTextLabel.text = ids.count == 1 ? ([ids.firstObject longLongValue] == 0 ? LeadL(@"UI_KIRA_SCAN_3") : [NSString stringWithFormat:LeadL(@"UI_KIRA_SCAN_2"),ids.firstObject]) : [NSString stringWithFormat:LeadL(@"UI_KIRA_SCAN_32"),(unsigned long)ids.count];
     cell.detailTextLabel.textColor = LeadThemeMuted(); cell.detailTextLabel.font = LeadFont(12, UIFontWeightRegular);
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     __weak typeof(self) weakSelf = self;
     UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
-    [copy setTitle:@"نسخ" forState:UIControlStateNormal];
+    [copy setTitle:LeadL(@"UI_COPY") forState:UIControlStateNormal];
     [copy addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
         UIPasteboard.generalPasteboard.string = ref;
         LeadUsernameScanViewController *host = weakSelf;
-        if (host) [LeadToast showText:@"تم النسخ" symbol:@"checkmark" inView:host.view];
+        if (host) [LeadToast showText:LeadL(@"UI_COPIED") symbol:@"checkmark" inView:host.view];
     }] forControlEvents:UIControlEventTouchUpInside];
     UIButton *open = [UIButton buttonWithType:UIButtonTypeSystem];
-    [open setTitle:@"فتح" forState:UIControlStateNormal];
+    [open setTitle:LeadL(@"UI_KIRA_SCAN_35") forState:UIControlStateNormal];
     [open addAction:[UIAction actionWithHandler:^(__unused UIAction *action) { [weakSelf openReference:ref]; }] forControlEvents:UIControlEventTouchUpInside];
     open.enabled = ids.count > 0;
     for (UIButton *button in @[copy, open]) {

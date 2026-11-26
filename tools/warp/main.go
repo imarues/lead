@@ -169,6 +169,31 @@ func (t *tunnel) serve(c net.Conn){
  io.Copy(c,remote);c.Close();remote.Close();<-done
 }
 
+func (t *tunnel) healthy(timeout time.Duration) bool {
+ t.mu.Lock()
+ closed:=t.closed
+ t.mu.Unlock()
+ if closed{return false}
+ transport:=&http.Transport{DialContext:t.stack.DialContext,DisableKeepAlives:true}
+ defer transport.CloseIdleConnections()
+ client:=&http.Client{Transport:transport,Timeout:timeout,CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
+ resp,e:=client.Get("https://www.cloudflare.com/cdn-cgi/trace")
+ if e!=nil{return false}
+ defer resp.Body.Close()
+ body,e:=io.ReadAll(io.LimitReader(resp.Body,16384))
+ trace:="\n"+strings.TrimSpace(string(body))+"\n"
+ return e==nil&&resp.StatusCode==200&&(strings.Contains(trace,"\nwarp=on\n")||strings.Contains(trace,"\nwarp=plus\n"))
+}
+
+//export LeadWarpHealthCheck
+func LeadWarpHealthCheck() C.int {
+ stateMu.Lock()
+ t:=current
+ stateMu.Unlock()
+ if t!=nil&&t.healthy(8*time.Second){return 1}
+ return 0
+}
+
 //export LeadWarpStart
 func LeadWarpStart(config,user,pass *C.char) C.int {
  stateMu.Lock();defer stateMu.Unlock()
@@ -181,14 +206,8 @@ func LeadWarpStart(config,user,pass *C.char) C.int {
  t:=&tunnel{dev:dev,stack:stack,user:u,pass:pw,clients:make(map[net.Conn]struct{})}
  if e=dev.IpcSet(cfg.ipc);e!=nil{t.close();return -2}
  if e=dev.Up();e!=nil{t.close();return -2}
- // A live HTTPS trace routed exclusively through netstack must confirm WARP.
- transport:=&http.Transport{DialContext:stack.DialContext,DisableKeepAlives:true}
- client:=&http.Client{Transport:transport,Timeout:18*time.Second,CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
- resp,e:=client.Get("https://www.cloudflare.com/cdn-cgi/trace")
- if e!=nil{t.close();return -3}
- body,e:=io.ReadAll(io.LimitReader(resp.Body,16384));resp.Body.Close();transport.CloseIdleConnections()
- trace:="\n"+strings.TrimSpace(string(body))+"\n"
- if e!=nil||resp.StatusCode!=200||(!strings.Contains(trace,"\nwarp=on\n")&&!strings.Contains(trace,"\nwarp=plus\n")){t.close();return -3}
+ // Confirm that the WireGuard stack actually reaches the service.
+ if !t.healthy(18*time.Second){t.close();return -3}
  t.listener,e=net.Listen("tcp4","127.0.0.1:0");if e!=nil{t.close();return -4}
  current=t
  go t.run()

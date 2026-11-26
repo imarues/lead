@@ -157,10 +157,10 @@ void LeadOpenTelegramURL(NSString *urlString) {
       if (!LeadRouteTelegramURLInCurrentApp(finalURL)) {
         UIViewController *host = LeadMainWindow().rootViewController;
         while (host.presentedViewController) host = host.presentedViewController;
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تعذر فتح الرسالة"
-            message:@"نسخة تيليگرام الحالية لا تدعم معالج الروابط الداخلي. لم يتم فتح أي تطبيق آخر."
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:LeadL(@"UI_KIRA_MISC_1")
+            message:LeadL(@"UI_KIRA_MISC_2")
             preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:LeadL(@"OK") style:UIAlertActionStyleCancel handler:nil]];
         [host presentViewController:alert animated:YES completion:nil];
       }
       return;

@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import tgapiC
 
 @objc(TLParser)
@@ -3099,29 +3100,55 @@ extension TLParser {
             return peerProfiles[peer as String]
         }
         guard let profile = profile else { return nil }
-        // Prefer the actual downloaded image in the active account's MediaBox.
-        // No directory crawling, other accounts, or new network requests.
+        // Use the current account's MediaBox path, not another account or partial downloads.
+        // A stripped 8–40 px preview is intentionally not enlarged into a blurry avatar.
+        func usableImage(_ bytes: Data) -> Int {
+            guard bytes.count >= 16, bytes.count <= 2_097_152,
+                  let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+                  let width = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?.intValue,
+                  let height = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?.intValue,
+                  width >= 56, height >= 56, width <= 4096, height <= 4096 else { return 0 }
+            return min(width, height)
+        }
+        var best: Data?
+        var bestSize = 0
+        func consider(_ data: Data) {
+            let size = usableImage(data)
+            if size > bestSize { best = data; bestSize = size }
+        }
         if let context = sharedContext,
-           let account = diagChild(context, "account"),
-           let basePath = diagChild(account, "basePath") as? String,
+           let account = diagChild(context, "account") ?? diagChild(context, "accountContext").flatMap({ diagChild($0, "account") }),
            let photo = profile["avatarId"], Int64(photo) != nil,
            let dc = profile["avatarDC"], Int32(dc) != nil {
-            let root = URL(fileURLWithPath: basePath).appendingPathComponent("postbox/media", isDirectory: true)
-            let names = ["telegram-peer-photo-size-\(dc)-\(photo)-0-0-0",
-                         "telegram-peer-photo-size-\(dc)-\(photo)-1-0-0",
-                         "telegram-cloud-photo-size-\(dc)-\(photo)-s",
-                         "telegram-cloud-photo-size-\(dc)-\(photo)-m"]
-            for name in names {
-                let url = root.appendingPathComponent(name)
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                   let length = attrs[.size] as? NSNumber, length.intValue > 3, length.intValue <= 524288,
-                   let bytes = try? Data(contentsOf: url), bytes.count <= 524288 {
-                    return bytes as NSData
+            var mediaPath: String?
+            if let postbox = diagChild(account, "postbox"), let mediaBox = diagChild(postbox, "mediaBox") {
+                mediaPath = diagChild(mediaBox, "basePath") as? String
+            }
+            if mediaPath == nil, let basePath = diagChild(account, "basePath") as? String {
+                mediaPath = URL(fileURLWithPath: basePath).appendingPathComponent("postbox/media", isDirectory: true).path
+            }
+            if let mediaPath = mediaPath, !mediaPath.isEmpty {
+                let root = URL(fileURLWithPath: mediaPath, isDirectory: true)
+                let names = ["telegram-peer-photo-size-\(dc)-\(photo)-1-0-0",
+                             "telegram-peer-photo-size-\(dc)-\(photo)-0-0-0",
+                             "telegram-cloud-photo-size-\(dc)-\(photo)-m",
+                             "telegram-cloud-photo-size-\(dc)-\(photo)-s",
+                             "telegram-cloud-photo-size-\(dc)-\(photo)-x"]
+                for name in names {
+                    let url = root.appendingPathComponent(name)
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                       let length = attrs[.size] as? NSNumber, length.intValue >= 16, length.intValue <= 2_097_152,
+                       let bytes = try? Data(contentsOf: url) {
+                        consider(bytes)
+                    }
                 }
             }
         }
-        guard let encoded = profile["avatarThumb"], let bytes = Data(base64Encoded: encoded) else { return nil }
-        return bytes as NSData
+        if let encoded = profile["avatarThumb"], let bytes = Data(base64Encoded: encoded) {
+            consider(bytes)
+        }
+        return best.map { $0 as NSData }
     }
 
     @objc static func messageLogEntries() -> NSArray {

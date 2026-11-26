@@ -60,6 +60,25 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     return inflated ?: data;
 }
 
+
+// Scope/type tags are internal values from the discovery bridge; translate only for display.
+static NSString *KiraDiscoveryDisplay(NSString *value) {
+  if (![value isKindOfClass:NSString.class]) return @"";
+  if ([value isEqualToString:@"بحث بالكروبات العادية"]) return LeadL(@"UI_KIRA_DISC_33");
+  if ([value isEqualToString:@"مرشّح من البحث العام"]) return LeadL(@"UI_KIRA_DISC_35");
+  if ([value isEqualToString:@"كروب بحسابك"]) return LeadL(@"UI_KIRA_DISC_76");
+  if ([value isEqualToString:@"المحادثة الخاصة"]) return LeadL(@"UI_KIRA_DISC_26");
+  if ([value isEqualToString:@"كروب مشترك"]) return LeadL(@"UI_KIRA_DISC_71");
+  if ([value isEqualToString:@"صورة"]) return LeadL(@"UI_KIRA_DISC_77");
+  if ([value isEqualToString:@"فيديو"]) return LeadL(@"UI_KIRA_DISC_78");
+  if ([value isEqualToString:@"فويس"]) return LeadL(@"UI_KIRA_DISC_79");
+  if ([value isEqualToString:@"موسيقى"]) return LeadL(@"UI_KIRA_DISC_80");
+  if ([value isEqualToString:@"ملف"]) return LeadL(@"UI_KIRA_DISC_81");
+  if ([value isEqualToString:@"فيديو دائري"]) return LeadL(@"UI_KIRA_DISC_82");
+  if ([value isEqualToString:@"رابط"]) return LeadL(@"UI_KIRA_DISC_83");
+  if ([value isEqualToString:@"رسالة"]) return LeadL(@"UI_KIRA_DISC_84");
+  return value;
+}
 @interface LeadMessageDiscoveryBridge : NSObject
 + (NSData *)resolveRequestForUsername:(NSString *)username;
 + (NSDictionary *)parseResolvedUser:(NSData *)data;
@@ -128,7 +147,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"كشف الرسائل";
+    self.title = LeadL(@"UI_MESSAGE_DISCOVERY_TITLE");
     self.tableView.backgroundColor = LeadThemeBackground();
     self.tableView.tintColor = LeadThemeAccent(); self.tableView.separatorColor = [LeadThemeAccent() colorWithAlphaComponent:0.14];
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
@@ -169,13 +188,13 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     field.clearButtonMode = UITextFieldViewModeWhileEditing;
     field.returnKeyType = UIReturnKeySearch;
     field.delegate = self;
-    field.accessibilityLabel = @"اسم المستخدم المطلوب البحث عن رسائله";
+    field.accessibilityLabel = LeadL(@"UI_KIRA_DISC_2");
     field.translatesAutoresizingMaskIntoConstraints = NO;
     self.usernameField = field;
     [header addSubview:field];
 
     UIButton *search = [UIButton buttonWithType:UIButtonTypeSystem];
-    [search setTitle:@"بحث" forState:UIControlStateNormal];
+    [search setTitle:LeadL(@"UI_SEARCH") forState:UIControlStateNormal];
     search.titleLabel.font = LeadRoundedFont(15, UIFontWeightSemibold);
     search.backgroundColor = LeadThemeAccent(); search.layer.cornerRadius = 12;
     [search setTitleColor:LeadThemeBackground() forState:UIControlStateNormal];
@@ -184,7 +203,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     [header addSubview:search];
 
     UILabel *status = [UILabel new];
-    status.text = @"اكتب اليوزر: نفحص كروبات حسابك حتى لو الشخص غادرها، ونحاول اكتشاف كروبات عامة. النتائج مو شاملة كل تيليگرام.";
+    status.text = LeadL(@"UI_KIRA_DISC_4");
     status.font = LeadFont(13, UIFontWeightRegular);
     status.textColor = LeadThemeMuted();
     status.numberOfLines = 5;
@@ -201,7 +220,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     // scroll view must not be mirrored by the system.
     scroll.semanticContentAttribute = UISemanticContentAttributeForceLeftToRight;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    NSArray *titles = @[ @"الصور", @"الفيديو", @"الفويسات", @"الموسيقى", @"الملفات", @"الدائري", @"الروابط", @"الكل" ];
+    NSArray *titles = @[ LeadL(@"UI_KIRA_DISC_5"), LeadL(@"UI_KIRA_DISC_6"), LeadL(@"UI_KIRA_DISC_7"), LeadL(@"UI_KIRA_DISC_8"), LeadL(@"UI_KIRA_DISC_9"), LeadL(@"UI_KIRA_DISC_10"), LeadL(@"UI_KIRA_DISC_11"), LeadL(@"UI_KIRA_DISC_12") ];
     self.category = 7; // include text and every media type by default
     self.chips = [NSMutableArray array];
     for (NSUInteger i = 0; i < titles.count; i++) {
@@ -221,7 +240,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     [header addSubview:scroll];
 
     UIButton *groupsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [groupsButton setTitle:@"مصادر البحث — إظهار" forState:UIControlStateNormal];
+    [groupsButton setTitle:LeadL(@"UI_KIRA_DISC_13") forState:UIControlStateNormal];
     groupsButton.titleLabel.font = LeadRoundedFont(13, UIFontWeightSemibold);
     groupsButton.tintColor = LeadThemeAccent();
     [groupsButton setTitleColor:LeadThemeMuted() forState:UIControlStateDisabled];
@@ -267,10 +286,10 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 }
 
 - (void)showError:(NSString *)message {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"كشف الرسائل"
-                                                                   message:message ?: @"فشلت العملية."
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:LeadL(@"UI_MESSAGE_DISCOVERY_TITLE")
+                                                                   message:message ?: LeadL(@"UI_KIRA_DISC_14")
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"حسناً" style:UIAlertActionStyleDefault handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:LeadL(@"OK") style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -283,7 +302,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:
         @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"] invertedSet];
     if (!username.length || [username rangeOfCharacterFromSet:invalid].location != NSNotFound) {
-        [self showError:@"اكتب اسم مستخدم صحيح بدون روابط أو مسافات."];
+        [self showError:LeadL(@"UI_KIRA_DISC_16")];
         return;
     }
     [self leaveSelection];
@@ -302,7 +321,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     [self.seen removeAllObjects];
     self.scanning = YES;
     self.groupsButton.enabled = NO;
-    [self displayStatus:@"جاري البحث عن المستخدم…"];
+    [self displayStatus:LeadL(@"UI_KIRA_DISC_17")];
     [self.tableView reloadData];
     NSData *payload = [LeadMessageDiscoveryBridge resolveRequestForUsername:username];
     __weak typeof(self) weakSelf = self;
@@ -314,18 +333,18 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         if (!target) {
             self.scanning = NO;
             self.gatheringSources = NO;
-            [self displayStatus:@"تعذر العثور على الحساب."];
-            [self showError:error.length ? error : @"هذا اليوزر غير متاح أو لم يرجع تيليگرام معلومات الحساب."];
+            [self displayStatus:LeadL(@"UI_KIRA_DISC_18")];
+            [self showError:error.length ? error : LeadL(@"UI_KIRA_DISC_19")];
             return;
         }
         self.target = target;
-        [self displayStatus:[NSString stringWithFormat:@"تم العثور على %@. جاري جمع الكروبات المشتركة وبقية محادثات حسابك…",
-                             target[@"title"] ?: @"المستخدم"]];
+        [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_20"),
+                             target[@"title"] ?: LeadL(@"UI_KIRA_DISC_21")]];
         [self loadCommonPage:0 page:0 token:token];
     })) {
         self.scanning = NO;
         self.gatheringSources = NO;
-        [self displayStatus:@"اتصال تيليگرام غير جاهز. افتح محادثة ثم أعد المحاولة."];
+        [self displayStatus:LeadL(@"UI_KIRA_DISC_22")];
     }
 }
 
@@ -342,8 +361,8 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         NSDictionary *response = (error.length || !data.length) ? nil : [LeadMessageDiscoveryBridge parseCommonChats:LeadDiscoveryUnpack(data)];
         if (!response) {
             // Private chat can still be searched if common chats are unavailable.
-            [self displayStatus:error.length ? [NSString stringWithFormat:@"تعذر جلب بعض الكروبات: %@",error] :
-             @"تعذر قراءة الكروبات المشتركة، يمكن البحث في الخاص فقط."];
+            [self displayStatus:error.length ? [NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_23"),error] :
+             LeadL(@"UI_KIRA_DISC_24")];
             [self commonChatsFinished];
             return;
         }
@@ -356,7 +375,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         int64_t nextId = [response[@"nextMaxId"] longLongValue];
         BOOL more = [response[@"hasMore"] boolValue];
         if (more && nextId > 0 && nextId != maxId && page < 19) {
-            [self displayStatus:[NSString stringWithFormat:@"تم العثور على %lu كروب مشترك…",
+            [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_25"),
                                  (unsigned long)self.groups.count]];
             [self loadCommonPage:nextId page:page+1 token:token];
         } else {
@@ -388,14 +407,14 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     [self.sources addObject:@{
         @"id": target[@"userId"],
         @"key": [NSString stringWithFormat:@"u%@", target[@"userId"]],
-        @"kind": @"u", @"title": @"المحادثة الخاصة",
-        @"scope": @"المحادثة الخاصة",
+        @"kind": @"u", @"title": LeadL(@"UI_KIRA_DISC_26"),
+        @"scope": LeadL(@"UI_KIRA_DISC_26"),
         @"username": target[@"username"] ?: @"",
         @"peer": target[@"peer"]
     }];
     for (NSDictionary *group in self.groups) [self addDiscoveredSource:group];
     self.groupsButton.enabled = NO;
-    [self displayStatus:@"جاري فحص كروبات حسابك، حتى الكروبات التي غادرها صاحب اليوزر…"];
+    [self displayStatus:LeadL(@"UI_KIRA_DISC_27")];
     [self loadDialogPage:nil page:0 folderId:0 token:self.generation];
 }
 
@@ -413,7 +432,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         if ([error hasPrefix:@"FLOOD_WAIT"]) {
             self.gatheringSources = NO;
             self.scanning = NO;
-            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل الطلبات: %@. جرّب بعد انتهاء المدة.",error]];
+            [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_28"),error]];
             return;
         }
         NSDictionary *parsed = (!error.length && data.length) ?
@@ -430,7 +449,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
                     [next[@"peer"] isKindOfClass:NSData.class];
         // Hard limit avoids unbounded request bursts on accounts with thousands of dialogs.
         if (more && page < 29 && ![offset isEqual:next]) {
-            [self displayStatus:[NSString stringWithFormat:@"تفحّص %ld صفحة من محادثاتك؛ عثر على %lu مصدر…",
+            [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_29"),
                 (long)self.exploredDialogPages,(unsigned long)self.sources.count-1]];
             [self loadDialogPage:next page:page+1 folderId:folderId token:token];
         } else {
@@ -446,7 +465,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 - (void)finishDialogFolder:(int32_t)folderId token:(NSInteger)token {
     if (token != self.generation || !self.target) return;
     if (folderId == 0) {
-        [self displayStatus:@"جاري تفحّص الكروبات المؤرشفة أيضاً…"];
+        [self displayStatus:LeadL(@"UI_KIRA_DISC_30")];
         [self loadDialogPage:nil page:0 folderId:1 token:token];
     } else {
         [self discoverLegacySenderGroupsWithToken:token];
@@ -455,7 +474,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 
 - (void)discoverLegacySenderGroupsWithToken:(NSInteger)token {
     if (token != self.generation || !self.target) return;
-    [self displayStatus:@"جاري تجربة البحث الشامل في الكروبات العادية غير المشمولة بالقائمة…"];
+    [self displayStatus:LeadL(@"UI_KIRA_DISC_31")];
     NSData *payload = [LeadMessageDiscoveryBridge legacySenderGroupsRequest:self.target[@"peer"]];
     if (!payload.length) {
         self.discoveryWasLimited = YES;
@@ -469,7 +488,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         if ([error hasPrefix:@"FLOOD_WAIT"]) {
             self.gatheringSources = NO;
             self.scanning = NO;
-            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل البحث: %@. جرّب لاحقاً.",error]];
+            [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_32"),error]];
             return;
         }
         NSDictionary *parsed = (!error.length && data.length) ?
@@ -487,7 +506,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 
 - (void)discoverPublicCandidatesWithToken:(NSInteger)token {
     if (token != self.generation || !self.target) return;
-    [self displayStatus:@"جاري تجربة البحث العام عن كروبات يظهر فيها اليوزر… النتائج المرشّحة تُفحص باسم المرسل للتأكد."];
+    [self displayStatus:LeadL(@"UI_KIRA_DISC_34")];
     NSString *username = self.target[@"username"];
     if (![username isKindOfClass:NSString.class] || !username.length)
         username = [self.usernameField.text stringByTrimmingCharactersInSet:
@@ -505,7 +524,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         if ([error hasPrefix:@"FLOOD_WAIT"]) {
             self.gatheringSources = NO;
             self.scanning = NO;
-            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل البحث: %@. جرّب لاحقاً.",error]];
+            [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_32"),error]];
             return;
         }
         NSDictionary *parsed = (!error.length && data.length) ?
@@ -531,16 +550,16 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     if (token != self.generation || !self.target) return;
     self.gatheringSources = NO;
     self.groupsButton.enabled = YES;
-    [self.groupsButton setTitle:[NSString stringWithFormat:@"مصادر البحث (%lu) — %@",
+    [self.groupsButton setTitle:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_36"),
         (unsigned long)self.sources.count,
-        self.groupsExpanded ? @"إخفاء" : @"إظهار"] forState:UIControlStateNormal];
+        self.groupsExpanded ? LeadL(@"UI_KIRA_DISC_37") : LeadL(@"UI_KIRA_DISC_38")] forState:UIControlStateNormal];
     [self startFreshScan];
 }
 
 - (void)toggleGroups {
     self.groupsExpanded = !self.groupsExpanded;
-    [self.groupsButton setTitle:[NSString stringWithFormat:@"مصادر البحث (%lu) — %@",
-         (unsigned long)self.sources.count, self.groupsExpanded ? @"إخفاء" : @"إظهار"]
+    [self.groupsButton setTitle:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_36"),
+         (unsigned long)self.sources.count, self.groupsExpanded ? LeadL(@"UI_KIRA_DISC_37") : LeadL(@"UI_KIRA_DISC_38")]
                         forState:UIControlStateNormal];
     [self.tableView reloadData];
 }
@@ -626,7 +645,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     self.failedChats = 0;
     self.partialChats = 0;
     self.scanning = YES;
-    [self displayStatus:[NSString stringWithFormat:@"جاري فحص %ld محادثة…", (long)self.totalChats]];
+    [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_39"), (long)self.totalChats]];
     [self.tableView reloadData];
     [self scanNextWithToken:self.generation];
 }
@@ -636,24 +655,24 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     if (self.scanQueue.count == 0) {
         self.scanning = NO;
         NSString *summary = self.results.count ?
-            [NSString stringWithFormat:@"نتائج البحث: %lu رسالة من %ld مصدر. ضغطة للفتح أو مطوّلة للتحديد.",
+            [NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_40"),
              (unsigned long)self.results.count, (long)self.totalChats] :
-            [NSString stringWithFormat:@"ما ظهرت رسائل من الفئة ضمن أول الصفحات المفحوصة من %ld مصدر.", (long)self.totalChats];
+            [NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_41"), (long)self.totalChats];
         if (self.olderOffsets.count)
-            summary = [summary stringByAppendingFormat:@"\nباقي تاريخ أقدم في %lu محادثة؛ اضغط تحميل رسائل أقدم.",
+            summary = [summary stringByAppendingFormat:LeadL(@"UI_KIRA_DISC_42"),
                        (unsigned long)self.olderOffsets.count];
         if (self.publicCandidateCount)
-            summary = [summary stringByAppendingFormat:@"\nفحصنا %ld كروب عام مرشّح؛ مو فهرس شامل لتيليگرام.",
+            summary = [summary stringByAppendingFormat:LeadL(@"UI_KIRA_DISC_43"),
                        (long)self.publicCandidateCount];
         else
-            summary = [summary stringByAppendingString:@"\nمحاولة البحث العام محدودة: ما تضمن اكتشاف كل الكروبات."];
+            summary = [summary stringByAppendingString:LeadL(@"UI_KIRA_DISC_44")];
         if (self.discoveryWasLimited)
-            summary = [summary stringByAppendingString:@"\nبعض مصادر البحث ما انقرأت؛ النتائج جزئية."];
+            summary = [summary stringByAppendingString:LeadL(@"UI_KIRA_DISC_45")];
         if (self.failedChats > 0)
-            summary = [summary stringByAppendingFormat:@"\nتعذّر فحص %ld محادثة%@.", (long)self.failedChats,
+            summary = [summary stringByAppendingFormat:LeadL(@"UI_KIRA_DISC_46"), (long)self.failedChats,
                        self.firstScanError.length ? [NSString stringWithFormat:@" (%@)", self.firstScanError] : @""];
         else if (self.partialChats > 0)
-            summary = [summary stringByAppendingFormat:@"\nبعض الرسائل في %ld محادثة لم تُقرأ (نوع غير مدعوم).", (long)self.partialChats];
+            summary = [summary stringByAppendingFormat:LeadL(@"UI_KIRA_DISC_47"), (long)self.partialChats];
         [self displayStatus:summary];
         [self.tableView reloadData];
         return;
@@ -669,7 +688,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     if (offset == 0) self.completedChats++;
     if (!payload.length) {
         self.failedChats++;
-        if (!self.firstScanError.length) self.firstScanError = @"تعذّر إنشاء طلب البحث";
+        if (!self.firstScanError.length) self.firstScanError = LeadL(@"UI_KIRA_DISC_48");
         [self scanNextWithToken:token]; return;
     }
     __weak typeof(self) weakSelf = self;
@@ -683,14 +702,14 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         // Stop rather than keep issuing requests when Telegram imposes a limit.
         if ([error hasPrefix:@"FLOOD_WAIT"]) {
             self.scanning = NO;
-            [self displayStatus:[NSString stringWithFormat:@"تيليگرام طلب تقليل البحث: %@. أعد المحاولة لاحقاً.", error]];
+            [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_49"), error]];
             return;
         }
         // A failed chat is skipped; never fabricate results or retry in a flood loop.
         if (!response) {
             self.failedChats++;
             if (!self.firstScanError.length)
-                self.firstScanError = error.length ? error : @"تعذّر قراءة رد تيليگرام";
+                self.firstScanError = error.length ? error : LeadL(@"UI_KIRA_DISC_50");
         } else if ([response[@"partial"] boolValue]) {
             self.partialChats++;
         }
@@ -720,9 +739,9 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         [self.results sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
             return [b[@"date"] compare:a[@"date"]];
         }];
-        [self displayStatus:[NSString stringWithFormat:@"فحص %ld/%ld محادثة — %lu رسالة%@",
+        [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_51"),
              (long)self.completedChats, (long)self.totalChats,
-             (unsigned long)self.results.count, error.length ? @" (بعض المحادثات تعذّر فحصها)" : @""]];
+             (unsigned long)self.results.count, error.length ? LeadL(@"UI_KIRA_DISC_52") : @""]];
         [self.tableView reloadData];
         // Keep the scan responsive while avoiding a burst across many groups.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
@@ -730,7 +749,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
             [self scanNextWithToken:token];
         });
     })) {
-        [self displayStatus:@"اتصال تيليگرام توقف قبل اكتمال البحث."];
+        [self displayStatus:LeadL(@"UI_KIRA_DISC_53")];
         self.scanning = NO;
     }
 }
@@ -759,9 +778,9 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 - (void)updateSelectionNavigation {
     NSInteger count = self.selectedKeys.count;
     self.navigationItem.title = count ?
-        [NSString stringWithFormat:@"محدد: %ld", (long)count] : @"تحديد الرسائل";
+        [NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_54"), (long)count] : LeadL(@"UI_KIRA_DISC_55");
     self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:[NSString stringWithFormat:@"تحويل (%ld)",(long)count]
+        [[UIBarButtonItem alloc] initWithTitle:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_56"),(long)count]
                                          style:UIBarButtonItemStyleDone target:self action:@selector(forwardSelected)];
     self.navigationItem.rightBarButtonItem.enabled = count > 0 && !self.forwarding;
 }
@@ -771,7 +790,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     self.selectionMode = YES;
     self.selectedKeys = [NSMutableSet set];
     self.navigationItem.leftBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"إلغاء" style:UIBarButtonItemStylePlain
+        [[UIBarButtonItem alloc] initWithTitle:LeadL(@"CANCEL") style:UIBarButtonItemStylePlain
                                        target:self action:@selector(leaveSelection)];
     [self.tableView setEditing:YES animated:YES];
     [self.tableView selectRowAtIndexPath:path animated:NO
@@ -787,7 +806,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     [self.tableView setEditing:NO animated:YES];
     self.navigationItem.leftBarButtonItem = nil;
     self.navigationItem.rightBarButtonItem = nil;
-    self.title = @"كشف الرسائل";
+    self.title = LeadL(@"UI_MESSAGE_DISCOVERY_TITLE");
 }
 
 - (void)longPressed:(UILongPressGestureRecognizer *)recognizer {
@@ -803,7 +822,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     for (NSDictionary *entry in self.results) {
         if ([self.selectedKeys containsObject:[self uniqueForEntry:entry]]) {
             if ([entry[@"protected"] boolValue]) {
-                [self showError:@"إحدى الرسائل مختومة بمنع التحويل، ولا يمكن تحويلها كرسالة عادية."];
+                [self showError:LeadL(@"UI_KIRA_DISC_58")];
                 return;
             }
             [selected addObject:entry];
@@ -811,12 +830,12 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     }
     if (!selected.count) return;
     UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"تحويل إلى الرسائل المحفوظة"
-        message:[NSString stringWithFormat:@"تحويل %lu رسالة كما هي، مع مصدرها الأصلي؟",
+        alertControllerWithTitle:LeadL(@"UI_KIRA_DISC_59")
+        message:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_60"),
                  (unsigned long)selected.count]
         preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"تحويل" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:LeadL(@"CANCEL") style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:LeadL(@"UI_KIRA_DISC_61") style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         [self performForward:selected];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -841,14 +860,14 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
             NSData *payload = [LeadMessageDiscoveryBridge forwardRequestForPeer:peers[key] messageIds:chunk];
             if (!payload.length) {
                 self.forwarding = NO;
-                [self showError:@"تعذر إعداد طلب تحويل إحدى الرسائل."];
+                [self showError:LeadL(@"UI_KIRA_DISC_62")];
                 return;
             }
             [self.forwardQueue addObject:@{@"payload":payload, @"count":@(chunk.count)}];
         }
     }
     [self updateSelectionNavigation];
-    [self displayStatus:@"جاري تحويل الرسائل إلى المحفوظة…"];
+    [self displayStatus:LeadL(@"UI_KIRA_DISC_63")];
     [self forwardNextWithSent:0];
 }
 
@@ -856,8 +875,8 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
     if (!self.forwardQueue.count) {
         self.forwarding = NO;
         [self leaveSelection];
-        [self displayStatus:[NSString stringWithFormat:@"تم تحويل %lu رسالة إلى الرسائل المحفوظة.", (unsigned long)sent]];
-        [LeadToast showText:@"اكتمل التحويل إلى المحفوظة" symbol:@"checkmark.circle" inView:self.view];
+        [self displayStatus:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_64"), (unsigned long)sent]];
+        [LeadToast showText:LeadL(@"UI_KIRA_DISC_65") symbol:@"checkmark.circle" inView:self.view];
         return;
     }
     NSDictionary *job = self.forwardQueue.firstObject;
@@ -869,15 +888,15 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         if (error.length || data.length < 4) {
             self.forwarding = NO;
             [self updateSelectionNavigation];
-            [self showError:[NSString stringWithFormat:@"فشل تحويل بعض الرسائل بعد نجاح %lu: %@",
-                            (unsigned long)sent, error.length ? error : @"رد غير صالح"]];
+            [self showError:[NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_66"),
+                            (unsigned long)sent, error.length ? error : LeadL(@"UI_KIRA_DISC_67")]];
             return;
         }
         [self forwardNextWithSent:sent+[job[@"count"] unsignedIntegerValue]];
     })) {
         self.forwarding = NO;
         [self updateSelectionNavigation];
-        [self showError:@"اتصال تيليگرام غير جاهز لتحويل الرسائل."];
+        [self showError:LeadL(@"UI_KIRA_DISC_68")];
     }
 }
 
@@ -899,8 +918,8 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (section == 0 && self.groupsExpanded) return @"مصادر البحث: مشتركة، بحسابك ولو غادرها الشخص، ومرشّحة عامة";
-    if (section == 1 && self.target) return [NSString stringWithFormat:@"رسائل %@ — %lu", self.target[@"title"], (unsigned long)self.results.count];
+    if (section == 0 && self.groupsExpanded) return LeadL(@"UI_KIRA_DISC_69");
+    if (section == 1 && self.target) return [NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_70"), self.target[@"title"], (unsigned long)self.results.count];
     return nil;
 }
 
@@ -919,24 +938,24 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         NSDictionary *group = self.sources[path.row];
         BOOL included = ![self.excluded containsObject:group[@"key"]];
         cell.textLabel.text = group[@"title"];
-        cell.detailTextLabel.text = group[@"scope"] ?: ([group[@"kind"] isEqual:@"u"] ?
-            @"المحادثة الخاصة" : @"كروب مشترك");
+        cell.detailTextLabel.text = group[@"scope"] ? KiraDiscoveryDisplay(group[@"scope"]) : ([group[@"kind"] isEqual:@"u"] ?
+            LeadL(@"UI_KIRA_DISC_26") : LeadL(@"UI_KIRA_DISC_71"));
         cell.accessoryType = included ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     } else if (path.section == 1) {
         NSDictionary *item = self.results[path.row];
-        cell.textLabel.text = [NSString stringWithFormat:@"%@ — %@", item[@"type"], item[@"title"]];
+        cell.textLabel.text = [NSString stringWithFormat:@"%@ — %@", KiraDiscoveryDisplay(item[@"type"]), item[@"title"]];
         NSDate *date = [NSDate dateWithTimeIntervalSince1970:[item[@"date"] doubleValue]];
         NSDateFormatter *formatter = [NSDateFormatter new];
         formatter.dateStyle = NSDateFormatterShortStyle;
         formatter.timeStyle = NSDateFormatterShortStyle;
         NSString *body = item[@"text"];
-        if (![body isKindOfClass:NSString.class] || !body.length) body = @"وسائط";
+        if (![body isKindOfClass:NSString.class] || !body.length) body = LeadL(@"UI_LOG_MEDIA");
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · %@", [formatter stringFromDate:date], body];
         if (!self.selectionMode) cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else {
-        cell.textLabel.text = [NSString stringWithFormat:@"تحميل رسائل أقدم (%lu مصدر)",
+        cell.textLabel.text = [NSString stringWithFormat:LeadL(@"UI_KIRA_DISC_73"),
            (unsigned long)self.olderOffsets.count];
-        cell.detailTextLabel.text = @"متابعة فحص رسائل المرسل القديمة على دفعات";
+        cell.detailTextLabel.text = LeadL(@"UI_KIRA_DISC_74");
         cell.textLabel.textColor = LeadThemeAccent();
     }
     return cell;
@@ -988,7 +1007,7 @@ NSData *LeadDiscoveryUnpack(NSData *data) {
         url = [NSString stringWithFormat:@"tg://openmessage?chat_id=%lld&message_id=%lld",identifier,message];
     }
     if (url) LeadOpenTelegramURL(url);
-    else [self showError:@"تعذر إنشاء رابط لهذه الرسالة."];
+    else [self showError:LeadL(@"UI_KIRA_DISC_75")];
 }
 
 - (void)tableView:(UITableView *)tableView didDeselectRowAtIndexPath:(NSIndexPath *)path {
