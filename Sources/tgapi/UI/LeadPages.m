@@ -1,5 +1,4 @@
 #import "LeadMenu.h"
-#import "KiraProxyGateway.h"
 #import "Headers.h"
 #import "Icons.h"
 #import "../Calls/LeadCallRecording.h"
@@ -745,48 +744,10 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   autoProxy.toggleBlock = ^(BOOL on, __unused UIViewController *host) {
     LeadAutoProxySetEnabled(on);
   };
-  LeadRow *gatewayActivate = [LeadRow link:@"تفعيل خدمة البروكسي" symbol:@"key.fill" tap:^(UIViewController *host) {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"تفعيل خدمة كيرا"
-      message:@"أدخل كود التفعيل لمرة واحدة الذي حصلت عليه من مسؤول الخدمة."
-      preferredStyle:UIAlertControllerStyleAlert];
-    [a addTextFieldWithConfigurationHandler:^(UITextField *field) {
-      field.placeholder = @"كود التفعيل";
-      field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-      field.autocorrectionType = UITextAutocorrectionTypeNo;
-      field.secureTextEntry = YES;
-    }];
-    [a addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"تفعيل" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-      NSString *code = [a.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-      [LeadToast showText:@"جارٍ التفعيل…" symbol:@"clock" inView:host.view];
-      KiraGatewayActivate(code, ^(NSInteger status) {
-        if (status == 200) {
-          [LeadToast showText:@"تم التفعيل" symbol:@"checkmark" inView:host.view];
-          if ([[NSUserDefaults standardUserDefaults] boolForKey:kAutoProxy]) {
-            LeadAutoProxyRefresh(^(NSString *summary, BOOL reachable) {
-              if (reachable && summary.length) {
-                [LeadToast showText:[summary stringByAppendingString:@"-كيرا بلس"] symbol:@"checkmark" inView:host.view];
-              }
-              if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
-            });
-          }
-        } else {
-          NSString *message = status == 401 ? @"الكود غير صالح أو مستخدم سابقاً" :
-                              (status == -1 ? @"تعذّر حفظ التفعيل بأمان" : @"تعذّر التفعيل، حاول لاحقاً");
-          [LeadToast showText:message symbol:@"exclamationmark.circle" inView:host.view];
-        }
-        if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
-      });
-    }]];
-    [host presentViewController:a animated:YES completion:nil];
-  }];
-  gatewayActivate.style = LeadRowStyleAction;
-  gatewayActivate.valueBlock = ^NSString * { return KiraGatewayIsActivated() ? @"مفعلة" : @"غير مفعلة"; };
   // Shows the server ordinal only; update and rotation request one gateway entry at a time.
   __block BOOL proxyUpdating = NO;
   LeadRow *proxyStatus = [LeadRow link:@"UI_AUTO_PROXY_UPDATE" symbol:@"arrow.clockwise" tap:^(UIViewController *host) {
     if (proxyUpdating) return;
-    if (!KiraGatewayIsActivated()) { [LeadToast showText:@"فعّل خدمة البروكسي أولاً" symbol:@"key" inView:host.view]; return; }
     proxyUpdating = YES;
     [LeadToast showText:LeadL(@"UI_AUTO_PROXY_CHECKING") symbol:@"arrow.clockwise" inView:host.view];
     LeadAutoProxyRefresh(^(NSString *summary, BOOL reachable) {
@@ -807,7 +768,6 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   };
   LeadRow *proxyRotate = [LeadRow link:@"UI_AUTO_PROXY_ROTATE" symbol:@"arrow.triangle.2.circlepath" tap:^(UIViewController *host) {
     if (proxyUpdating) return;
-    if (!KiraGatewayIsActivated()) { [LeadToast showText:@"فعّل خدمة البروكسي أولاً" symbol:@"key" inView:host.view]; return; }
     if (![[NSUserDefaults standardUserDefaults] boolForKey:kAutoProxy]) {
       [LeadToast showText:LeadL(@"UI_OFF") symbol:@"exclamationmark.circle" inView:host.view]; return;
     }
@@ -830,7 +790,7 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   warp.enabledBlock = ^BOOL { return LeadWarpCanToggle(); };
   warp.subtitleBlock = ^NSString * { return LeadWarpStatus(); };
   warp.toggleBlock = ^(BOOL on, UIViewController *host) { LeadWarpSetEnabled(on, host); };
-  LeadSection *proxySection = [LeadSection title:nil rows:@[ warp, autoProxy, gatewayActivate, proxyStatus, proxyRotate ]];
+  LeadSection *proxySection = [LeadSection title:nil rows:@[ warp, autoProxy, proxyStatus, proxyRotate ]];
 
   LeadPage *proxy = [LeadPage new];
   proxy.titleKey = @"UI_PAGE_PROXY";

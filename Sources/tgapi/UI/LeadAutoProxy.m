@@ -10,7 +10,7 @@
 #import <errno.h>
 #import <unistd.h>
 
-// Private gateway: the Worker returns a single selected proxy and its ordinal.
+// Public gateway: the Worker returns a single selected proxy and its ordinal.
 static const NSTimeInterval kLeadAutoProxyRefreshInterval = 20 * 60;
 static const NSUInteger kLeadAutoProxyMaxEntries = 20;
 
@@ -453,14 +453,8 @@ static BOOL LeadGatewayProbe(NSDictionary *p) {
 static void LeadGatewayRefreshCallPool(void) {
   NSInteger status = 0;
   NSDictionary *response = KiraGatewayProxy(@"call", @"current", &status);
-  if (status == 401 || (response && [response[@"total"] integerValue] == 0)) {
+  if (response && [response[@"total"] integerValue] == 0) {
     @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
-    if (status == 401) dispatch_async(dispatch_get_main_queue(), ^{
-      if (!KiraGatewayIsActivated()) {
-        LeadProxyDeactivate();
-        LeadProxyPushToContexts();
-      }
-    });
     return;
   }
   if (!response) return;
@@ -488,16 +482,6 @@ static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *sum
       if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(nil, NO); });
       return;
     }
-    if (!KiraGatewayIsActivated()) {
-      dispatch_async(dispatch_get_main_queue(), ^{
-        LeadProxyDeactivate();
-        @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
-        LeadProxyPushToContexts();
-        if (done) done(nil, NO);
-      });
-      return;
-    }
-
     NSString *active;
     @synchronized(LeadProxyLock()) { active = sLeadProxyLink; }
     NSString *chosen = nil;
@@ -519,13 +503,12 @@ static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *sum
       if (i + 1 < total) response = KiraGatewayProxy(@"normal", @"next", &status);
       if (!response) break;
     }
-    BOOL revoked = status == 401;
     [[NSUserDefaults standardUserDefaults] setDouble:NSDate.date.timeIntervalSince1970 forKey:kAutoProxyChecked];
 
     dispatch_async(dispatch_get_main_queue(), ^{
       BOOL applied = NO;
       if (LeadProxyEnabled()) {
-        if (revoked || empty) {
+        if (empty) {
           LeadProxyDeactivate();
           @synchronized(LeadProxyLock()) { sLeadGatewayCallInfo = nil; }
           LeadProxyPushToContexts();
@@ -538,7 +521,7 @@ static void LeadAutoProxyRefreshInternal(BOOL rotate, void (^done)(NSString *sum
     });
 
     // A proxy rotation does not need to refresh the call pool.
-    if (!rotate && !revoked) LeadGatewayRefreshCallPool();
+    if (!rotate && status != 429) LeadGatewayRefreshCallPool();
   });
 }
 
