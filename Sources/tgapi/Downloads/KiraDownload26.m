@@ -1,11 +1,13 @@
 #import "KiraDownload26.h"
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <AVFoundation/AVFoundation.h>
 #import <zlib.h>
 #import <sys/stat.h>
 
 // Runtime lookup keeps this feature buildable with Theos's old SDK and
-// harmless on pre-iOS 26 devices. No audio session or private system API.
+// compatible with pre-iOS 26 devices. Earlier iOS uses an explicitly chosen,
+// experimental silent-audio session instead of the unavailable system task.
 @protocol KiraTaskSchedulerAPI
 + (id)sharedScheduler;
 - (BOOL)registerForTaskWithIdentifier:(NSString *)identifier usingQueue:(dispatch_queue_t)queue launchHandler:(void (^)(id task))launchHandler;
@@ -43,6 +45,14 @@ static BOOL backgrounded;
 static CFAbsoluteTime submittedAt, lastProgressAt;
 static uint64_t lastProgress;
 static NSString *lastStatus;
+// Only used before iOS 26, and only for a user-selected active transfer.
+static BOOL legacyMode;
+static AVAudioPlayer *legacyPlayer;
+static BOOL legacyChangedCategory;
+static NSString *legacyPreviousCategory, *legacyPreviousMode;
+static AVAudioSessionCategoryOptions legacyPreviousOptions;
+static NSString *legacyExpectedCategory, *legacyExpectedMode;
+static AVAudioSessionCategoryOptions legacyExpectedOptions;
 
 static BOOL Arabic(void) {
     NSString *lang = [[NSUserDefaults standardUserDefaults] stringForKey:@"LeadLanguage"];
@@ -114,6 +124,35 @@ static BOOL ReadMediaMap(NSString *path,uint64_t *received,int64_t *total){
     *received=sum; *total=truncation; return YES;
 }
 
+static BOOL UsesSystemTask(void) {
+    return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26;
+}
+static BOOL LegacyAudioAllowed(void) {
+    NSArray *modes=NSBundle.mainBundle.infoDictionary[@"UIBackgroundModes"];
+    return [modes isKindOfClass:NSArray.class] && [modes containsObject:@"audio"];
+}
+static BOOL SystemTaskAvailable(void) {
+    if(!UsesSystemTask()) return NO;
+    static BOOL ok; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dlopen("/System/Library/Frameworks/BackgroundTasks.framework/BackgroundTasks",RTLD_LAZY|RTLD_LOCAL);
+        ok=NSClassFromString(@"BGContinuedProcessingTaskRequest")!=Nil && NSClassFromString(@"BGTaskScheduler")!=Nil;
+    });
+    return ok;
+}
+static NSData *SilentWAV(void) {
+    // 1 second of zero PCM samples, 8 kHz mono, 16-bit. No audio asset or microphone.
+    NSMutableData *d=[NSMutableData dataWithLength:44+16000];
+    uint8_t *b=d.mutableBytes;
+    memcpy(b,"RIFF",4); memcpy(b+8,"WAVEfmt ",8); memcpy(b+36,"data",4);
+    uint32_t u=CFSwapInt32HostToLittle((uint32_t)d.length-8); memcpy(b+4,&u,4);
+    u=CFSwapInt32HostToLittle(16); memcpy(b+16,&u,4);
+    uint16_t v=CFSwapInt16HostToLittle(1); memcpy(b+20,&v,2); memcpy(b+22,&v,2);
+    u=CFSwapInt32HostToLittle(8000); memcpy(b+24,&u,4); u=CFSwapInt32HostToLittle(16000); memcpy(b+28,&u,4);
+    v=CFSwapInt16HostToLittle(2); memcpy(b+32,&v,2); v=CFSwapInt16HostToLittle(16); memcpy(b+34,&v,2);
+    u=CFSwapInt32HostToLittle(16000); memcpy(b+40,&u,4);
+    return d;
+}
 static NSString *AllowedIdentifier(void){
     NSString *bid=NSBundle.mainBundle.bundleIdentifier;
     if(!bid.length)return nil;
@@ -133,18 +172,28 @@ static void Notice(UIViewController *host,NSString *message) {
     [host presentViewController:a animated:YES completion:nil];
 }
 
+@interface KiraDownload26 ()
++ (BOOL)canStart;
++ (BOOL)legacySessionMatches;
++ (BOOL)startLegacyAudio:(NSError **)error;
++ (void)stopLegacyAudio;
++ (void)startTimer;
++ (void)tick;
++ (void)finish:(BOOL)success reason:(NSString *)reason;
+@end
+
 @implementation KiraDownload26
 + (BOOL)supported {
     static BOOL ok; static dispatch_once_t once;
     dispatch_once(&once,^{
-        if(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion<26 ||
-           NSBundle.mainBundle.infoDictionary[@"NSExtension"] ||
-           [NSBundle.mainBundle.bundlePath.pathExtension isEqualToString:@"appex"])return;
-        dlopen("/System/Library/Frameworks/BackgroundTasks.framework/BackgroundTasks",RTLD_LAZY|RTLD_LOCAL);
-        ok=NSClassFromString(@"BGContinuedProcessingTaskRequest")!=Nil &&
-           NSClassFromString(@"BGTaskScheduler")!=Nil;
+        ok=NSProcessInfo.processInfo.operatingSystemVersion.majorVersion>=15 &&
+           !NSBundle.mainBundle.infoDictionary[@"NSExtension"] &&
+           ![NSBundle.mainBundle.bundlePath.pathExtension isEqualToString:@"appex"];
     });
     return ok;
+}
++ (BOOL)canStart {
+    return [self supported] && (UsesSystemTask() ? (SystemTaskAvailable() && AllowedIdentifier()!=nil) : LegacyAudioAllowed());
 }
 + (void)initialize {
     if(self!=KiraDownload26.class)return;
@@ -175,6 +224,16 @@ static void Notice(UIViewController *host,NSString *message) {
             @synchronized(KiraDownload26.class){backgrounded=NO;[deferredPauses removeAllObjects];}
             Changed();
         }];
+        if(!UsesSystemTask()) {
+            [c addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){
+                if(legacyMode && [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue]==AVAudioSessionInterruptionTypeBegan)
+                    [self finish:NO reason:L(@"توقف الصوت بسبب مقاطعة أو مكالمة",@"Audio interrupted by another session")];
+            }];
+            [c addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *n){
+                if(legacyMode && legacyPlayer && ![self legacySessionMatches])
+                    [self finish:NO reason:L(@"تغيرت جلسة الصوت",@"Audio session changed")];
+            }];
+        }
     });
 }
 + (void)registerMediaRoot:(NSString *)root {
@@ -296,17 +355,66 @@ static void Notice(UIViewController *host,NSString *message) {
     return best;
 }
 
++ (BOOL)legacySessionMatches {
+    AVAudioSession *session=AVAudioSession.sharedInstance;
+    return [session.category isEqualToString:legacyExpectedCategory] &&
+           [session.mode isEqualToString:legacyExpectedMode] && session.categoryOptions==legacyExpectedOptions;
+}
++ (void)stopLegacyAudio {
+    [legacyPlayer stop]; legacyPlayer=nil;
+    AVAudioSession *session=AVAudioSession.sharedInstance;
+    // Do not deactivate the app-wide session or overwrite a call/music session
+    // that took ownership while the silent track was running.
+    if(legacyChangedCategory && [self legacySessionMatches]) {
+        [session setCategory:legacyPreviousCategory mode:legacyPreviousMode options:legacyPreviousOptions error:nil];
+    }
+    legacyChangedCategory=NO; legacyPreviousCategory=nil; legacyPreviousMode=nil;
+    legacyExpectedCategory=nil; legacyExpectedMode=nil;
+}
++ (BOOL)startLegacyAudio:(NSError **)error {
+    AVAudioSession *session=AVAudioSession.sharedInstance;
+    NSString *category=session.category;
+    // Avoid taking a recording/VoIP or multi-route session away from Telegram.
+    if([category isEqualToString:AVAudioSessionCategoryPlayAndRecord] ||
+       [category isEqualToString:AVAudioSessionCategoryRecord] ||
+       [category isEqualToString:AVAudioSessionCategoryMultiRoute]) return NO;
+    legacyPreviousCategory=category;legacyPreviousMode=session.mode;legacyPreviousOptions=session.categoryOptions;
+    legacyChangedCategory=NO;
+    if(![category isEqualToString:AVAudioSessionCategoryPlayback]) {
+        if(![session setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:AVAudioSessionCategoryOptionMixWithOthers error:error])return NO;
+        legacyChangedCategory=YES;
+    } else if(session.isOtherAudioPlaying && !(session.categoryOptions&AVAudioSessionCategoryOptionMixWithOthers)) {
+        // Existing playback is nonmixable. Do not interrupt audio from another app.
+        return NO;
+    }
+    legacyExpectedCategory=session.category;legacyExpectedMode=session.mode;legacyExpectedOptions=session.categoryOptions;
+    if(![session setActive:YES error:error]){[self stopLegacyAudio];return NO;}
+    AVAudioPlayer *player=[[AVAudioPlayer alloc] initWithData:SilentWAV() error:error];
+    if(!player){[self stopLegacyAudio];return NO;}
+    player.numberOfLoops=-1;player.volume=0;
+    if(![player prepareToPlay]||![player play]){[self stopLegacyAudio];return NO;}
+    legacyPlayer=player;
+    return YES;
+}
++ (void)startTimer {
+    taskTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,trackerQueue);
+    dispatch_source_set_timer(taskTimer,dispatch_time(DISPATCH_TIME_NOW,0),2*NSEC_PER_SEC,NSEC_PER_SEC/4);
+    dispatch_source_set_event_handler(taskTimer,^{[self tick];});
+    dispatch_resume(taskTimer);
+}
 + (void)finish:(BOOL)success reason:(NSString *)reason {
     NSAssert(NSThread.isMainThread,@"task state must be on main");
-    NSString *identifier; id<KiraTaskAPI> task; NSArray *pauses;
+    NSString *identifier; id<KiraTaskAPI> task; NSArray *pauses; BOOL wasLegacy;
     @synchronized(self){
         identifier=taskIdentifier; if(!identifier)return;
         task=activeTask; activeTask=nil; selectedToken=nil; taskIdentifier=nil;
+        wasLegacy=legacyMode;legacyMode=NO;
         pauses=backgrounded?deferredPauses.allObjects:@[];[deferredPauses removeAllObjects];
         lastStatus=reason;
     }
     if(taskTimer){dispatch_source_cancel(taskTimer);taskTimer=nil;}
-    if(task){task.expirationHandler=nil;[task setTaskCompletedWithSuccess:success];}
+    if(wasLegacy)[self stopLegacyAudio];
+    else if(task){task.expirationHandler=nil;[task setTaskCompletedWithSuccess:success];}
     else if(identifier)[scheduler cancelTaskRequestWithIdentifier:identifier];
     for(id proto in pauses){
         if([proto respondsToSelector:NSSelectorFromString(@"pause")])((void(*)(id,SEL))objc_msgSend)(proto,NSSelectorFromString(@"pause"));
@@ -324,7 +432,10 @@ static void Notice(UIViewController *host,NSString *message) {
         @synchronized(self){if(![taskIdentifier isEqualToString:identifier])return;}
         if(!total){[self finish:NO reason:L(@"تعذر معرفة حجم الملف",@"File size unavailable")];return;}
         CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
-        if(!activeTask&&now-submittedAt>25){[self finish:NO reason:L(@"لم يسمح النظام بالمهمة",@"System did not grant task")];return;}
+        if(legacyMode && (!legacyPlayer.isPlaying || ![self legacySessionMatches])){
+            [self finish:NO reason:L(@"توقف الصوت الصامت",@"Silent audio stopped")];return;
+        }
+        if(!legacyMode&&!activeTask&&now-submittedAt>25){[self finish:NO reason:L(@"لم يسمح النظام بالمهمة",@"System did not grant task")];return;}
         if(received>lastProgress){lastProgress=received;lastProgressAt=now;}
         if(activeTask){
             NSProgress *p=activeTask.progress;
@@ -336,7 +447,7 @@ static void Notice(UIViewController *host,NSString *message) {
 }
 
 + (void)start:(NSString *)token host:(UIViewController *)host {
-    if(![self supported] || !AllowedIdentifier()){Notice(host,L(@"تحتاج نسخة IPA مجهزة لصلاحيات التحميل بالخلفية و iOS 26.",@"Requires iOS 26 and the prepared IPA Info.plist."));return;}
+    if(![self canStart]){Notice(host,[self status]);return;}
     if(UIApplication.sharedApplication.applicationState!=UIApplicationStateActive){Notice(host,L(@"افتح التطبيق أولاً.",@"Open the app first."));return;}
     NSDictionary *meta; uint64_t bytes;
     @synchronized(self){
@@ -345,6 +456,20 @@ static void Notice(UIViewController *host,NSString *message) {
     }
     uint64_t total=[meta[@"size"] unsignedLongLongValue];
     if(!total||bytes>=total){Notice(host,L(@"ابدأ تحميل ملف أولاً.",@"Start a file download first."));return;}
+    if(!UsesSystemTask()) {
+        NSError *error=nil;
+        @synchronized(self){
+            selectedToken=token; taskIdentifier=[@"legacy." stringByAppendingString:NSUUID.UUID.UUIDString];
+            activeTask=nil; legacyMode=YES; submittedAt=lastProgressAt=CFAbsoluteTimeGetCurrent();lastProgress=bytes;lastStatus=nil;
+        }
+        if(![self startLegacyAudio:&error]){
+            [self finish:NO reason:L(@"تعذر تشغيل الصوت الصامت",@"Could not start silent audio")];
+            Notice(host,error.localizedDescription ?: L(@"تعذر تشغيل الصوت الصامت. أنهِ المكالمة أو تشغيل الصوت المتعارض أولاً.",@"Cannot start silent audio. End conflicting playback or call first."));return;
+        }
+        [self startTimer]; Changed();
+        Notice(host,L(@"بدأ الصوت الصامت. يمكنك مغادرة التطبيق؛ الطريقة تجريبية وقد يوقفها النظام.",@"Silent audio started. You can leave the app; this experimental method may be stopped by iOS."));
+        return;
+    }
     Class cls=NSClassFromString(@"BGTaskScheduler");
     Class requestClass=NSClassFromString(@"BGContinuedProcessingTaskRequest");
     scheduler=[(Class<KiraTaskSchedulerAPI>)cls sharedScheduler];
@@ -371,31 +496,31 @@ static void Notice(UIViewController *host,NSString *message) {
     if(!registered){Notice(host,L(@"تعذر تسجيل مهمة التحميل.",@"Could not register background task."));return;}
     id<KiraTaskRequestAPI> request = nil;
     NSError *error=nil; BOOL accepted=NO;
-    @synchronized(self){selectedToken=token;taskIdentifier=identifier;activeTask=nil;submittedAt=lastProgressAt=CFAbsoluteTimeGetCurrent();lastProgress=bytes;lastStatus=nil;}
+    @synchronized(self){selectedToken=token;taskIdentifier=identifier;activeTask=nil;legacyMode=NO;submittedAt=lastProgressAt=CFAbsoluteTimeGetCurrent();lastProgress=bytes;lastStatus=nil;}
     @try{
         request=[(id<KiraTaskRequestAPI>)[requestClass alloc] initWithIdentifier:identifier title:L(@"تحميل الملف",@"Downloading file") subtitle:meta[@"name"]];
         if(request)accepted=[scheduler submitTaskRequest:request error:&error];
     }@catch(__unused NSException *ex){}
     if(!accepted){[self finish:NO reason:L(@"رفض النظام بدء المهمة",@"System declined background task")];Notice(host,error.localizedDescription ?: L(@"رفض النظام بدء المهمة.",@"System declined the background task."));return;}
-    taskTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,trackerQueue);
-    dispatch_source_set_timer(taskTimer,dispatch_time(DISPATCH_TIME_NOW,0),2*NSEC_PER_SEC,NSEC_PER_SEC/4);
-    dispatch_source_set_event_handler(taskTimer,^{[self tick];});
-    dispatch_resume(taskTimer);
+    [self startTimer];
     Changed();
     Notice(host,L(@"تم إرسال المهمة للنظام. يمكنك مغادرة التطبيق بعد بدء المهمة.",@"Task submitted. You can leave the app once the task starts."));
 }
 
 + (NSString *)status {
-    if(![self supported])return L(@"يتطلب iOS 26 أو أحدث",@"Requires iOS 26 or later");
-    if(!AllowedIdentifier())return L(@"تحتاج نسخة IPA مجهزة",@"Requires prepared IPA");
+    if(![self supported])return L(@"يتطلب iOS 15 أو أحدث",@"Requires iOS 15 or later");
+    if(![self canStart])return UsesSystemTask()?L(@"تحتاج نسخة IPA مجهزة",@"Requires prepared IPA"):L(@"وضع الصوت بالخلفية غير متاح",@"Background audio unavailable");
     @synchronized(self){
-        if(taskIdentifier)return activeTask?L(@"قيد التحميل",@"Running"):L(@"بانتظار النظام",@"Waiting");
-        return lastStatus?:L(@"بدء مهمة",@"Start");
+        if(taskIdentifier){
+            if(legacyMode)return L(@"قيد التحميل (صامت)",@"Running (silent audio)");
+            return activeTask?L(@"قيد التحميل",@"Running"):L(@"بانتظار النظام",@"Waiting");
+        }
+        return lastStatus?: (UsesSystemTask()?L(@"بدء مهمة",@"Start"):L(@"صوت صامت (تجريبي)",@"Silent audio (experimental)"));
     }
 }
 + (void)showOptions:(UIViewController *)host {
     if(!host)return;
-    if(![self supported]||!AllowedIdentifier()){Notice(host,L(@"تحتاج iOS 26 ونسخة IPA مهيأة.",@"Requires iOS 26 and the prepared IPA."));return;}
+    if(![self canStart]){Notice(host,[self status]);return;}
     @synchronized(self){
         if(taskIdentifier){
             UIAlertController *a=[UIAlertController alertControllerWithTitle:L(@"تحميل بالخلفية",@"Background download") message:L(@"إيقاف مهمة الخلفية الحالية؟",@"Stop the current background task?") preferredStyle:UIAlertControllerStyleAlert];
@@ -415,7 +540,7 @@ static void Notice(UIViewController *host,NSString *message) {
     }
     [choices sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b){return [b[@"last"] compare:a[@"last"]];}];
     if(!choices.count){Notice(host,L(@"ابدأ تحميل ملف داخل المحادثة ثم ارجع لهذا الخيار. تأكد من استخدام محرك MTProto المعتاد.",@"Start a file download in a chat, then return here. Use the standard MTProto engine."));return;}
-    UIAlertController *a=[UIAlertController alertControllerWithTitle:L(@"اختيار الملف",@"Choose file") message:L(@"اختر التنزيل الذي تريد استمراره في الخلفية.",@"Choose the download to continue in the background.") preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *a=[UIAlertController alertControllerWithTitle:L(@"اختيار الملف",@"Choose file") message:UsesSystemTask()?L(@"اختر التنزيل الذي تريد استمراره في الخلفية.",@"Choose the download to continue in the background."):L(@"اختر التنزيل لتشغيل صوت صامت تجريبي أثناء التحميل.",@"Choose the download to use experimental silent audio.") preferredStyle:UIAlertControllerStyleAlert];
     for(NSDictionary *choice in [choices subarrayWithRange:NSMakeRange(0,MIN(choices.count,(NSUInteger)8))]){
         NSString *token=choice[@"token"];
         NSString *title=[NSString stringWithFormat:@"%@ (%@)",choice[@"name"],[NSByteCountFormatter stringFromByteCount:[choice[@"size"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile]];
