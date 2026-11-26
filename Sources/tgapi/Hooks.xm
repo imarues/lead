@@ -1,4 +1,5 @@
 #import "Headers.h"
+#import "Downloads/KiraDownload26.h"
 #include <zlib.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -241,12 +242,23 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
     objc_setAssociatedObject(self, &kLeadPromoParserKey, responseParser, OBJC_ASSOCIATION_COPY_NONATOMIC);
   }
 
+  NSString *downloadToken = (functionID == kUploadGetFile || functionID == kUploadGetCdnFile)
+      ? [KiraDownload26 tokenForPayload:payload functionID:functionID] : nil;
   id (^hooked_block)(NSData *) = ^(NSData *inputData) {
     // File chunks hold nothing to patch; don't copy and scan up to 1 MB per part.
     BOOL inExtension = LeadIsNotificationExtensionProcess();
     if (functionID == kUploadGetFile || functionID == kUploadGetCdnFile ||
         (inExtension && inputData.length > kLeadExtensionPatchLimit)) {
-      return responseParser(inputData);
+      id result = responseParser(inputData);
+      if (!inExtension && result && downloadToken) {
+        [KiraDownload26 receivedResponse:inputData forToken:downloadToken payload:payload functionID:functionID];
+      }
+      return result;
+    }
+    if (!inExtension && [KiraDownload26 supported]) {
+      Class observer = NSClassFromString(@"KiraDownload26Metadata");
+      SEL selector = NSSelectorFromString(@"observeResponse:");
+      if ([observer respondsToSelector:selector]) ((void (*)(id, SEL, id))objc_msgSend)(observer, selector, inputData);
     }
 
     NSNumber *functionIDNumber = [NSNumber numberWithUnsignedInt:functionID];
@@ -373,6 +385,11 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
         // Manager which handles requests
         %hook MTRequestMessageService
 
+- (void)mtProtoDidAddService:(id)proto {
+  %orig(proto);
+  if (!LeadIsNotificationExtensionProcess()) [KiraDownload26 associateService:self withProto:proto];
+}
+
 - (void)removeRequestByInternalId:(id)internalId askForReconnectionOnDrop:(bool)reconnect {
   BOOL cancelled = NO;
   if (internalId) {
@@ -398,6 +415,8 @@ extern "C" NSData *LeadDiscoveryUnpack(NSData *data);
   // File transfers have services of their own, on other data centers, and those can't
   // take account calls. Online status comes only from the account in use.
   int32_t requestFunction = request.functionID.intValue;
+  if (requestFunction == kUploadGetFile || requestFunction == kUploadGetCdnFile)
+    [KiraDownload26 noteRequest:request.payload functionID:requestFunction service:self];
   uint32_t callFunction = (uint32_t)requestFunction;
   BOOL startCall = LeadIsCallStartRPC(callFunction, request.metadata);
   // Scheduled group creation is not a live join.
@@ -779,6 +798,16 @@ static NSData *stripIosRestrictionRules(NSData *data) {
 // ============================================================
 %hook MTProto
 
+- (void)pause {
+  if (!LeadIsNotificationExtensionProcess() && [KiraDownload26 deferPause:self]) return;
+  %orig;
+}
+
+- (void)resume {
+  if (!LeadIsNotificationExtensionProcess()) [KiraDownload26 noteResume:self];
+  %orig;
+}
+
     - (id)parseMessage : (NSData *)data {
   BOOL inExtension = LeadIsNotificationExtensionProcess();
   if (inExtension && data.length > kLeadExtensionPatchLimit) {
@@ -917,6 +946,8 @@ extern "C" BOOL LeadSendRawRequest(NSData *payload, void (^done)(NSData *result,
   if (inExtension) {
     return;
   }
+
+  [KiraDownload26 install];
 
   // The extension reads what the app last wrote, and hands back what it saw.
   void (^sync)(NSNotification *) = ^(__unused NSNotification *note) {

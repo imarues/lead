@@ -4,6 +4,7 @@
 #import "Icons.h"
 #import "../Calls/LeadCallRecording.h"
 #import "../Headers.h"
+#import "../Downloads/KiraDownload26.h"
 
 #pragma mark - Model
 
@@ -555,6 +556,12 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
   ]];
   bannerSection.footerKey = @"UI_BANNER_FOOTER";
 
+  LeadRow *backgroundDownload = [LeadRow link:@"UI_BACKGROUND_DOWNLOAD26" symbol:@"arrow.down.circle" tap:^(UIViewController *host) {
+    [KiraDownload26 showOptions:host];
+  }];
+  backgroundDownload.subtitleKey = @"UI_BACKGROUND_DOWNLOAD26_HINT";
+  backgroundDownload.valueBlock = ^NSString * { return [KiraDownload26 status]; };
+
   LeadPage *messages = [LeadPage new];
   messages.titleKey = @"UI_PAGE_MESSAGES";
   messages.symbol = @"bubble.left.and.bubble.right";
@@ -566,6 +573,7 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
       messageLog,
     ]],
     bannerSection,
+    [LeadSection title:nil rows:@[ backgroundDownload ]],
     [LeadSection title:nil rows:@[
       [LeadRow toggle:kAntiSelfDestruct title:@"ANTI_SELF_DESTRUCT_TITLE" subtitle:@"ANTI_SELF_DESTRUCT_SUBTITLE" symbol:@"flame"],
       [LeadRow toggle:kAntiAutoDelete title:@"ANTI_AUTO_DELETE_TITLE" subtitle:@"ANTI_AUTO_DELETE_SUBTITLE" symbol:@"clock.arrow.circlepath"],

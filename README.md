@@ -62,6 +62,7 @@
     <td valign="top" width="50%">
 
 ### 💬 Messages
+- **Continue downloading in background (iOS 26+)** — start a document download, open Messages, select the active file; the system schedules a continued-processing task and shows progress. Requires the prepared IPA and MtProtoKit, not Rust. Experimental; no silent audio. See [background downloads](README_BACKGROUND_DOWNLOAD26.md).
 - **Anti-Revoke** — deleted messages stay, marked with 🗑 and the exact time
 - **Edit history** — ✏️ on edited messages, every version with a diff
 - **Message log** — all deleted & edited messages in one place

@@ -173,6 +173,29 @@ def bundle_executable(bundle):
     return os.path.join(bundle, info['CFBundleExecutable']), info
 
 
+def prepare_background_download_info(app):
+    """Register a separate wildcard for user-requested iOS 26 download tasks."""
+    path = os.path.join(app, 'Info.plist')
+    with open(path, 'rb') as f:
+        raw = f.read()
+    info = plistlib.loads(raw)
+    bundle_id = info.get('CFBundleIdentifier')
+    if not bundle_id:
+        raise InjectError('missing CFBundleIdentifier')
+    identifiers = list(info.get('BGTaskSchedulerPermittedIdentifiers', []))
+    value = bundle_id + '.kira.download.*'
+    if value not in identifiers:
+        identifiers.append(value)
+    info['BGTaskSchedulerPermittedIdentifiers'] = identifiers
+    modes = list(info.get('UIBackgroundModes', []))
+    if 'processing' not in modes:
+        modes.append('processing')
+    info['UIBackgroundModes'] = modes
+    with open(path, 'wb') as f:
+        plistlib.dump(info, f, fmt=plistlib.FMT_BINARY if raw.startswith(b'bplist') else plistlib.FMT_XML, sort_keys=False)
+    print('  registered ' + value)
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     default_dylib = os.path.join(here, '..', '.theos', '_', 'Library', 'MobileSubstrate', 'DynamicLibraries', 'Kira.dylib')
@@ -207,6 +230,7 @@ def main():
 
         executable, _ = bundle_executable(app)
         print('%s:' % apps[0])
+        prepare_background_download_info(app)
         for note in patch_binary(executable, '@executable_path/Frameworks/Kira.dylib', args.remove):
             print('  ' + note)
         for extra in args.extra:

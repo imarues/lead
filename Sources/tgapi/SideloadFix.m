@@ -289,6 +289,16 @@ static NSURL *LeadResolveContainer(id self, SEL _cmd, NSString *group) {
   return client;
 }
 
+static void KiraObserveDownloadContainer(NSURL *url) {
+  if (!url || LeadIsAppExtension()) return;
+  Class tracker = NSClassFromString(@"KiraDownload26");
+  SEL selector = NSSelectorFromString(@"registerMediaRoot:");
+  if ([tracker respondsToSelector:selector]) {
+    IMP imp = [tracker methodForSelector:selector];
+    ((void (*)(id, SEL, NSString *))imp)(tracker, selector, url.path);
+  }
+}
+
 static NSURL *LeadContainerURL(id self, SEL _cmd, NSString *group) {
   if (![group isKindOfClass:[NSString class]] || group.length == 0) {
     return sOrigContainerURL(self, _cmd, group);
@@ -296,13 +306,14 @@ static NSURL *LeadContainerURL(id self, SEL _cmd, NSString *group) {
   os_unfair_lock_lock(&sResolvedLock);
   NSURL *cached = sResolvedGroups[group];
   os_unfair_lock_unlock(&sResolvedLock);
-  if (cached) return cached;
+  if (cached) { KiraObserveDownloadContainer(cached); return cached; }
 
   NSURL *url = LeadResolveContainer(self, _cmd, group);
   if (url) {
     os_unfair_lock_lock(&sResolvedLock);
     sResolvedGroups[group] = url;
     os_unfair_lock_unlock(&sResolvedLock);
+    KiraObserveDownloadContainer(url);
   }
   return url;
 }
