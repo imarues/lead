@@ -1,0 +1,26 @@
+name: Private Call Relay Test
+on:
+  push:
+    branches: [private-call-test]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile standalone private-call transport test
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -isysroot "$SDK" -target arm64-apple-ios14.0 -fno-objc-arc -fblocks -std=gnu11 -dynamiclib -O2 -Wall -Wextra -framework Foundation -framework UIKit -Wl,-install_name,@rpath/PrivateCallRelayTest.dylib -o PrivateCallRelayTest.dylib PrivateCallRelayTest.m
+          file PrivateCallRelayTest.dylib
+          xcrun otool -l PrivateCallRelayTest.dylib | grep -A4 LC_BUILD_VERSION
+          shasum -a 256 PrivateCallRelayTest.dylib > SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PrivateCallRelayTest
+          path: |
+            PrivateCallRelayTest.dylib
+            SHA256.txt
+          if-no-files-found: error

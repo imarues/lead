@@ -1,1 +1,0 @@
-{ Filter = { Bundles = ( "ph.telegra.Telegraph", "app.swiftgram.ios", "com.seastar.turrit", "xyz.nextalone.nagram" ); }; }
