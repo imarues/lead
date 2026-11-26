@@ -19,10 +19,15 @@ concurrency:
 jobs:
     build:
         # Intel runner pool has separate capacity from Apple Silicon.
-        # Theos still cross-compiles arm64 and arm64e iOS dylibs.
+        # The included Go archive targets arm64, as in the experimental build.
         runs-on: macos-15-intel
         steps:
             - uses: actions/checkout@v4
+
+            - uses: actions/setup-go@v5
+              with:
+                go-version: '1.24.x'
+                cache: false
 
             - name: Set up Theos
               uses: waruhachi/theos-action@v2.4.6
@@ -36,9 +41,23 @@ jobs:
             - name: Install dpkg
               run: brew install dpkg
 
-            - name: Build packages
+            - name: Test group ICE candidate and UDP relay logic
+              working-directory: tools/warp
+              run: go test -mod=mod -v ./...
+
+            - name: Compile userspace WireGuard archive
+              run: bash tools/warp/build.sh
+
+            - name: Build packages with call connection bypass included
               shell: bash
-              run: make clean package FINALPACKAGE=1
+              run: make clean package FINALPACKAGE=1 LEAD_WARP_ARCHIVE="$PWD/tools/warp/build/libLeadWarp.a"
+
+            - name: Verify the integrated call tunnel
+              shell: bash
+              run: |
+                  test -s packages/Kira.dylib
+                  nm packages/Kira.dylib > "${RUNNER_TEMP}/kira-symbols.txt"
+                  grep -q 'LeadWarpStart' "${RUNNER_TEMP}/kira-symbols.txt"
 
             - name: Upload packages
               uses: actions/upload-artifact@v4

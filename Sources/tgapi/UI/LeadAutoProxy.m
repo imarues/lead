@@ -36,6 +36,8 @@ static NSString *const kLeadAutoProxyConfigURLDefault = @"https://ipastore.pages
 // Offline bootstrap, identical to the published list at release time.
 static NSArray<NSString *> *LeadProxyBuiltInLinks(void) {
   return @[
+    @"tg://proxy?server=mtproto.online&port=443&secret=7hOeDuNhUMHqO_KZeWWGtUV3d3cudnRiLnJ1",
+    @"tg://proxy?server=iq.edu2iq.net&port=443&secret=a4d9c2e8b1f6037ea5c8d4b29f1e6a0c",
     @"tg://proxy?server=91.98.97.225&port=8443&secret=79e344818749bd7ac519130220c25d09",
     @"tg://proxy?server=termsnal.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09",
     @"tg://proxy?server=nocloudnew.co.uk.&port=8443&secret=79e344818749bd7ac519130220c25d09"
@@ -397,7 +399,7 @@ static BOOL LeadProxyActivate(NSString *link) {
     sLeadProxyInfo = p;
   }
   [[NSUserDefaults standardUserDefaults] setObject:canonical forKey:kAutoProxyActive];
-  NSLog(@"[Kira] AutoProxy: using %@:%@", p[@"server"], p[@"port"]);
+  NSLog(@"[Kira] AutoProxy: active server updated");
   return YES;
 }
 
@@ -449,12 +451,26 @@ void LeadAutoProxyRememberContext(id context) {
   }
 }
 
+// The name is the permanent list position, not the order of the reachability results.
+// Keep the actual host, port and token internal; never use them as UI text.
+static NSString *LeadProxyDisplayName(NSUInteger index) {
+  NSArray<NSString *> *ordinals = @[
+    @"الأول", @"الثاني", @"الثالث", @"الرابع", @"الخامس", @"السادس",
+    @"السابع", @"الثامن", @"التاسع", @"العاشر", @"الحادي عشر", @"الثاني عشر",
+    @"الثالث عشر", @"الرابع عشر", @"الخامس عشر", @"السادس عشر", @"السابع عشر",
+    @"الثامن عشر", @"التاسع عشر", @"العشرون"
+  ];
+  if (index >= ordinals.count) return @"الخادم غير المدرج";
+  return [@"الخادم " stringByAppendingString:ordinals[index]];
+}
+
 NSString *LeadAutoProxySummary(void) {
-  @synchronized(LeadProxyLock()) {
-    NSDictionary *p = sLeadCallProxyInfo ?: sLeadProxyInfo;
-    if (!p) return nil;
-    return [NSString stringWithFormat:@"%@%@:%@", sLeadCallProxyInfo ? @"Call · " : @"", p[@"server"], p[@"port"]];
-  }
+  NSString *active;
+  @synchronized(LeadProxyLock()) { active = sLeadProxyLink; }
+  if (!active.length) return nil;
+  NSArray<NSString *> *links = [[NSUserDefaults standardUserDefaults] arrayForKey:kAutoProxyList];
+  if (!links.count) links = LeadProxyBuiltInLinks();
+  return LeadProxyDisplayName([links indexOfObject:active]);
 }
 
 // Pushes the current choice into every live MTContext so open connections are rebuilt.

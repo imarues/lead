@@ -745,7 +745,7 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     LeadAutoProxyRefresh(^(NSString *summary, BOOL reachable) {
       proxyUpdating = NO;
       if (summary.length && reachable) {
-        [LeadToast showText:summary symbol:@"checkmark" inView:host.view];
+        [LeadToast showText:[summary stringByAppendingString:@"-كيرا بلس"] symbol:@"checkmark" inView:host.view];
       } else {
         [LeadToast showText:LeadL(@"UI_AUTO_PROXY_FAILED") symbol:@"exclamationmark.circle" inView:host.view];
       }
@@ -767,7 +767,8 @@ NSArray<LeadPage *> *LeadFeaturePages(void) {
     [LeadToast showText:LeadL(@"UI_AUTO_PROXY_CHECKING") symbol:@"arrow.clockwise" inView:host.view];
     LeadAutoProxyRotate(^(NSString *summary, BOOL reachable) {
       proxyUpdating = NO;
-      [LeadToast showText:reachable ? (summary ?: @"") : LeadL(@"UI_AUTO_PROXY_NO_ALTERNATIVE") symbol:reachable ? @"checkmark" : @"exclamationmark.circle" inView:host.view];
+      BOOL connected = reachable && summary.length > 0;
+      [LeadToast showText:connected ? [summary stringByAppendingString:@"-كيرا بلس"] : LeadL(@"UI_AUTO_PROXY_NO_ALTERNATIVE") symbol:connected ? @"checkmark" : @"exclamationmark.circle" inView:host.view];
       if ([host isKindOfClass:UITableViewController.class]) [[(UITableViewController *)host tableView] reloadData];
     });
   }];

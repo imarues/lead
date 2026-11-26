@@ -1,12 +1,6 @@
 name: WARP experimental build
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'tools/warp/**'
-      - 'Sources/**'
-      - 'Makefile'
-      - '.github/workflows/warp-experimental.yml'
+  # The main Build workflow now includes the call tunnel; retain manual builds only.
   workflow_dispatch:
 permissions:
   contents: read

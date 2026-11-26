@@ -202,6 +202,8 @@ static void KiraWarpMaintain(void) {
 }
 static void KiraWarpInstall(void) {
   if ([NSBundle.mainBundle.bundlePath.pathExtension isEqualToString:@"appex"]) return;
+  // Opt in only: a fresh installation must not start the tunnel automatically.
+  [[NSUserDefaults standardUserDefaults] registerDefaults:@{kKiraWarpEnabled: @NO}];
   dispatch_async(dispatch_get_main_queue(), ^{
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
       @synchronized([NSUserDefaults class]) { sWarpLastHealth = 0; }

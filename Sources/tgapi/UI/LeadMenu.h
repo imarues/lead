@@ -65,7 +65,7 @@ void LeadOpenTelegramURL(NSString *urlString);
 // Turns t.me/proxy, telegram.me/proxy, tg://proxy and tg://socks links into one canonical
 // tg://… form; nil when the link is not a usable proxy.
 NSString *LeadAutoProxyNormalizedLink(NSString *link);
-// "95.217.193.214:443" for the proxy in use, nil when none.
+// Anonymous ordinal name from the configured proxy list, nil when none.
 NSString *LeadAutoProxySummary(void);
 // Host of the JSON list's URL, for the menu.
 NSString *LeadAutoProxyConfigHost(void);
